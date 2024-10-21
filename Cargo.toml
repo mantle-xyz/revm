@@ -22,6 +22,7 @@ members = [
 
     # variants
     "crates/optimism",
+    "crates/mantle",
 
     # examples
     "examples/block_traces",
