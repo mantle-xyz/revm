@@ -419,13 +419,12 @@ pub fn end<EvmWiringT: MantleWiring, SPEC: MantleSpec>(
             // limit of the transaction. pre-regolith, it is the gas limit
             // of the transaction for non system transactions and 0 for system
             // transactions.
-            let gas_used = if SPEC::mantle_enabled(MantleSpecId::REGOLITH)
-                || !tx.is_system_transaction()
-            {
-                tx.gas_limit()
-            } else {
-                0
-            };
+            let gas_used =
+                if SPEC::mantle_enabled(MantleSpecId::REGOLITH) || !tx.is_system_transaction() {
+                    tx.gas_limit()
+                } else {
+                    0
+                };
 
             Ok(ResultAndState {
                 result: ExecutionResult::Halt {

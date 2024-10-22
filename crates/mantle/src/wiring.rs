@@ -1,7 +1,7 @@
 use crate::{
     mantle_handle_register,
     transaction::{OpTransaction, OpTransactionType, OpTxTrait},
-    L1BlockInfo, OpTransactionError, MantleHaltReason, MantleSpecId,
+    L1BlockInfo, MantleHaltReason, MantleSpecId, OpTransactionError,
 };
 use core::marker::PhantomData;
 use revm::{

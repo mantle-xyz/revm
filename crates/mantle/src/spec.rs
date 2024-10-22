@@ -76,9 +76,7 @@ impl MantleSpecId {
             MantleSpecId::LONDON => SpecId::LONDON,
             MantleSpecId::ARROW_GLACIER => SpecId::ARROW_GLACIER,
             MantleSpecId::GRAY_GLACIER => SpecId::GRAY_GLACIER,
-            MantleSpecId::MERGE | MantleSpecId::BEDROCK | MantleSpecId::REGOLITH => {
-                SpecId::MERGE
-            }
+            MantleSpecId::MERGE | MantleSpecId::BEDROCK | MantleSpecId::REGOLITH => SpecId::MERGE,
             MantleSpecId::SHANGHAI | MantleSpecId::CANYON => SpecId::SHANGHAI,
             MantleSpecId::CANCUN
             | MantleSpecId::ECOTONE
