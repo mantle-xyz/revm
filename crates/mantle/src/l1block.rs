@@ -69,7 +69,7 @@ pub struct L1BlockInfo {
     /// The current L1 blob base fee scalar. None if Ecotone is not activated.
     pub l1_blob_base_fee_scalar: Option<U256>,
     /// The current token ratio.
-    pub token_ratio: U256,
+    pub token_ratio: Option<U256>,
     /// True if Ecotone is activated, but the L1 fee scalars have not yet been set.
     pub(crate) empty_scalars: bool,
 }
@@ -98,7 +98,7 @@ impl L1BlockInfo {
                 l1_base_fee,
                 l1_fee_overhead: Some(l1_fee_overhead),
                 l1_base_fee_scalar: l1_fee_scalar,
-                token_ratio,
+                token_ratio: Some(token_ratio),
                 ..Default::default()
             })
         } else {
@@ -131,7 +131,7 @@ impl L1BlockInfo {
                 l1_blob_base_fee_scalar: Some(l1_blob_base_fee_scalar),
                 empty_scalars,
                 l1_fee_overhead,
-                token_ratio,
+                token_ratio: Some(token_ratio),
             })
         }
     }
@@ -199,11 +199,12 @@ impl L1BlockInfo {
     /// Calculate the gas cost of a transaction based on L1 block data posted on L2, pre-Ecotone.
     fn calculate_tx_l1_cost_bedrock(&self, input: &[u8], spec_id: MantleSpecId) -> U256 {
         let rollup_data_gas_cost = self.data_gas(input, spec_id);
+
         rollup_data_gas_cost
             .saturating_add(self.l1_fee_overhead.unwrap_or_default())
             .saturating_mul(self.l1_base_fee)
             .saturating_mul(self.l1_base_fee_scalar)
-            .saturating_mul(self.token_ratio)
+            .saturating_mul(self.token_ratio.unwrap_or(U256::from(1)))
             .wrapping_div(U256::from(1_000_000))
     }
 
@@ -272,7 +273,7 @@ mod tests {
             l1_base_fee: U256::from(1_000_000),
             l1_fee_overhead: Some(U256::from(1_000_000)),
             l1_base_fee_scalar: U256::from(1_000_000),
-            token_ratio: U256::from(1_000_000),
+            token_ratio: Some(U256::from(1_000_000)),
             ..Default::default()
         };
 
@@ -303,7 +304,7 @@ mod tests {
             l1_base_fee: U256::from(1_000_000),
             l1_fee_overhead: Some(U256::from(1_000_000)),
             l1_base_fee_scalar: U256::from(1_000_000),
-            token_ratio: U256::from(1_000_000),
+            token_ratio: Some(U256::from(1_000_000)),
             ..Default::default()
         };
 
@@ -334,7 +335,7 @@ mod tests {
             l1_base_fee: U256::from(1_000),
             l1_fee_overhead: Some(U256::from(1_000)),
             l1_base_fee_scalar: U256::from(1_000),
-            token_ratio: U256::from(1_000),
+            token_ratio: Some(U256::from(1_000)),
             ..Default::default()
         };
 
@@ -361,7 +362,7 @@ mod tests {
             l1_blob_base_fee: Some(U256::from(1_000)),
             l1_blob_base_fee_scalar: Some(U256::from(1_000)),
             l1_fee_overhead: Some(U256::from(1_000)),
-            token_ratio: U256::from(1_000),
+            token_ratio: Some(U256::from(1_000)),
             ..Default::default()
         };
 
@@ -411,7 +412,7 @@ mod tests {
             l1_base_fee_scalar: U256::from_be_bytes(hex!(
                 "0000000000000000000000000000000000000000000000000000000000002710"
             )), // 10,000
-            token_ratio: U256::from(4368),
+            token_ratio: Some(U256::from(4368)),
             ..Default::default()
         };
 
@@ -455,7 +456,7 @@ mod tests {
             l1_base_fee_scalar: U256::from_be_bytes(hex!(
                 "0000000000000000000000000000000000000000000000000000000000002710"
             )), // 10,000
-            token_ratio: U256::from(4359),
+            token_ratio: Some(U256::from(4359)),
             ..Default::default()
         };
 
@@ -478,7 +479,7 @@ mod tests {
         let l1_fee = l1_block_info.calculate_tx_l1_cost(TX, MantleSpecId::CANCUN);
         assert_eq!(l1_fee, expected_l1_fee)
     }
-    
+
     #[test]
     fn calculate_tx_l1_cost_ecotone() {
         // rig
