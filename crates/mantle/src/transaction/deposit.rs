@@ -11,6 +11,10 @@ pub trait DepositTransaction: CommonTxFields {
     fn mint(&self) -> Option<u128>;
 
     fn is_system_transaction(&self) -> bool;
+
+    fn eth_value(&self) -> Option<u128>;
+
+    fn eth_tx_hash(&self) -> Option<u128>;
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
@@ -23,9 +27,9 @@ pub struct TxDeposit {
     /// The address of the recipient account, or the null (zero-length) address if the deposited
     /// transaction is a contract creation.
     pub to: TxKind,
-    /// The ETH value to mint on L2.
+    /// The Native Token (MNT) value to mint on L2.
     pub mint: Option<u128>,
-    ///  The ETH value to send to the recipient account.
+    ///  The Native Token (MNT) value to send to the recipient account.
     pub value: U256,
     /// The gas limit for the L2 transaction.
     pub gas_limit: u64,
@@ -34,6 +38,10 @@ pub struct TxDeposit {
     /// Input has two uses depending if transaction is Create or Call (if `to` field is None or
     /// Some).
     pub input: Bytes,
+    /// EthValue means L2 BVM_ETH mint tag, nil means that there is no need to mint BVM_ETH
+    pub eth_value: Option<u128>,
+    /// EthTxValue means L2 BVM_ETH tx tag, nil means that there is no need to transfer BVM_ETH to msg.To.
+    pub eth_tx_hash: Option<u128>,
 }
 
 impl CommonTxFields for TxDeposit {
@@ -73,5 +81,13 @@ impl DepositTransaction for TxDeposit {
 
     fn is_system_transaction(&self) -> bool {
         self.is_system_transaction
+    }
+
+    fn eth_value(&self) -> Option<u128> {
+        self.eth_value
+    }
+
+    fn eth_tx_hash(&self) -> Option<u128> {
+        self.eth_tx_hash
     }
 }

@@ -1,5 +1,6 @@
 //! Handler related to Mantle chain
 
+use crate::BASE_FEE_RECIPIENT;
 use crate::{
     mantle_spec_to_generic,
     transaction::{
@@ -8,7 +9,6 @@ use crate::{
     wiring::{MantleContextTrait, MantleWiring},
     MantleHaltReason, MantleSpec, MantleSpecId,
 };
-use crate::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT};
 use core::ops::Mul;
 use revm::{
     database_interface::Database,
@@ -16,7 +16,7 @@ use revm::{
         mainnet::{self, deduct_caller_inner, validate_block_env, validate_tx_env},
         register::EvmHandler,
     },
-    interpreter::{return_ok, return_revert, Gas},
+    interpreter::{as_u64_saturated, return_ok, return_revert, Gas},
     precompile::{secp256r1, PrecompileSpecId},
     primitives::{HashMap, U256},
     state::Account,
@@ -43,10 +43,10 @@ where
         // Validate transaction against state.
         handler.validation.tx_against_state =
             Arc::new(validate_tx_against_state::<EvmWiringT, SPEC>);
+        // Validate initial transaction gas, also load L1 data
+        handler.validation.initial_tx_gas = Arc::new(validate_initial_tx_gas::<EvmWiringT, SPEC>);
         // Load additional precompiles for the given chain spec.
         handler.pre_execution.load_precompiles = Arc::new(load_precompiles::<EvmWiringT, SPEC>);
-        // load l1 data
-        handler.pre_execution.load_accounts = Arc::new(load_accounts::<EvmWiringT, SPEC>);
         // An estimated batch cost is charged from the caller and added to L1 Fee Vault.
         handler.pre_execution.deduct_caller = Arc::new(deduct_caller::<EvmWiringT, SPEC>);
         // Refund is calculated differently then mainnet.
@@ -54,6 +54,7 @@ where
         handler.post_execution.refund = Arc::new(refund::<EvmWiringT, SPEC>);
         handler.post_execution.reward_beneficiary =
             Arc::new(reward_beneficiary::<EvmWiringT, SPEC>);
+        handler.post_execution.reimburse_caller = Arc::new(reimburse_caller::<EvmWiringT, SPEC>);
         // In case of halt of deposit transaction return Error.
         handler.post_execution.output = Arc::new(output::<EvmWiringT, SPEC>);
         handler.post_execution.end = Arc::new(end::<EvmWiringT, SPEC>);
@@ -99,6 +100,35 @@ pub fn validate_tx_against_state<EvmWiringT: MantleWiring, SPEC: MantleSpec>(
         return Ok(());
     }
     mainnet::validate_tx_against_state::<EvmWiringT, SPEC>(context)
+}
+
+/// Validate initial transaction gas.
+pub fn validate_initial_tx_gas<EvmWiringT: MantleWiring, SPEC: MantleSpec>(
+    context: &mut Context<EvmWiringT>,
+) -> EVMResultGeneric<u64, EvmWiringT>
+where
+    <EvmWiringT::Transaction as Transaction>::TransactionError: From<InvalidTransaction>,
+{
+    let mut initial_gas_spend = mainnet::validate_initial_tx_gas::<EvmWiringT, SPEC>(context)?;
+
+    // If the transaction is not a deposit transaction, it cannot be a system transaction.
+    if context.evm.env.tx.tx_type() != OpTransactionType::Deposit {
+        let l1_block_info =
+            super::L1BlockInfo::try_fetch(&mut context.evm.inner.db, SPEC::MANTLE_SPEC_ID)
+                .map_err(EVMError::Database)?;
+
+        // storage l1 block info for later use.
+        *context.evm.chain.l1_block_info_mut() = Some(l1_block_info.clone());
+
+        let toeken_ratio = l1_block_info.get_token_ratio();
+        initial_gas_spend = initial_gas_spend
+            .checked_mul(as_u64_saturated!(toeken_ratio))
+            .ok_or(EVMError::Transaction(
+                InvalidTransaction::CallGasCostMoreThanGasLimit.into(),
+            ))?;
+    }
+
+    Ok(initial_gas_spend)
 }
 
 /// Handle output of the transaction
@@ -213,25 +243,6 @@ pub fn load_precompiles<EvmWiringT: MantleWiring, SPEC: MantleSpec>(
     precompiles
 }
 
-/// Load account (make them warm) and l1 data from database.
-#[inline]
-pub fn load_accounts<EvmWiringT: MantleWiring, SPEC: MantleSpec>(
-    context: &mut Context<EvmWiringT>,
-) -> EVMResultGeneric<(), EvmWiringT> {
-    // the L1-cost fee is only computed for Mantle non-deposit transactions.
-
-    if context.evm.env.tx.tx_type() != OpTransactionType::Deposit {
-        let l1_block_info =
-            super::L1BlockInfo::try_fetch(&mut context.evm.inner.db, SPEC::MANTLE_SPEC_ID)
-                .map_err(EVMError::Database)?;
-
-        // storage l1 block info for later use.
-        *context.evm.chain.l1_block_info_mut() = Some(l1_block_info);
-    }
-
-    mainnet::load_accounts::<EvmWiringT, SPEC>(context)
-}
-
 /// Deduct max balance from caller
 #[inline]
 pub fn deduct_caller<EvmWiringT: MantleWiring, SPEC: MantleSpec>(
@@ -295,6 +306,36 @@ pub fn deduct_caller<EvmWiringT: MantleWiring, SPEC: MantleSpec>(
     Ok(())
 }
 
+#[inline]
+pub fn reimburse_caller<EvmWiringT: MantleWiring, SPEC: MantleSpec>(
+    context: &mut Context<EvmWiringT>,
+    gas: &Gas,
+) -> EVMResultGeneric<(), EvmWiringT> {
+    let caller = context.evm.env.tx.common_fields().caller();
+    let effective_gas_price = context.evm.env.effective_gas_price();
+
+    let token_ratio = context
+        .evm
+        .chain
+        .l1_block_info()
+        .expect("L1BlockInfo should be loaded")
+        .get_token_ratio();
+
+    // return balance of not spend gas.
+    let caller_account = context
+        .evm
+        .inner
+        .journaled_state
+        .load_account(caller, &mut context.evm.inner.db)
+        .map_err(EVMError::Database)?;
+
+    caller_account.data.info.balance = caller_account.data.info.balance.saturating_add(
+        effective_gas_price * U256::from(gas.remaining() + gas.refunded() as u64) * token_ratio,
+    );
+
+    Ok(())
+}
+
 /// Reward beneficiary with gas fee.
 #[inline]
 pub fn reward_beneficiary<EvmWiringT: MantleWiring, SPEC: MantleSpec>(
@@ -311,29 +352,29 @@ pub fn reward_beneficiary<EvmWiringT: MantleWiring, SPEC: MantleSpec>(
     if !is_deposit {
         // If the transaction is not a deposit transaction, fees are paid out
         // to both the Base Fee Vault as well as the L1 Fee Vault.
-        let l1_block_info = context
-            .evm
-            .chain
-            .l1_block_info()
-            .expect("L1BlockInfo should be loaded");
+        // let l1_block_info = context
+        //     .evm
+        //     .chain
+        //     .l1_block_info()
+        //     .expect("L1BlockInfo should be loaded");
 
-        let Some(enveloped_tx) = &context.evm.inner.env.tx.enveloped_tx() else {
-            return Err(EVMError::Custom(
-                "[MANTLE] Failed to load enveloped transaction.".into(),
-            ));
-        };
+        // let Some(enveloped_tx) = &context.evm.inner.env.tx.enveloped_tx() else {
+        //     return Err(EVMError::Custom(
+        //         "[MANTLE] Failed to load enveloped transaction.".into(),
+        //     ));
+        // };
 
-        let l1_cost = l1_block_info.calculate_tx_l1_cost(enveloped_tx, SPEC::MANTLE_SPEC_ID);
+        // let l1_cost = l1_block_info.calculate_tx_l1_cost(enveloped_tx, SPEC::MANTLE_SPEC_ID);
 
-        // Send the L1 cost of the transaction to the L1 Fee Vault.
-        let mut l1_fee_vault_account = context
-            .evm
-            .inner
-            .journaled_state
-            .load_account(L1_FEE_RECIPIENT, &mut context.evm.inner.db)
-            .map_err(EVMError::Database)?;
-        l1_fee_vault_account.mark_touch();
-        l1_fee_vault_account.info.balance += l1_cost;
+        // // Send the L1 cost of the transaction to the L1 Fee Vault.
+        // let mut l1_fee_vault_account = context
+        //     .evm
+        //     .inner
+        //     .journaled_state
+        //     .load_account(L1_FEE_RECIPIENT, &mut context.evm.inner.db)
+        //     .map_err(EVMError::Database)?;
+        // l1_fee_vault_account.mark_touch();
+        // l1_fee_vault_account.info.balance += l1_cost;
 
         // Send the base fee of the transaction to the Base Fee Vault.
         let mut base_fee_vault_account = context

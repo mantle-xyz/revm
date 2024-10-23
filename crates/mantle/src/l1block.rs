@@ -34,7 +34,8 @@ const ECOTONE_L1_FEE_SCALARS_SLOT: U256 = U256::from_limbs([3u64, 0, 0, 0]);
 const EMPTY_SCALARS: [u8; 8] = [0u8; 8];
 
 /// The address of L1 fee recipient.
-pub const L1_FEE_RECIPIENT: Address = address!("420000000000000000000000000000000000001A");
+/// Mantle does not use this address.
+// pub const L1_FEE_RECIPIENT: Address = address!("420000000000000000000000000000000000001A");
 
 /// The address of the base fee recipient.
 pub const BASE_FEE_RECIPIENT: Address = address!("4200000000000000000000000000000000000019");
@@ -204,7 +205,7 @@ impl L1BlockInfo {
             .saturating_add(self.l1_fee_overhead.unwrap_or_default())
             .saturating_mul(self.l1_base_fee)
             .saturating_mul(self.l1_base_fee_scalar)
-            .saturating_mul(self.token_ratio.unwrap_or(U256::from(1)))
+            .saturating_mul(self.get_token_ratio())
             .wrapping_div(U256::from(1_000_000))
     }
 
@@ -259,6 +260,10 @@ impl L1BlockInfo {
             .saturating_mul(self.l1_blob_base_fee_scalar.unwrap_or_default());
 
         calldata_cost_per_byte.saturating_add(blob_cost_per_byte)
+    }
+
+    pub fn get_token_ratio(&self) -> U256 {
+        self.token_ratio.unwrap_or(U256::from(1))
     }
 }
 
@@ -423,16 +428,16 @@ mod tests {
         // l1 gas used for tx and l1 fee for tx, from Mantle block scanner
         // <https://mantlescan.xyz/tx/0xa061114290fbe3c06550e61d5c9cb39c575bad277f3c6a2459446b90b2b02577>
         //
-        // TIPS: the Bedrock's l1GasUsed added the overhead, so we need to subtract it
-        // <https://github.com/ethereum-optimism/op-geth/blob/v1.101411.0/core/types/rollup_cost.go#L206>
-        // 6564 - 188 = 6376
-        let expected_l1_gas_used = U256::from(6376);
+        let expected_l1_gas_used = U256::from(6564);
         let expected_l1_fee = U256::from_be_bytes(hex!(
             "0000000000000000000000000000000000000000000000000007ef4bec40587e" // 223343420220019 wei
         ));
 
         // test
-        let gas_used = l1_block_info.data_gas(TX, MantleSpecId::CANCUN);
+        // TIPS: the Bedrock's l1GasUsed added the overhead, so we need to subtract it
+        // <https://github.com/ethereum-optimism/op-geth/blob/v1.101411.0/core/types/rollup_cost.go#L206>
+        let gas_used = l1_block_info.data_gas(TX, MantleSpecId::CANCUN)
+            + l1_block_info.l1_fee_overhead.unwrap_or_default();
         assert_eq!(gas_used, expected_l1_gas_used);
 
         let l1_fee = l1_block_info.calculate_tx_l1_cost(TX, MantleSpecId::CANCUN);
@@ -466,14 +471,14 @@ mod tests {
 
         // l1 gas used for tx and l1 fee for tx, from Mantle block scanner
         // <https://mantlescan.xyz/tx/0x27e8441109b10bc4fa9ceceda6ffbebea47e8d38e3972939435c23dfa70df820>
-        // 2016 - 188 = 1828
-        let expected_l1_gas_used = U256::from(1828);
+        let expected_l1_gas_used = U256::from(2016);
         let expected_l1_fee = U256::from_be_bytes(hex!(
             "0000000000000000000000000000000000000000000000000001e3dad743bf42" // 00053200403062765 wei
         ));
 
         // test
-        let gas_used = l1_block_info.data_gas(TX, MantleSpecId::CANCUN);
+        let gas_used = l1_block_info.data_gas(TX, MantleSpecId::CANCUN)
+            + l1_block_info.l1_fee_overhead.unwrap_or_default();
         assert_eq!(gas_used, expected_l1_gas_used);
 
         let l1_fee = l1_block_info.calculate_tx_l1_cost(TX, MantleSpecId::CANCUN);

@@ -226,7 +226,7 @@ impl<EvmWiringT: EvmWiring> Evm<'_, EvmWiringT> {
         let initial_gas_spend = self
             .handler
             .validation()
-            .initial_tx_gas(&self.context.evm.env)
+            .initial_tx_gas(&mut self.context)
             .inspect_err(|_| {
                 self.clear();
             })?;
@@ -243,7 +243,7 @@ impl<EvmWiringT: EvmWiring> Evm<'_, EvmWiringT> {
         let initial_gas_spend = self
             .handler
             .validation()
-            .initial_tx_gas(&self.context.evm.env)?;
+            .initial_tx_gas(&mut self.context)?;
         self.handler
             .validation()
             .tx_against_state(&mut self.context)?;

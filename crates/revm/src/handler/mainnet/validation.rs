@@ -354,11 +354,12 @@ where
 
 /// Validate initial transaction gas.
 pub fn validate_initial_tx_gas<EvmWiringT: EvmWiring, SPEC: Spec>(
-    env: &EnvWiring<EvmWiringT>,
+    context: &mut Context<EvmWiringT>,
 ) -> EVMResultGeneric<u64, EvmWiringT>
 where
     <EvmWiringT::Transaction as Transaction>::TransactionError: From<InvalidTransaction>,
 {
+    let env = &context.evm.env;
     let tx_type = env.tx.tx_type().into();
 
     let authorization_list_num = if tx_type == TransactionType::Eip7702 {

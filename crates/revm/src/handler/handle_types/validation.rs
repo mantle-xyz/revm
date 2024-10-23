@@ -18,7 +18,7 @@ pub type ValidateTxEnvAgainstState<'a, EvmWiringT> =
 
 /// Initial gas calculation handle
 pub type ValidateInitialTxGasHandle<'a, EvmWiringT> =
-    Arc<dyn Fn(&EnvWiring<EvmWiringT>) -> EVMResultGeneric<u64, EvmWiringT> + 'a>;
+    Arc<dyn Fn(&mut Context<EvmWiringT>) -> EVMResultGeneric<u64, EvmWiringT> + 'a>;
 
 /// Handles related to validation.
 pub struct ValidationHandler<'a, EvmWiringT: EvmWiring> {
@@ -51,8 +51,11 @@ impl<'a, EvmWiringT: EvmWiring> ValidationHandler<'a, EvmWiringT> {
     }
 
     /// Initial gas
-    pub fn initial_tx_gas(&self, env: &EnvWiring<EvmWiringT>) -> EVMResultGeneric<u64, EvmWiringT> {
-        (self.initial_tx_gas)(env)
+    pub fn initial_tx_gas(
+        &self,
+        context: &mut Context<EvmWiringT>,
+    ) -> EVMResultGeneric<u64, EvmWiringT> {
+        (self.initial_tx_gas)(context)
     }
 
     /// Validate ttansaction against the state.
