@@ -19,3 +19,9 @@ burntpix/svgs
 
 # Rust bug report
 rustc-ice-*
+
+# JS utils
+utils
+
+# transactions
+examples.md

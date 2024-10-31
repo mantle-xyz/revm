@@ -16,6 +16,8 @@ const L1_BASE_FEE_SLOT: U256 = U256::from_limbs([1u64, 0, 0, 0]);
 const L1_OVERHEAD_SLOT: U256 = U256::from_limbs([5u64, 0, 0, 0]);
 const L1_SCALAR_SLOT: U256 = U256::from_limbs([6u64, 0, 0, 0]);
 
+const TOKEN_RATIO_SLOT: U256 = U256::from_limbs([0u64, 0, 0, 0]);
+
 /// [ECOTONE_L1_BLOB_BASE_FEE_SLOT] was added in the Ecotone upgrade and stores the L1 blobBaseFee attribute.
 const ECOTONE_L1_BLOB_BASE_FEE_SLOT: U256 = U256::from_limbs([7u64, 0, 0, 0]);
 
@@ -34,6 +36,9 @@ pub const BASE_FEE_RECIPIENT: Address = address!("420000000000000000000000000000
 
 /// The address of the L1Block contract.
 pub const L1_BLOCK_CONTRACT: Address = address!("4200000000000000000000000000000000000015");
+
+/// The address of the gas oracle contract.
+pub const GAS_ORACLE_CONTRACT: Address = address!("420000000000000000000000000000000000000F");
 
 /// L1 block info
 ///
@@ -58,6 +63,8 @@ pub struct L1BlockInfo {
     pub l1_blob_base_fee: Option<U256>,
     /// The current L1 blob base fee scalar. None if Ecotone is not activated.
     pub l1_blob_base_fee_scalar: Option<U256>,
+    /// The current token ratio.
+    pub token_ratio: Option<U256>,
     /// True if Ecotone is activated, but the L1 fee scalars have not yet been set.
     pub(crate) empty_scalars: bool,
 }
@@ -72,6 +79,7 @@ impl L1BlockInfo {
         }
 
         let l1_base_fee = db.storage(L1_BLOCK_CONTRACT, L1_BASE_FEE_SLOT)?;
+        let token_ratio = db.storage(GAS_ORACLE_CONTRACT, TOKEN_RATIO_SLOT)?;
 
         if !spec_id.is_enabled_in(SpecId::ECOTONE) {
             let l1_fee_overhead = db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?;
@@ -81,6 +89,7 @@ impl L1BlockInfo {
                 l1_base_fee,
                 l1_fee_overhead: Some(l1_fee_overhead),
                 l1_base_fee_scalar: l1_fee_scalar,
+                token_ratio: Some(token_ratio),
                 ..Default::default()
             })
         } else {
@@ -113,6 +122,7 @@ impl L1BlockInfo {
                 l1_blob_base_fee_scalar: Some(l1_blob_base_fee_scalar),
                 empty_scalars,
                 l1_fee_overhead,
+                token_ratio: Some(token_ratio),
             })
         }
     }
@@ -184,6 +194,7 @@ impl L1BlockInfo {
             .saturating_add(self.l1_fee_overhead.unwrap_or_default())
             .saturating_mul(self.l1_base_fee)
             .saturating_mul(self.l1_base_fee_scalar)
+            .saturating_mul(self.get_token_ratio())
             .wrapping_div(U256::from(1_000_000))
     }
 
@@ -239,6 +250,10 @@ impl L1BlockInfo {
 
         calldata_cost_per_byte.saturating_add(blob_cost_per_byte)
     }
+
+    pub fn get_token_ratio(&self) -> U256 {
+        self.token_ratio.unwrap_or(U256::from(1))
+    }
 }
 
 #[cfg(test)]
@@ -252,6 +267,7 @@ mod tests {
             l1_base_fee: U256::from(1_000_000),
             l1_fee_overhead: Some(U256::from(1_000_000)),
             l1_base_fee_scalar: U256::from(1_000_000),
+            token_ratio: Some(U256::from(1_000_000)),
             ..Default::default()
         };
 
@@ -282,6 +298,7 @@ mod tests {
             l1_base_fee: U256::from(1_000_000),
             l1_fee_overhead: Some(U256::from(1_000_000)),
             l1_base_fee_scalar: U256::from(1_000_000),
+            token_ratio: Some(U256::from(1_000_000)),
             ..Default::default()
         };
 
@@ -312,12 +329,13 @@ mod tests {
             l1_base_fee: U256::from(1_000),
             l1_fee_overhead: Some(U256::from(1_000)),
             l1_base_fee_scalar: U256::from(1_000),
+            token_ratio: Some(U256::from(1_000)),
             ..Default::default()
         };
 
         let input = bytes!("FACADE");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::REGOLITH);
-        assert_eq!(gas_cost, U256::from(1048));
+        assert_eq!(gas_cost, U256::from(1_048_000));
 
         // Zero rollup data gas cost should result in zero
         let input = bytes!("");
@@ -338,6 +356,7 @@ mod tests {
             l1_blob_base_fee: Some(U256::from(1_000)),
             l1_blob_base_fee_scalar: Some(U256::from(1_000)),
             l1_fee_overhead: Some(U256::from(1_000)),
+            token_ratio: Some(U256::from(1_000)),
             ..Default::default()
         };
 
@@ -362,7 +381,97 @@ mod tests {
         l1_block_info.empty_scalars = true;
         let input = bytes!("FACADE");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::ECOTONE);
-        assert_eq!(gas_cost, U256::from(1048));
+        assert_eq!(gas_cost, U256::from(1_048_000));
+    }
+
+    #[test]
+    fn calculate_tx_l1_cost_mantle_eip1559() {
+        // rig
+        //
+        // <https://mantlescan.xyz/block/70683492>
+        //
+        // The token ratio changed at:
+        // 70683076
+        // 70683686 (70683492 is in between)
+        // <https://mantlescan.xyz/tx/0xe1c72a781f15b0c23104101d52cc7562b520f7c62c9fa2a2269d9cadc8718c0e#eventlog>
+        //
+        // decoded from
+        let l1_block_info = L1BlockInfo {
+            l1_base_fee: U256::from_be_bytes(hex!(
+                "00000000000000000000000000000000000000000000000000000001d04db9ad"
+            )), // 7,789,722,029
+            l1_fee_overhead: Some(U256::from_be_bytes(hex!(
+                "00000000000000000000000000000000000000000000000000000000000000bc"
+            ))), // 188
+            l1_base_fee_scalar: U256::from_be_bytes(hex!(
+                "0000000000000000000000000000000000000000000000000000000000002710"
+            )), // 10,000
+            token_ratio: Some(U256::from(4368)),
+            ..Default::default()
+        };
+
+        // second tx in Mantle block 70683492
+        // <https://mantlescan.xyz/tx/0xa061114290fbe3c06550e61d5c9cb39c575bad277f3c6a2459446b90b2b02577>
+        const TX: &[u8] = &hex!("02f901bf8213888202a584015752a084015752a084b48675bd94d9f4e85489adcd0baf0cd63b4231c6af58c2674589056bc75e2d63100000b9014483bd37f900000001cda86a272531e8640cd7f1a92c01839911b90bb009056bc75e2d63100000074dee7563cd80200147ae0001ac041df48df9791b0654f1dbbf2cc8450c5f2e9d0000000199550aaf158915c17ee0e0f81db48e4c7454b10400000001070202080004010103b24db100060000010200020600000302000006010004050102060001060700ff000000000000000000000000000000000000000000000000262255f4770aebe2d0c8b97a46287dcecc2a0aff78c1b0c915c4faa5fffa6cabf0219da63d7f4cb81bae52e2b8e401de1429b7ca94bb0abbf133ae34a125af1a4704044501fe12ca9567ef1550e430e8201eba5cc46d216ce6dc03f6a759e8e766e956ae8a6a1ed01989ff1c5ac6361c34cad9d7d0015ab4deaddeaddeaddeaddeaddeaddeaddeaddead11110000000000000000000000000000000000000000c001a008570dac13b3b52af488672a168d0f0ed4fd6da12d431c30a7326fd6f03dbe81a051ebad75b430e05b4d33a84c581c3cfd28820abdef2004234be4d8b7abe06f74");
+
+        // l1 gas used for tx and l1 fee for tx, from Mantle block scanner
+        // <https://mantlescan.xyz/tx/0xa061114290fbe3c06550e61d5c9cb39c575bad277f3c6a2459446b90b2b02577>
+        //
+        let expected_l1_gas_used = U256::from(6564);
+        let expected_l1_fee = U256::from_be_bytes(hex!(
+            "0000000000000000000000000000000000000000000000000007ef4bec40587e" // 223343420220019 wei
+        ));
+
+        // test
+        // TIPS: the Bedrock's l1GasUsed added the overhead, so we need to add it
+        // <https://github.com/ethereum-optimism/op-geth/blob/v1.101411.0/core/types/rollup_cost.go#L206>
+        let gas_used = l1_block_info.data_gas(TX, SpecId::CANCUN)
+            + l1_block_info.l1_fee_overhead.unwrap_or_default();
+        assert_eq!(gas_used, expected_l1_gas_used);
+
+        let l1_fee = l1_block_info.calculate_tx_l1_cost(TX, SpecId::CANCUN);
+        assert_eq!(l1_fee, expected_l1_fee)
+    }
+
+    #[test]
+    fn calculate_tx_l1_cost_mantle_legacy() {
+        // rig
+        //
+        // <https://mantlescan.xyz/block/70718078>
+        //
+        // decoded from
+        let l1_block_info = L1BlockInfo {
+            l1_base_fee: U256::from_be_bytes(hex!(
+                "0000000000000000000000000000000000000000000000000000000168d7ab30"
+            )),
+            l1_fee_overhead: Some(U256::from_be_bytes(hex!(
+                "00000000000000000000000000000000000000000000000000000000000000bc"
+            ))), // 188
+            l1_base_fee_scalar: U256::from_be_bytes(hex!(
+                "0000000000000000000000000000000000000000000000000000000000002710"
+            )), // 10,000
+            token_ratio: Some(U256::from(4359)),
+            ..Default::default()
+        };
+
+        // seventh tx in Mantle block 70718078
+        // <https://mantlescan.xyz/tx/0x27e8441109b10bc4fa9ceceda6ffbebea47e8d38e3972939435c23dfa70df820>
+        const TX: &[u8] = &hex!("f8718301b78e8401312d008410d91858946b80e191f678a8378e1a3009eaf027b7515e88eb87282b83459182d080822733a0f820683c02811f2950e72c1a4c82c41bc31fcb9348c58a14bedbc4025e41bc5fa054896a3ee0dd03f8d29109c5ae6192f19338030ea045e208aeaf24cb11af6a6b");
+
+        // l1 gas used for tx and l1 fee for tx, from Mantle block scanner
+        // <https://mantlescan.xyz/tx/0x27e8441109b10bc4fa9ceceda6ffbebea47e8d38e3972939435c23dfa70df820>
+        let expected_l1_gas_used = U256::from(2016);
+        let expected_l1_fee = U256::from_be_bytes(hex!(
+            "0000000000000000000000000000000000000000000000000001e3dad743bf42" // 00053200403062765 wei
+        ));
+
+        // test
+        let gas_used = l1_block_info.data_gas(TX, SpecId::CANCUN)
+            + l1_block_info.l1_fee_overhead.unwrap_or_default();
+        assert_eq!(gas_used, expected_l1_gas_used);
+
+        let l1_fee = l1_block_info.calculate_tx_l1_cost(TX, SpecId::CANCUN);
+        assert_eq!(l1_fee, expected_l1_fee)
     }
 
     #[test]

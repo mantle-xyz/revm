@@ -6,6 +6,7 @@ members = [
     "crates/primitives",
     "crates/interpreter",
     "crates/precompile",
+    "examples/mantle_balance_check",
 ]
 resolver = "2"
 default-members = ["crates/revm"]

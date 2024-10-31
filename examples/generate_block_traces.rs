@@ -6,7 +6,7 @@ use ethers_providers::{Http, Provider};
 use indicatif::ProgressBar;
 use revm::db::{CacheDB, EthersDB, StateBuilder};
 use revm::inspectors::TracerEip3155;
-use revm::primitives::{AccessListItem, Address, TxKind, B256, U256};
+use revm::primitives::{AccessListItem, Address, SpecId, TxKind, B256, U256};
 use revm::{inspector_handle_register, Evm};
 use std::fs::OpenOptions;
 use std::io::BufWriter;
@@ -57,8 +57,8 @@ async fn main() -> anyhow::Result<()> {
     let client = Arc::new(client);
 
     // Params
-    let chain_id: u64 = 1;
-    let block_number = 10889447;
+    let chain_id: u64 = 5000;
+    let block_number = 70775568;
 
     // Fetch the transaction-rich block
     let block = match client.get_block_with_txs(block_number).await {
@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
     let state_db = EthersDB::new(client, Some(prev_id)).expect("panic");
     let cache_db: CacheDB<EthersDB<Provider<Http>>> = CacheDB::new(state_db);
     let mut state = StateBuilder::new_with_database(cache_db).build();
+
     let mut evm = Evm::builder()
         .with_db(&mut state)
         .with_external_context(TracerEip3155::new(Box::new(std::io::stdout())))
@@ -91,9 +92,11 @@ async fn main() -> anyhow::Result<()> {
                 local_fill!(b.basefee, Some(base_fee), U256::from_limbs);
             }
         })
+        .with_spec_id(SpecId::CANCUN)
         .modify_cfg_env(|c| {
             c.chain_id = chain_id;
         })
+        .optimism()
         .append_handler_register(inspector_handle_register)
         .build();
 

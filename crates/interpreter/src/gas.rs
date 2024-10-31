@@ -128,4 +128,11 @@ impl Gas {
         }
         success
     }
+
+    /// Set a remaining gas value. This overrides the current remaining gas value.
+    #[inline]
+    #[cfg(feature = "optimism")]
+    pub fn set_remaining(&mut self, remaining: u64) {
+        self.remaining = remaining;
+    }
 }
