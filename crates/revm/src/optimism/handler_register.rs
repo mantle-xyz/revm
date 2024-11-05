@@ -5,21 +5,23 @@ use crate::{
         mainnet::{self, deduct_caller_inner},
         register::EvmHandler,
     },
-    interpreter::{as_u64_saturated, return_ok, return_revert, Gas, InstructionResult},
+    interpreter::{as_u64_saturated, return_ok, return_revert, Gas, InstructionResult, CallInputs},
     optimism,
     primitives::{
         db::Database,
-        spec_to_generic, Account, EVMError, Env, ExecutionResult, HaltReason, HashMap,
-        InvalidTransaction, OptimismInvalidTransaction, ResultAndState, Spec, SpecId,
+        spec_to_generic, Account, EVMError, Env, ExecutionResult, HaltReason,
+        HashMap, InvalidTransaction, OptimismInvalidTransaction, ResultAndState, Spec,
+        SpecId,
         SpecId::{LONDON, REGOLITH},
         U256,
     },
-    Context, ContextPrecompiles, FrameResult,
+    Context, ContextPrecompiles, FrameResult, FrameOrResult,
 };
-use core::ops::Mul;
+use core::{ops::Mul, str::FromStr};
 use revm_precompile::{secp256r1, PrecompileSpecId};
 use std::string::ToString;
 use std::sync::Arc;
+
 
 pub fn optimism_handle_register<DB: Database, EXT>(handler: &mut EvmHandler<'_, EXT, DB>) {
     spec_to_generic!(handler.cfg.spec_id, {
@@ -33,8 +35,10 @@ pub fn optimism_handle_register<DB: Database, EXT>(handler: &mut EvmHandler<'_, 
         handler.pre_execution.load_precompiles = Arc::new(load_precompiles::<SPEC, EXT, DB>);
         // An estimated batch cost is charged from the caller and added to L1 Fee Vault.
         handler.pre_execution.deduct_caller = Arc::new(deduct_caller::<SPEC, EXT, DB>);
+        handler.execution.call = Arc::new(call::<SPEC, EXT, DB>);
         // Refund is calculated differently then mainnet.
         handler.execution.last_frame_return = Arc::new(last_frame_return::<SPEC, EXT, DB>);
+        // Calculate final refund
         handler.post_execution.refund = Arc::new(refund::<SPEC, EXT, DB>);
         handler.post_execution.reward_beneficiary = Arc::new(reward_beneficiary::<SPEC, EXT, DB>);
         // In case of halt of deposit transaction return Error.
@@ -168,6 +172,28 @@ pub fn last_frame_return<SPEC: Spec, EXT, DB: Database>(
     Ok(())
 }
 
+/// Handle frame sub call.
+#[inline]
+pub fn call<SPEC: Spec, EXT, DB: Database>(
+    context: &mut Context<EXT, DB>,
+    inputs: Box<CallInputs>,
+) -> Result<FrameOrResult, EVMError<DB::Error>> {
+    // // mint BVM_ETH
+    // if let Some(eth_value) = context.evm.inner.env.tx.optimism.eth_value {
+    //     if eth_value > 0 {
+    //         optimism::bvm_eth::warm_bvm_eth_contract(context);
+    //         optimism::bvm_eth::mint_bvm_eth(context, U256::from(eth_value));
+    //     }
+    //     // transfer BVM_ETH
+    //     if let Some(eth_tx_value) = context.evm.inner.env.tx.optimism.eth_tx_value {
+    //         if eth_tx_value > 0 {
+    //             optimism::bvm_eth::transfer_bvm_eth(context, U256::from(eth_tx_value));
+    //         }
+    //     }
+    // }
+    mainnet::call::<SPEC, EXT, DB>(context, inputs)
+}
+
 /// Record Eip-7702 refund and calculate final refund.
 #[inline]
 pub fn refund<SPEC: Spec, EXT, DB: Database>(
@@ -178,6 +204,13 @@ pub fn refund<SPEC: Spec, EXT, DB: Database>(
     let env = context.evm.inner.env();
     let is_deposit = env.tx.optimism.source_hash.is_some();
     let is_system_tx = env.tx.optimism.is_system_transaction.unwrap_or(false);
+
+    // FIX IT! magic number, i don't know what it is.
+    let is_eth_mint = env.tx.optimism.eth_value.is_some();
+    if is_eth_mint {
+        gas.set_remaining(gas.remaining().saturating_sub(4500));
+    }
+
     if !is_deposit && !is_system_tx {
         mainnet::refund::<SPEC, EXT, DB>(context, gas, eip7702_refund);
         let Some(l1_block_info) = &context.evm.inner.l1_block_info else {
@@ -219,7 +252,20 @@ pub fn load_precompiles<SPEC: Spec, EXT, DB: Database>() -> ContextPrecompiles<D
 pub fn deduct_caller<SPEC: Spec, EXT, DB: Database>(
     context: &mut Context<EXT, DB>,
 ) -> Result<(), EVMError<DB::Error>> {
-    // load caller's account.
+    // mint BVM_ETH
+    if let Some(eth_value) = context.evm.inner.env.tx.optimism.eth_value {
+        if eth_value > 0 {
+            optimism::bvm_eth::warm_bvm_eth_contract(context);
+            optimism::bvm_eth::mint_bvm_eth(context, U256::from(eth_value));
+        }
+        // transfer BVM_ETH
+        if let Some(eth_tx_value) = context.evm.inner.env.tx.optimism.eth_tx_value {
+            if eth_tx_value > 0 {
+                optimism::bvm_eth::transfer_bvm_eth(context, U256::from(eth_tx_value));
+            }
+        }
+    }
+
     let mut caller_account = context
         .evm
         .inner
@@ -434,17 +480,18 @@ pub fn end<SPEC: Spec, EXT, DB: Database>(
 
 #[cfg(test)]
 mod tests {
-    use revm_interpreter::{CallOutcome, InterpreterResult};
+    use core::str::FromStr;
 
     use super::*;
     use crate::{
         db::{EmptyDB, InMemoryDB},
         primitives::{
-            bytes, state::AccountInfo, Address, BedrockSpec, Bytes, Env, LatestSpec, RegolithSpec,
-            B256,
+            address, bytes, state::AccountInfo, Address, BedrockSpec, Bytes, Env, LatestSpec,
+            RegolithSpec, B256,
         },
         L1BlockInfo,
     };
+    use revm_interpreter::{CallOutcome, InterpreterResult};
 
     /// Creates frame result.
     fn call_last_frame_return<SPEC: Spec>(

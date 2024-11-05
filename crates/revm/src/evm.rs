@@ -12,8 +12,8 @@ use crate::{
     Context, ContextWithHandlerCfg, Frame, FrameOrResult, FrameResult,
 };
 use core::fmt;
-use std::{boxed::Box, vec::Vec};
 use revm_interpreter::as_u64_saturated;
+use std::{boxed::Box, vec::Vec};
 
 /// EVM call stack limit.
 pub const CALL_STACK_LIMIT: u64 = 1024;
@@ -355,9 +355,8 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
                         ));
                     };
                     let token_ratio = l1_block_info.get_token_ratio();
-                    let mut l1_cost = l1_block_info.calculate_tx_l1_cost(enveloped_tx, ctx.evm.spec_id());
-                    println!("token_ratio: {:?}", token_ratio.clone());
-                    println!("l1_cost: {:?}", l1_cost.clone());
+                    let mut l1_cost =
+                        l1_block_info.calculate_tx_l1_cost(enveloped_tx, ctx.evm.spec_id());
                     l1_cost = l1_cost.wrapping_div(ctx.evm.env.effective_gas_price());
                     if l1_cost.gt(&U256::from(gas_limit)) {
                         return Err(EVMError::Custom(
@@ -369,7 +368,6 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
                 }
             }
         }
-
 
         // apply EIP-7702 auth list.
         let eip7702_gas_refund = pre_exec.apply_eip7702_auth_list(ctx)? as i64;
@@ -457,7 +455,7 @@ mod tests {
                         },
                         RecoveredAuthority::Valid(auth),
                     )]
-                        .into(),
+                    .into(),
                 );
                 tx.caller = caller;
                 tx.transact_to = TxKind::Call(auth);

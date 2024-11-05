@@ -75,15 +75,20 @@ impl CheckerRecord {
     fn print(&self) {
         println!(
             "Total: {}, Passed: {}, Failed: {}, {}% correct",
-            self.total, self.passed, self.failed, self.passed as f64 / self.total as f64 * 100.0
+            self.total,
+            self.passed,
+            self.failed,
+            self.passed as f64 / self.total as f64 * 100.0
         );
     }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let start = 71014131;
-
+    // let start = 71014131;// 4500
+    // let start = 71291726; // 4500, tx_number: 1
+    // let start = 71219156; // 4500, tx_number: 1
+    let start = 71207577;
     let record = Arc::new(Mutex::new(CheckerRecord::new()));
     for block_number in start..start + 1 {
         range(block_number, record.clone()).await?;
@@ -153,6 +158,10 @@ async fn range(block_number: u64, record: Arc<Mutex<CheckerRecord>>) -> anyhow::
 
     for tx in block.transactions {
         let tx_number = tx.transaction_index.unwrap().0[0];
+        // if tx_number != 1 {
+        //     continue;
+        // }
+        println!("current tx_number: {:?}", tx_number);
         let tx_hash = tx.hash;
         let raw_tx = client
             .request::<&[H256; 1], Bytes>("debug_getRawTransaction", &[tx_hash.into()])
@@ -188,8 +197,9 @@ async fn range(block_number: u64, record: Arc<Mutex<CheckerRecord>>) -> anyhow::
             .transact_commit()
             .map_err(|e| anyhow!("Failed to transact: {e}"))?;
         let gas_used = result.gas_used();
-        let expected_gas_used = client.
-            get_transaction_receipt(tx_hash)
+
+        let expected_gas_used = client
+            .get_transaction_receipt(tx_hash)
             .await?
             .unwrap()
             .gas_used
@@ -201,7 +211,10 @@ async fn range(block_number: u64, record: Arc<Mutex<CheckerRecord>>) -> anyhow::
         } else {
             println!("--- failed❌");
         }
-        record.lock().unwrap().add(expected_gas_used.as_u64() == gas_used);
+        record
+            .lock()
+            .unwrap()
+            .add(expected_gas_used.as_u64() == gas_used);
 
         // for (address, account) in &state {
         //     if account.is_touched() {
@@ -228,7 +241,9 @@ async fn sync_system_storage(
 ) -> () {
     let mut state_db = EthersDB::new(client.clone(), Some(block_num.into())).expect("panic");
     let l1_base_fee_slot = U256::from_limbs([1u64, 0, 0, 0]);
-    let storage = state_db.storage(L1_BLOCK_CONTRACT, l1_base_fee_slot).expect("panic");
+    let storage = state_db
+        .storage(L1_BLOCK_CONTRACT, l1_base_fee_slot)
+        .expect("panic");
     println!("storage is {:?}", storage);
     db.insert_account_storage(L1_BLOCK_CONTRACT, l1_base_fee_slot, storage)
         .expect("panic");
@@ -301,6 +316,8 @@ pub fn prepare_tx_env(transaction: &OpTxEnvelope, encoded_transaction: &[u8]) ->
                 mint: None,
                 is_system_transaction: Some(false),
                 enveloped_tx: Some(encoded_transaction.to_vec().into()),
+                eth_value: None,
+                eth_tx_value: None,
             };
             Ok(env)
         }
@@ -328,6 +345,8 @@ pub fn prepare_tx_env(transaction: &OpTxEnvelope, encoded_transaction: &[u8]) ->
                 mint: None,
                 is_system_transaction: Some(false),
                 enveloped_tx: Some(encoded_transaction.to_vec().into()),
+                eth_value: None,
+                eth_tx_value: None,
             };
             Ok(env)
         }
@@ -355,13 +374,13 @@ pub fn prepare_tx_env(transaction: &OpTxEnvelope, encoded_transaction: &[u8]) ->
                 mint: None,
                 is_system_transaction: Some(false),
                 enveloped_tx: Some(encoded_transaction.to_vec().into()),
+                eth_value: None,
+                eth_tx_value: None,
             };
             Ok(env)
         }
         OpTxEnvelope::Deposit(tx) => {
             println!("Deposit transaction: {:?}", tx);
-            // println!("tx.input.clone() is {:?}", tx.input.clone());
-            // println!("tx is {:?}", tx);
             env.caller = tx.from;
             env.access_list.clear();
             env.gas_limit = tx.gas_limit;
@@ -380,6 +399,8 @@ pub fn prepare_tx_env(transaction: &OpTxEnvelope, encoded_transaction: &[u8]) ->
                 mint: tx.mint,
                 is_system_transaction: Some(tx.is_system_transaction),
                 enveloped_tx: Some(encoded_transaction.to_vec().into()),
+                eth_value: tx.eth_value,
+                eth_tx_value: tx.eth_value,
             };
             Ok(env)
         }
