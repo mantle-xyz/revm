@@ -4,7 +4,7 @@ use crate::{
     },
     Context,
 };
-use alloy_primitives::Keccak256;
+use revm_primitives::{alloy_primitives::Keccak256};
 use revm_interpreter::Host;
 use revm_precompile::{utilities::left_pad, Log};
 
@@ -32,7 +32,6 @@ fn get_bvm_eth_balance_key(addr: Address) -> U256 {
 
 pub(crate) fn warm_bvm_eth_contract<EXT, DB: Database>(context: &mut Context<EXT, DB>) {
     let _ = context.load_account_delegated(BVM_ETH_ADDR).unwrap();
-    // let _ = context.load_account_delegated(context.evm.inner.env.tx.caller).unwrap();
 }
 
 fn add_bvm_eth_total_supply<EXT, DB: Database>(context: &mut Context<EXT, DB>, eth_value: U256) {
@@ -42,9 +41,7 @@ fn add_bvm_eth_total_supply<EXT, DB: Database>(context: &mut Context<EXT, DB>, e
         .sload(BVM_ETH_ADDR, bvm_eth_total_supply_key)
         .unwrap()
         .data;
-    println!("value_supply: {:?}", value_supply);
     value_supply = value_supply.saturating_add(eth_value);
-    println!("value_supply: {:?}", value_supply);
     let _ = context
         .sstore(BVM_ETH_ADDR, bvm_eth_total_supply_key, value_supply)
         .unwrap();

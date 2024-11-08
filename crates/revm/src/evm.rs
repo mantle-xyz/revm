@@ -336,6 +336,7 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
         pre_exec.deduct_caller(ctx)?;
 
         let mut gas_limit = ctx.evm.env.tx.gas_limit - initial_gas_spend;
+        // TODO: FIX ME
         #[cfg(feature = "optimism")]
         {
             let env = ctx.env_mut();
