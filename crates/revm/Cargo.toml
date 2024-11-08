@@ -25,6 +25,7 @@ all = "warn"
 # revm
 revm-interpreter = { path = "../interpreter", version = "13.0.0", default-features = false }
 revm-precompile = { path = "../precompile", version = "14.0.0", default-features = false }
+revm-primitives = { path = "../primitives", version = "13.0.0", default-features = false }
 
 # misc
 auto_impl = { version = "1.2", default-features = false }
@@ -52,7 +53,6 @@ ethers-core = { version = "2.0", optional = true }
 alloy-provider = { version = "0.3", optional = true, default-features = false }
 alloy-eips = { version = "0.3.1", optional = true, default-features = false }
 alloy-transport = { version = "0.3", optional = true, default-features = false }
-alloy-primitives = { version = "0.8.5", features = ["rlp"] }
 
 [dev-dependencies]
 alloy-sol-types = { version = "0.8.2", default-features = false, features = [
