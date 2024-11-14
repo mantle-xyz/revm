@@ -25,3 +25,4 @@ utils
 
 # transactions
 examples.md
+.env

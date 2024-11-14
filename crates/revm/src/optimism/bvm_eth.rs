@@ -93,7 +93,6 @@ pub(crate) fn mint_bvm_eth<EXT, DB: Database>(context: &mut Context<EXT, DB>, et
 }
 
 pub(crate) fn transfer_bvm_eth<EXT, DB: Database>(context: &mut Context<EXT, DB>, eth_value: U256) {
-    let checkpoint = context.evm.journaled_state.checkpoint();
     let from = context.evm.inner.env.tx.caller;
     let to = match context.evm.inner.env.tx.transact_to {
         TxKind::Call(caller) => caller,

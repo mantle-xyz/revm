@@ -335,6 +335,8 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
         // deduce caller balance with its limit.
         pre_exec.deduct_caller(ctx)?;
 
+        // The initial_gas_spend is multiplied by the token_ratio in non-deposit transactions
+        // so we don't need to multiply it again.
         let mut gas_limit = ctx.evm.env.tx.gas_limit - initial_gas_spend;
         // TODO: FIX ME
         #[cfg(feature = "optimism")]
@@ -355,6 +357,7 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
                             "[OPTIMISM] Failed to load enveloped transaction.".to_string(),
                         ));
                     };
+
                     let token_ratio = l1_block_info.get_token_ratio();
                     let mut l1_cost =
                         l1_block_info.calculate_tx_l1_cost(enveloped_tx, ctx.evm.spec_id());
@@ -456,7 +459,7 @@ mod tests {
                         },
                         RecoveredAuthority::Valid(auth),
                     )]
-                    .into(),
+                        .into(),
                 );
                 tx.caller = caller;
                 tx.transact_to = TxKind::Call(auth);

@@ -40,6 +40,9 @@ pub const L1_BLOCK_CONTRACT: Address = address!("4200000000000000000000000000000
 /// The address of the gas oracle contract.
 pub const GAS_ORACLE_CONTRACT: Address = address!("420000000000000000000000000000000000000F");
 
+/// The address of the sequencer fee wallet, which is block coinbase.
+pub const SEQUENCER_FEE_VAULT_ADDRESS: Address = address!("4200000000000000000000000000000000000011");
+
 /// L1 block info
 ///
 /// We can extract L1 epoch data from each L2 block, by looking at the `setL1BlockValues`
@@ -78,6 +81,7 @@ impl L1BlockInfo {
             let _ = db.basic(L1_BLOCK_CONTRACT)?;
         }
 
+        let _ = db.basic(GAS_ORACLE_CONTRACT)?;
         let l1_base_fee = db.storage(L1_BLOCK_CONTRACT, L1_BASE_FEE_SLOT)?;
         let token_ratio = db.storage(GAS_ORACLE_CONTRACT, TOKEN_RATIO_SLOT)?;
 
@@ -110,7 +114,7 @@ impl L1BlockInfo {
             // only necessary if `empty_scalars` is true, as it was deprecated in Ecotone.
             let empty_scalars = l1_blob_base_fee.is_zero()
                 && l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4]
-                    == EMPTY_SCALARS;
+                == EMPTY_SCALARS;
             let l1_fee_overhead = empty_scalars
                 .then(|| db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT))
                 .transpose()?;

@@ -5,21 +5,20 @@ use crate::{
         mainnet::{self, deduct_caller_inner},
         register::EvmHandler,
     },
-    interpreter::{as_u64_saturated, return_ok, return_revert, Gas, InstructionResult, CallInputs},
+    interpreter::{as_u64_saturated, return_ok, return_revert, Gas, InstructionResult},
     optimism,
     primitives::{
         db::Database,
         spec_to_generic, Account, EVMError, Env, ExecutionResult, HaltReason,
         HashMap, InvalidTransaction, OptimismInvalidTransaction, ResultAndState, Spec,
         SpecId,
-        SpecId::{LONDON, REGOLITH},
+        SpecId::REGOLITH,
         U256,
     },
-    Context, ContextPrecompiles, FrameResult, FrameOrResult,
+    Context, ContextPrecompiles, FrameOrResult, FrameResult,
 };
 use core::{ops::Mul, str::FromStr};
 use revm_precompile::{secp256r1, PrecompileSpecId};
-use std::string::ToString;
 use std::sync::Arc;
 
 
@@ -35,11 +34,11 @@ pub fn optimism_handle_register<DB: Database, EXT>(handler: &mut EvmHandler<'_, 
         handler.pre_execution.load_precompiles = Arc::new(load_precompiles::<SPEC, EXT, DB>);
         // An estimated batch cost is charged from the caller and added to L1 Fee Vault.
         handler.pre_execution.deduct_caller = Arc::new(deduct_caller::<SPEC, EXT, DB>);
-        handler.execution.call = Arc::new(call::<SPEC, EXT, DB>);
         // Refund is calculated differently then mainnet.
         handler.execution.last_frame_return = Arc::new(last_frame_return::<SPEC, EXT, DB>);
         // Calculate final refund
         handler.post_execution.refund = Arc::new(refund::<SPEC, EXT, DB>);
+        handler.post_execution.reimburse_caller = Arc::new(reimburse_caller::<SPEC, EXT, DB>);
         handler.post_execution.reward_beneficiary = Arc::new(reward_beneficiary::<SPEC, EXT, DB>);
         // In case of halt of deposit transaction return Error.
         handler.post_execution.output = Arc::new(output::<SPEC, EXT, DB>);
@@ -98,7 +97,7 @@ pub fn validate_initial_tx_gas<SPEC: Spec, EXT, DB: Database>(
         initial_gas_spend = initial_gas_spend
             .checked_mul(as_u64_saturated!(token_ratio))
             .ok_or(EVMError::Transaction(
-                InvalidTransaction::CallGasCostMoreThanGasLimit.into(),
+                InvalidTransaction::CallGasCostMoreThanGasLimit,
             ))?;
     }
 
@@ -172,59 +171,6 @@ pub fn last_frame_return<SPEC: Spec, EXT, DB: Database>(
     Ok(())
 }
 
-/// Handle frame sub call.
-#[inline]
-pub fn call<SPEC: Spec, EXT, DB: Database>(
-    context: &mut Context<EXT, DB>,
-    inputs: Box<CallInputs>,
-) -> Result<FrameOrResult, EVMError<DB::Error>> {
-    // // mint BVM_ETH
-    // if let Some(eth_value) = context.evm.inner.env.tx.optimism.eth_value {
-    //     if eth_value > 0 {
-    //         optimism::bvm_eth::warm_bvm_eth_contract(context);
-    //         optimism::bvm_eth::mint_bvm_eth(context, U256::from(eth_value));
-    //     }
-    //     // transfer BVM_ETH
-    //     if let Some(eth_tx_value) = context.evm.inner.env.tx.optimism.eth_tx_value {
-    //         if eth_tx_value > 0 {
-    //             optimism::bvm_eth::transfer_bvm_eth(context, U256::from(eth_tx_value));
-    //         }
-    //     }
-    // }
-    mainnet::call::<SPEC, EXT, DB>(context, inputs)
-}
-
-/// Record Eip-7702 refund and calculate final refund.
-#[inline]
-pub fn refund<SPEC: Spec, EXT, DB: Database>(
-    context: &mut Context<EXT, DB>,
-    gas: &mut Gas,
-    eip7702_refund: i64,
-) {
-    let env = context.evm.inner.env();
-    let is_deposit = env.tx.optimism.source_hash.is_some();
-    let is_system_tx = env.tx.optimism.is_system_transaction.unwrap_or(false);
-
-    // FIX IT! magic number, i don't know what it is.
-    let is_eth_mint = env.tx.optimism.eth_value.is_some();
-    if is_eth_mint {
-        gas.set_remaining(gas.remaining().saturating_sub(4500));
-    }
-
-    if !is_deposit && !is_system_tx {
-        mainnet::refund::<SPEC, EXT, DB>(context, gas, eip7702_refund);
-        let Some(l1_block_info) = &context.evm.inner.l1_block_info else {
-            return;
-        };
-        let token_ratio = l1_block_info.get_token_ratio();
-        gas.set_refund(gas.refunded().mul(as_u64_saturated!(token_ratio) as i64));
-        gas.set_remaining(gas.remaining().mul(as_u64_saturated!(token_ratio)));
-    } else {
-        // Deposit transactions do not receive refunds.
-        gas.set_refund(0);
-    }
-}
-
 /// Load precompiles for Optimism chain.
 #[inline]
 pub fn load_precompiles<SPEC: Spec, EXT, DB: Database>() -> ContextPrecompiles<DB> {
@@ -282,33 +228,63 @@ pub fn deduct_caller<SPEC: Spec, EXT, DB: Database>(
     // We deduct caller max balance after minting and before deducing the
     // l1 cost, max values is already checked in pre_validate but l1 cost wasn't.
     deduct_caller_inner::<SPEC>(caller_account.data, &context.evm.inner.env);
+    Ok(())
+}
 
-    // If the transaction is not a deposit transaction, subtract the L1 data fee from the
-    // caller's balance directly after minting the requested amount of ETH.
-    if context.evm.inner.env.tx.optimism.source_hash.is_none() {
-        // get envelope
-        let Some(enveloped_tx) = &context.evm.inner.env.tx.optimism.enveloped_tx else {
-            return Err(EVMError::Custom(
-                "[OPTIMISM] Failed to load enveloped transaction.".to_string(),
-            ));
+/// Record Eip-7702 refund and calculate final refund.
+#[inline]
+pub fn refund<SPEC: Spec, EXT, DB: Database>(
+    context: &mut Context<EXT, DB>,
+    gas: &mut Gas,
+    eip7702_refund: i64,
+) {
+    let env = context.evm.inner.env();
+    let is_deposit = env.tx.optimism.source_hash.is_some();
+    let is_system_tx = env.tx.optimism.is_system_transaction.unwrap_or(false);
+
+    // FIX IT! magic number, i don't know what it is.
+    let is_eth_mint = env.tx.optimism.eth_value.is_some();
+    if is_eth_mint {
+        gas.set_remaining(gas.remaining().saturating_sub(4500));
+    }
+
+    if !is_deposit && !is_system_tx {
+        mainnet::refund::<SPEC, EXT, DB>(context, gas, eip7702_refund);
+        let Some(l1_block_info) = &context.evm.inner.l1_block_info else {
+            return;
         };
+        let token_ratio = l1_block_info.get_token_ratio();
+        gas.set_refund(gas.refunded().mul(as_u64_saturated!(token_ratio) as i64));
+        gas.set_remaining(gas.remaining().mul(as_u64_saturated!(token_ratio)));
+    } else {
+        // Deposit transactions do not receive refunds.
+        gas.set_refund(0);
+    }
+}
 
-        let tx_l1_cost = context
+/// Reimburse the caller with gas that were not spend.
+#[inline]
+pub fn reimburse_caller<SPEC: Spec, EXT, DB: Database>(
+    context: &mut Context<EXT, DB>,
+    gas: &Gas,
+) -> Result<(), EVMError<DB::Error>> {
+    let env = context.evm.inner.env();
+    let is_deposit = env.tx.optimism.source_hash.is_some();
+    let is_system_tx = env.tx.optimism.is_system_transaction.unwrap_or(false);
+    if !is_deposit && !is_system_tx {
+        let caller = context.evm.env.tx.caller;
+        let effective_gas_price = context.evm.env.effective_gas_price();
+
+        // return balance of not spend gas.
+        let caller_account = context
             .evm
             .inner
-            .l1_block_info
-            .as_ref()
-            .expect("L1BlockInfo should be loaded")
-            .calculate_tx_l1_cost(enveloped_tx, SPEC::SPEC_ID);
-        if tx_l1_cost.gt(&caller_account.info.balance) {
-            return Err(EVMError::Transaction(
-                InvalidTransaction::LackOfFundForMaxFee {
-                    fee: tx_l1_cost.into(),
-                    balance: caller_account.info.balance.into(),
-                },
-            ));
-        }
-        caller_account.info.balance = caller_account.info.balance.saturating_sub(tx_l1_cost);
+            .journaled_state
+            .load_account(caller, &mut context.evm.inner.db)?;
+        caller_account.data.info.balance =
+            caller_account.data.info.balance.saturating_add(
+                effective_gas_price * U256::from(gas.remaining() + gas.refunded() as u64)
+            );
     }
     Ok(())
 }
@@ -321,55 +297,12 @@ pub fn reward_beneficiary<SPEC: Spec, EXT, DB: Database>(
 ) -> Result<(), EVMError<DB::Error>> {
     let is_deposit = context.evm.inner.env.tx.optimism.source_hash.is_some();
 
+    // transfer fee to coinbase/beneficiary.
     if !is_deposit {
-        // If the transaction is not a deposit transaction, fees are paid out
-        // to both the Base Fee Vault as well as the L1 Fee Vault.
-        let Some(l1_block_info) = &context.evm.inner.l1_block_info else {
-            return Err(EVMError::Custom(
-                "[OPTIMISM] Failed to load L1 block information.".to_string(),
-            ));
-        };
+        mainnet::reward_beneficiary::<SPEC, EXT, DB>(context, gas)?;
+    }
 
-        let Some(enveloped_tx) = &context.evm.inner.env.tx.optimism.enveloped_tx else {
-            return Err(EVMError::Custom(
-                "[OPTIMISM] Failed to load enveloped transaction.".to_string(),
-            ));
-        };
-
-        let l1_cost = l1_block_info.calculate_tx_l1_cost(enveloped_tx, SPEC::SPEC_ID);
-        let token_ratio = l1_block_info.get_token_ratio();
-
-        let beneficiary = context.evm.env.block.coinbase;
-        let effective_gas_price = context.evm.env.effective_gas_price();
-
-        // transfer fee to coinbase/beneficiary.
-        // EIP-1559 discard basefee for coinbase transfer. Basefee amount of gas is discarded.
-        let coinbase_gas_price = if SPEC::enabled(LONDON) {
-            effective_gas_price.saturating_sub(context.evm.env.block.basefee)
-        } else {
-            effective_gas_price
-        };
-
-        let coinbase_account = context
-            .evm
-            .inner
-            .journaled_state
-            .load_account(beneficiary, &mut context.evm.inner.db)?;
-
-        coinbase_account.data.mark_touch();
-        coinbase_account.data.info.balance = coinbase_account.data.info.balance.saturating_add(
-            coinbase_gas_price * U256::from(gas.spent() - gas.refunded() as u64) * token_ratio,
-        );
-
-        // Send the L1 cost of the transaction to the L1 Fee Vault.
-        let mut l1_fee_vault_account = context
-            .evm
-            .inner
-            .journaled_state
-            .load_account(optimism::L1_FEE_RECIPIENT, &mut context.evm.inner.db)?;
-        l1_fee_vault_account.mark_touch();
-        l1_fee_vault_account.info.balance += l1_cost;
-
+    if !is_deposit {
         // Send the base fee of the transaction to the Base Fee Vault.
         let mut base_fee_vault_account = context
             .evm
@@ -480,13 +413,11 @@ pub fn end<SPEC: Spec, EXT, DB: Database>(
 
 #[cfg(test)]
 mod tests {
-    use core::str::FromStr;
-
     use super::*;
     use crate::{
         db::{EmptyDB, InMemoryDB},
         primitives::{
-            address, bytes, state::AccountInfo, Address, BedrockSpec, Bytes, Env, LatestSpec,
+            bytes, state::AccountInfo, Address, BedrockSpec, Bytes, Env, LatestSpec,
             RegolithSpec, B256,
         },
         L1BlockInfo,

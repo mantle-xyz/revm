@@ -43,7 +43,7 @@ pub use journaled_state::{JournalCheckpoint, JournalEntry, JournaledState};
 // export Optimism types, helpers, and constants
 #[cfg(feature = "optimism")]
 pub use optimism::{
-    L1BlockInfo, BASE_FEE_RECIPIENT, GAS_ORACLE_CONTRACT, L1_BLOCK_CONTRACT, L1_FEE_RECIPIENT,
+    L1BlockInfo, BASE_FEE_RECIPIENT, GAS_ORACLE_CONTRACT, L1_BLOCK_CONTRACT, L1_FEE_RECIPIENT, SEQUENCER_FEE_VAULT_ADDRESS,
 };
 
 // Reexport libraries
