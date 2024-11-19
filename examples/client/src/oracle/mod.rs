@@ -1,4 +1,4 @@
-use super::{hint::HintType, utils};
+use crate::{hint::HintType, utils};
 use alloc::{sync::Arc, vec::Vec};
 use alloy::providers::Provider;
 use alloy::{
@@ -16,11 +16,13 @@ use kona_preimage::{
     PreimageOracleClient,
 };
 use op_alloy_network::Optimism;
+use rkyv::ser::{serializers::AllocSerializer, Serializer};
 use spin::Mutex;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
 
+/// MantleProviderOracle is a preimage oracle that uses a Mantle provider to fetch preimages.
 #[derive(Debug, Clone)]
 pub struct MantleProviderOracle {
     provider: Arc<ReqwestProvider<Optimism>>,
@@ -28,6 +30,7 @@ pub struct MantleProviderOracle {
 }
 
 impl MantleProviderOracle {
+    /// Creates a new MantleProviderOracle instance.
     pub fn new(provider: Arc<ReqwestProvider<Optimism>>, cache_size: usize) -> Self {
         Self {
             provider,
@@ -37,6 +40,33 @@ impl MantleProviderOracle {
 }
 
 impl MantleProviderOracle {
+    /// Dumps the cache to a binary file.
+    pub fn dump_cache_to_binary_file(&self, file_path: &str) -> Result<(), PreimageOracleError> {
+        let cache_lock = self.cache.lock();
+
+        let mut binary_cache: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
+
+        for (key, value) in cache_lock.iter() {
+            binary_cache.insert((*key).into(), value.to_vec());
+        }
+
+        let mut serializer = AllocSerializer::<0>::default();
+        serializer.serialize_value(&binary_cache).map_err(|e| {
+            PreimageOracleError::Other(format!("Failed to serialize cache: {}", e))
+        })?;
+
+        let bytes = serializer.into_serializer().into_inner();
+
+        std::fs::write(file_path, bytes).map_err(|e| {
+            PreimageOracleError::Other(format!("Failed to write cache to file: {}", e))
+        })?;
+
+        Ok(())
+    }
+}
+
+impl MantleProviderOracle {
+    /// Stores trie nodes in the cache.
     async fn store_trie_nodes<T: AsRef<[u8]>>(
         &self,
         nodes: &[T],
@@ -70,6 +100,7 @@ impl MantleProviderOracle {
 
 #[async_trait]
 impl PreimageOracleClient for MantleProviderOracle {
+    /// Gets a preimage from the cache.
     async fn get(&self, key: PreimageKey) -> Result<Vec<u8>, PreimageOracleError> {
         let cache_lock = self.cache.lock();
         cache_lock
@@ -78,6 +109,7 @@ impl PreimageOracleClient for MantleProviderOracle {
             .ok_or_else(|| PreimageOracleError::KeyNotFound)
     }
 
+    /// Gets an exact preimage from the cache.
     async fn get_exact(&self, key: PreimageKey, buf: &mut [u8]) -> Result<(), PreimageOracleError> {
         let cache_lock = self.cache.lock();
         // let mut cache_lock_clone = cache_lock.clone();
@@ -92,6 +124,7 @@ impl PreimageOracleClient for MantleProviderOracle {
 
 #[async_trait]
 impl HintWriterClient for MantleProviderOracle {
+    /// Writes a hint to the cache.
     async fn write(&self, hint: &str) -> Result<(), PreimageOracleError> {
         let (hint_type, hint_data) =
             utils::parse_hint(hint).map_err(|e| PreimageOracleError::Other(e.to_string()))?;

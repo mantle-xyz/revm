@@ -26,3 +26,4 @@ utils
 # transactions
 examples.md
 .env
+*.bin

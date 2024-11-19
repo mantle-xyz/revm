@@ -78,6 +78,8 @@ async fn main() {
 
     println!("cycle-tracker-start: execution-instantiation");
     let oracle = Arc::new(MantleProviderOracle::new(client.clone(), 1024));
+    // let input = std::fs::read(format!("cache-{}.bin", block_number).as_str()).unwrap();
+    // let oracle = Arc::new(InMemoryOracle::from_raw_bytes(input));
     let mantle_provider = OracleL2ChainProvider::new(oracle.clone());
     let mut executor = StatelessL2BlockExecutor::builder(
         &config,
@@ -105,6 +107,10 @@ async fn main() {
     let output_root = executor.compute_output_root().unwrap();
     println!("Output root: {}", output_root);
     println!("cycle-tracker-end: output-root");
+
+    println!("cycle-tracker-start: cache-dump");
+    oracle.dump_cache_to_binary_file(format!("cache-{}.bin", new_block_number).as_str()).unwrap();
+    println!("cycle-tracker-end: cache-dump");
 }
 
 fn mock_rollup_config() -> RollupConfig {

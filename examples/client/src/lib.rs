@@ -4,6 +4,9 @@ extern crate alloc;
 mod errors;
 mod hint;
 mod utils;
+mod hasher;
+
+pub mod memoryoracle;
 
 pub mod oracle;
 
