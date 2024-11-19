@@ -7,7 +7,8 @@ edition = "2021"
 async-trait = "0.1.83"
 alloy-rlp = { version = "0.3.9", default-features = false }
 
-alloy-consensus = { version = "0.5.4", features = ["k256"] }
+# alloy
+alloy-consensus = { version = "0.4.2", features = ["k256"] }
 alloy-primitives = { version = "0.8.5", features = ["rlp"] }
 alloy = { version = "0.4.2", features = [
     "providers",
@@ -16,24 +17,20 @@ alloy = { version = "0.4.2", features = [
     "rlp",
     "rpc-types",
 ] }
+# op-alloy
 op-alloy = { version = "0.6.3", features = [
     "provider",
-    #    "eips",
-    #    "consensus",
-    #    "rlp",
-    #    "rpc-types"
 ] }
+op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy" }
 
-op-alloy-network = { path = "../../../op-alloy/crates/network" }
 #kona
-#kona-executor = "0.0.4"
-kona-mpt = { path = "../../../kona/crates/mpt", default-features = false }
-kona-preimage = { path = "../../../kona/crates/preimage" }
-kona-common = { path = "../../../kona/crates/common" }
-derive_more = "1.0.0"
-serde_json = "1.0.132"
+kona-mpt = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona", default-features = false }
+kona-preimage = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona" }
+kona-common = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona" }
 
 # mics
+serde_json = "1.0.132"
+derive_more = "1.0.0"
 anyhow = "1.0.89"
 lru = "0.12.4"
 spin = "0.9.8"

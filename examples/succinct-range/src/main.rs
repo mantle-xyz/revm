@@ -111,11 +111,7 @@ fn mock_rollup_config() -> RollupConfig {
     RollupConfig {
         l2_chain_id: 5000,
         regolith_time: Some(0),
-        // canyon_time: Some(0),
-        // delta_time: Some(0),
-        // ecotone_time: None,
-        // base_fee_params: OP_MAINNET_BASE_FEE_PARAMS.as_base_fee_params(),
-        // canyon_base_fee_params: OP_MAINNET_BASE_FEE_PARAMS.as_canyon_base_fee_params(),
+        shanghai_time: Some(0),
         ..Default::default()
     }
 }
@@ -142,7 +138,7 @@ fn convert_header(header: RpcHeader) -> Header {
         blob_gas_used: header.blob_gas_used,
         excess_blob_gas: header.excess_blob_gas,
         parent_beacon_block_root: header.parent_beacon_block_root,
-        requests_hash: header.requests_root,
+        requests_root: header.requests_root,
     }
 }
 
@@ -160,6 +156,6 @@ fn prepare_payload(header: RpcHeader, txs: Vec<Bytes>) -> OpPayloadAttributes {
         gas_limit: Some(
             header.gas_limit
         ),
-        eip_1559_params: None,
+        base_fee: None,
     }
 }
