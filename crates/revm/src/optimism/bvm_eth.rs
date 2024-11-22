@@ -7,6 +7,7 @@ use crate::{
 use revm_primitives::{alloy_primitives::Keccak256};
 use revm_interpreter::Host;
 use revm_precompile::{utilities::left_pad, Log};
+use std::vec::Vec;
 
 const BVM_ETH_ADDR: Address = address!("dEAddEaDdeadDEadDEADDEAddEADDEAddead1111");
 /// keccak("Mint(address,uint256)") =

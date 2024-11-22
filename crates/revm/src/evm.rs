@@ -14,6 +14,7 @@ use crate::{
 use core::fmt;
 use revm_interpreter::as_u64_saturated;
 use std::{boxed::Box, vec::Vec};
+use std::string::ToString;
 
 /// EVM call stack limit.
 pub const CALL_STACK_LIMIT: u64 = 1024;
