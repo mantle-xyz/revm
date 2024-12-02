@@ -23,31 +23,32 @@ revm-primitives = { path = "../../crates/primitives", features = [
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros"] }
 
 # alloy
-alloy-consensus = { version = "0.4.2", features = ["k256"] }
-alloy-rpc-types-engine = "0.4.2"
-alloy-primitives = { version = "0.8.5", features = ["rlp"] }
-alloy = { version = "0.4.2", features = [
+alloy-consensus = { version = "0.6.4", features = ["k256"] }
+alloy-rpc-types-engine = "0.6.4"
+alloy-primitives = { version = "0.8.12", features = ["rlp"] }
+alloy = { version = "0.6.4", features = [
     "providers",
     "eips",
     "rpc-types",
     "rlp"
 ] }
-
+alloy-rpc-types = { version = "0.6.4", default-features = false, features = ["debug"] }
 
 #op-alloy
-op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy", features = [
+op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4", features = [
     "k256",
 ] }
-op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy" }
-op-alloy-rpc-types = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy" }
-op-alloy-rpc-types-engine = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy" }
-op-alloy-genesis = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy" }
+op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
+op-alloy-rpc-types = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
+op-alloy-rpc-types-engine = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
+op-alloy-genesis = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
 
-#op-alloy-provider = "0.4.2"
 indicatif = "0.17"
-kona-executor = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona" }
-kona-mpt = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona", default-features = false }
-kona-client = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona" }
+kona-executor = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
+kona-driver = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
+kona-proof = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
+kona-mpt = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt", default-features = false }
+kona-client = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
 client = { path = "../client" }
 
 # mics
