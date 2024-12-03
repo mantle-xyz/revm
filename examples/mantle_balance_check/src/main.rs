@@ -1,28 +1,56 @@
 //! Optimism-specific constants, types, and helpers.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-
-use alloy::{
-    eips::{eip2718::Decodable2718, BlockNumberOrTag},
-    providers::{Provider, ProviderBuilder},
-};
-use alloy_consensus::Header;
-use alloy_primitives::{Bytes, Sealable};
+use alloy_eips::eip2718::Decodable2718;
+use alloy_primitives::Bytes;
 use anyhow::{anyhow, Result};
-use client::{mantle::OracleL2ChainProvider, oracle::MantleProviderOracle};
 use dotenv::dotenv;
-use kona_executor::TrieDB;
+use ethers_core::types::{Transaction, H256};
+use ethers_providers::Middleware;
+use ethers_providers::{Http, Provider};
 use op_alloy_consensus::OpTxEnvelope;
-use op_alloy_network::Optimism;
-use revm::primitives::{OptimismFields, SpecId, TransactTo, TxEnv, TxKind, B256, U256};
-use revm::{
-    db::{states::bundle_state::BundleRetention, State},
-    EvmBuilder,
-    SEQUENCER_FEE_VAULT_ADDRESS,
-};
-use revm_primitives::bitvec::macros::internal::funty::Fundamental;
+use revm::db::{CacheDB, EthersDB};
+use revm::inspectors::TracerEip3155;
+use revm::primitives::{Address, OptimismFields, SpecId, TransactTo, TxEnv, TxKind, U256};
+use revm::{inspector_handle_register, Database, Evm, L1_BLOCK_CONTRACT};
+use std::fs::OpenOptions;
+use std::io::BufWriter;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
+
+macro_rules! local_fill {
+    ($left:expr, $right:expr, $fun:expr) => {
+        if let Some(right) = $right {
+            $left = $fun(right.0)
+        }
+    };
+    ($left:expr, $right:expr) => {
+        if let Some(right) = $right {
+            $left = Address::from(right.as_fixed_bytes())
+        }
+    };
+}
+
+struct FlushWriter {
+    writer: Arc<Mutex<BufWriter<std::fs::File>>>,
+}
+
+impl FlushWriter {
+    fn new(writer: Arc<Mutex<BufWriter<std::fs::File>>>) -> Self {
+        Self { writer }
+    }
+}
+
+impl Write for FlushWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writer.lock().unwrap().write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.lock().unwrap().flush()
+    }
+}
 
 struct CheckerRecord {
     total: u64,
@@ -58,9 +86,10 @@ impl CheckerRecord {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let start = 71632023;
-    // let start = 71301230;
-    dotenv().ok();
+    // let start = 71014131;// 4500
+    // let start = 71291726; // 4500, tx_number: 1
+    // let start = 71219156; // 4500, tx_number: 1
+    let start = 71207577;
     let record = Arc::new(Mutex::new(CheckerRecord::new()));
     for block_number in start..start + 1 {
         range(block_number, record.clone()).await?;
@@ -70,82 +99,57 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn range(block_number: u64, record: Arc<Mutex<CheckerRecord>>) -> anyhow::Result<()> {
-    let chain_id: u64 = 5000;
+    dotenv().ok();
     let mantle_url = std::env::var("MANTLE_URL").unwrap();
 
-    let url = mantle_url.as_str();
-    let client = ProviderBuilder::new()
-        .network::<Optimism>()
-        .on_http(url.parse().unwrap());
+    // Provider with debug tracing
+    let client = Provider::<Http>::try_from(
+        mantle_url,
+    )?;
     let client = Arc::new(client);
 
-    let prev_block = client
-        .get_block_by_number(BlockNumberOrTag::from(block_number - 1), true)
-        .await
-        .unwrap()
-        .ok_or(anyhow!("Block not found"))
-        .unwrap();
-    //
-    let block = client
-        .get_block_by_number(BlockNumberOrTag::from(block_number), true)
-        .await
-        .unwrap()
-        .ok_or(anyhow!("Block not found"))
-        .unwrap();
+    // Params
+    let chain_id: u64 = 5000;
+    let block_number = block_number;
 
-    let oracle = Arc::new(MantleProviderOracle::new(client.clone(), 1024));
-    let mantle_provider = OracleL2ChainProvider::new(oracle.clone());
-    let trie_db = TrieDB::new(
-        prev_block.header.state_root,
-        Header {
-            parent_hash: prev_block.header.parent_hash,
-            ommers_hash: prev_block.header.uncles_hash,
-            beneficiary: prev_block.header.miner,
-            state_root: prev_block.header.state_root,
-            transactions_root: prev_block.header.transactions_root,
-            receipts_root: prev_block.header.receipts_root,
-            logs_bloom: prev_block.header.logs_bloom,
-            difficulty: prev_block.header.difficulty,
-            number: prev_block.header.number,
-            gas_limit: prev_block.header.gas_limit,
-            gas_used: prev_block.header.gas_used,
-            timestamp: prev_block.header.timestamp,
-            extra_data: prev_block.header.extra_data,
-            mix_hash: prev_block.header.mix_hash.unwrap_or_default(),
-            nonce: prev_block.header.nonce.unwrap_or_default(),
-            base_fee_per_gas: prev_block.header.base_fee_per_gas,
-            withdrawals_root: prev_block.header.withdrawals_root,
-            blob_gas_used: prev_block.header.blob_gas_used,
-            excess_blob_gas: prev_block.header.excess_blob_gas,
-            parent_beacon_block_root: prev_block.header.parent_beacon_block_root,
-            requests_hash: prev_block.header.requests_root,
-        }
-            .seal_slow(),
-        mantle_provider.clone(),
-        mantle_provider.clone(),
-    );
+    // Fetch the transaction-rich block
+    let block = match client.get_block_with_txs(block_number).await {
+        Ok(Some(block)) => block,
+        Ok(None) => anyhow::bail!("Block not found"),
+        Err(error) => anyhow::bail!("Error: {:?}", error),
+    };
+    println!("Fetched block number: {}", block.number.unwrap().0[0]);
+    let previous_block_number = block_number - 1;
 
-    let mut state = State::builder()
-        .with_database(trie_db)
-        .with_bundle_update()
-        .build();
-    let mut evm = EvmBuilder::default()
-        .with_db(&mut state)
+    // Use the previous block state as the db with caching
+    let prev_id = previous_block_number.into();
+
+    // SAFETY: This cannot fail since this is in the top-level tokio runtime
+    let state_db = EthersDB::new(client.clone(), Some(prev_id)).expect("panic");
+    let mut cache_db = CacheDB::new(state_db);
+
+    let mut evm = Evm::builder()
+        .with_db(&mut cache_db)
+        .with_external_context(TracerEip3155::new(Box::new(std::io::stdout())))
+        .modify_block_env(|b| {
+            if let Some(number) = block.number {
+                let nn = number.0[0];
+                b.number = U256::from(nn);
+            }
+            local_fill!(b.coinbase, block.author);
+            local_fill!(b.timestamp, Some(block.timestamp), U256::from_limbs);
+            local_fill!(b.difficulty, Some(block.difficulty), U256::from_limbs);
+            local_fill!(b.gas_limit, Some(block.gas_limit), U256::from_limbs);
+            if let Some(base_fee) = block.base_fee_per_gas {
+                local_fill!(b.basefee, Some(base_fee), U256::from_limbs);
+            }
+        })
         .with_spec_id(SpecId::SHANGHAI)
         .modify_cfg_env(|c| {
             c.chain_id = chain_id;
         })
-        .modify_block_env(|b| {
-            b.number = U256::from(block.header.number);
-            b.timestamp = U256::from(block.header.timestamp);
-            b.difficulty = U256::ZERO;
-            // b.base_fee_per_gas = U256::from(block.header.base_fee_per_gas);
-            b.coinbase = SEQUENCER_FEE_VAULT_ADDRESS;
-            b.basefee = U256::from(block.header.base_fee_per_gas.unwrap());
-            b.gas_limit = U256::from(block.header.gas_limit);
-        })
         .optimism()
-        // .append_handler_register(inspector_handle_register)
+        .append_handler_register(inspector_handle_register)
         .build();
 
     let txs = block.transactions.len();
@@ -153,48 +157,60 @@ async fn range(block_number: u64, record: Arc<Mutex<CheckerRecord>>) -> anyhow::
 
     let start = Instant::now();
 
-    for tx in block.transactions.as_transactions().unwrap() {
-        let tx_number = tx.inner.transaction_index.unwrap();
+    // Create the traces directory if it doesn't exist
+    std::fs::create_dir_all("traces").expect("Failed to create traces directory");
+
+    for tx in block.transactions {
+        let tx_number = tx.transaction_index.unwrap().0[0];
         // if tx_number != 1 {
         //     continue;
         // }
         println!("current tx_number: {:?}", tx_number);
-        let tx_hash = tx.inner.hash;
+        let tx_hash = tx.hash;
         let raw_tx = client
-            .client()
-            .request::<&[B256; 1], Bytes>("debug_getRawTransaction", &[tx_hash])
+            .request::<&[H256; 1], Bytes>("debug_getRawTransaction", &[tx_hash.into()])
             .await
-            .map_err(|e| anyhow!("Failed to fetch raw transaction: {e}"))
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to fetch raw transaction: {e}"))?;
         let op_tx = OpTxEnvelope::decode_2718(&mut raw_tx.as_ref())
-            .map_err(|e| anyhow!("Failed to decode EIP-2718 transaction: {e}"))
-            .unwrap();
-        let env = prepare_tx_env(&op_tx, raw_tx.as_ref()).unwrap();
+            .map_err(|e| anyhow!("Failed to decode EIP-2718 transaction: {e}"))?;
+        let env = prepare_tx_env(&op_tx, raw_tx.as_ref())?;
         evm = evm.modify().with_tx_env(env).build();
+
         println!(
             "--------------- {:?}: {:?}({:?}) ------------------",
             tx_number,
             tx_hash,
             op_tx.tx_type()
         );
-        if let OpTxEnvelope::Deposit(deposit) = &op_tx {
-            evm.db_mut().load_cache_account(deposit.from).unwrap();
-        }
 
+        let file_name = format!("traces/{}.json", tx_number);
+        let write = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(file_name);
+        let inner = Arc::new(Mutex::new(BufWriter::new(
+            write.expect("Failed to open file"),
+        )));
+        let writer = FlushWriter::new(Arc::clone(&inner));
+        evm.context.external.set_writer(Box::new(writer));
+        // let ResultAndState { result, state } = evm
+        //     .transact()
+        //     .map_err(|e| anyhow!("Failed to transact: {e}"))?;
         let result = evm
             .transact_commit()
-            .map_err(|e| anyhow!("Failed to transact: {e}"))
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to transact: {e}"))?;
         let gas_used = result.gas_used();
+
         let expected_gas_used = client
             .get_transaction_receipt(tx_hash)
-            .await
+            .await?
             .unwrap()
-            .map(|receipt| receipt.inner.gas_used)
+            .gas_used
             .unwrap();
         print!("Expected gas used: {:?}, ", expected_gas_used);
         print!("Actual gas used: {:?} ", gas_used);
-        if expected_gas_used == gas_used.as_u128() {
+        if expected_gas_used.as_u64() == gas_used {
             println!("--- passed✅");
         } else {
             println!("--- failed❌");
@@ -202,28 +218,70 @@ async fn range(block_number: u64, record: Arc<Mutex<CheckerRecord>>) -> anyhow::
         record
             .lock()
             .unwrap()
-            .add(expected_gas_used == gas_used.as_u128());
+            .add(expected_gas_used.as_u64() == gas_used);
+
+        // for (address, account) in &state {
+        //     if account.is_touched() {
+        //         println!("---------------------------------");
+        //         println!("after transaction");
+        //         let balance = evm.db_mut().basic(*address)?.map(|info| info.balance);
+        //         println!("{:?}'s Balance: {:?}", address, balance);
+        //     }
+        // }
     }
     let elapsed = start.elapsed();
     println!(
         "Finished execution. Total CPU time: {:.6}s",
         elapsed.as_secs_f64()
     );
-    record.lock().unwrap().print();
     drop(evm);
-    state.merge_transitions(BundleRetention::Reverts);
-    let bundle = state.take_bundle();
-    let state_root = state
-        .database
-        .state_root(&bundle)
-        .expect("Failed to compute state root");
-    if block.header.state_root != state_root {
-        println!("State root mismatch: {:?}(block) != {:?}(revm)", block.header.state_root,
-                 state_root);
-    } else {
-        println!("State root matches: {:?}", state_root);
-    }
     Ok(())
+}
+
+async fn sync_system_storage(
+    client: Arc<Provider<Http>>,
+    block_num: u64,
+    db: &mut CacheDB<EthersDB<Provider<Http>>>,
+) -> () {
+    let mut state_db = EthersDB::new(client.clone(), Some(block_num.into())).expect("panic");
+    let l1_base_fee_slot = U256::from_limbs([1u64, 0, 0, 0]);
+    let storage = state_db
+        .storage(L1_BLOCK_CONTRACT, l1_base_fee_slot)
+        .expect("panic");
+    println!("storage is {:?}", storage);
+    db.insert_account_storage(L1_BLOCK_CONTRACT, l1_base_fee_slot, storage)
+        .expect("panic");
+}
+
+// inspired by kona:
+//      - crates/executor/src/executor/mod.rs#151
+//      - bin/host/src/fetcher/mod.rs@store_transactions
+#[allow(dead_code)]
+async fn convert_tx_to_op(
+    txs: Vec<Transaction>,
+    client: Arc<Provider<Http>>,
+) -> Result<Vec<(OpTxEnvelope, Bytes)>> {
+    // println!("Fetching all transactions...,len:{}", txs.len());
+    let mut encoded_transactions = Vec::with_capacity(txs.len());
+    for tx in txs {
+        let tx_hash = tx.hash;
+        println!("Fetching transaction: {:?}", tx_hash);
+        let raw_tx = client
+            .request::<&[H256; 1], Bytes>("debug_getRawTransaction", &[tx_hash.into()])
+            .await
+            .map_err(|e| anyhow!("Failed to fetch raw transaction: {e}"))?;
+        encoded_transactions.push(raw_tx);
+    }
+    let decoded_txs = encoded_transactions
+        .iter()
+        .map(|raw_tx| {
+            let tx = OpTxEnvelope::decode_2718(&mut raw_tx.as_ref())
+                .map_err(|e| anyhow!("Failed to decode EIP-2718 transaction: {e}"))?;
+            Ok((tx, raw_tx.clone()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(decoded_txs)
+    // let enc
 }
 
 /// Prepares a [TxEnv] with the given [OpTxEnvelope].

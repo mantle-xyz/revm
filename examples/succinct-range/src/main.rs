@@ -1,10 +1,10 @@
 //! Optimism-specific constants, types, and helpers.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use alloy::network::primitives::BlockTransactions;
+// use alloy::network::primitives::BlockTransactions;
 use alloy::{
     eips::BlockNumberOrTag,
-    network::primitives::BlockTransactionsKind,
+    network::primitives::{BlockTransactionsKind, BlockTransactions},
     providers::{Provider, ProviderBuilder},
     rpc::types::Header as RpcHeader,
 };
@@ -44,8 +44,8 @@ async fn main() {
     // ----------------------------
 
     dotenv().ok();
-    let block_number = 71632023;
-    // let block_number = 72357146;
+    // let block_number = 71632023;
+    let block_number = 72499926;
     let mantle_url = std::env::var("MANTLE_URL").unwrap();
     let url = mantle_url.as_str();
     let client = ProviderBuilder::new()

@@ -6,8 +6,9 @@ members = [
     "crates/primitives",
     "crates/interpreter",
     "crates/precompile",
-    #    "examples/mantle_balance_check",
-    "examples/client", "examples/succinct-range",
+    "examples/mantle_balance_check",
+    "examples/client",
+    "examples/succinct-range",
 ]
 resolver = "2"
 default-members = ["crates/revm"]

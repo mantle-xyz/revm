@@ -35,20 +35,13 @@ alloy = { version = "0.6.4", features = [
 alloy-rpc-types = { version = "0.6.4", default-features = false, features = ["debug"] }
 
 #op-alloy
-op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4", features = [
-    "k256",
-] }
 op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
 op-alloy-rpc-types = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
 op-alloy-rpc-types-engine = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
 op-alloy-genesis = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
 
-indicatif = "0.17"
-kona-executor = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
 kona-driver = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
 kona-proof = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
-kona-mpt = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt", default-features = false }
-kona-client = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
 client = { path = "../client" }
 
 # mics

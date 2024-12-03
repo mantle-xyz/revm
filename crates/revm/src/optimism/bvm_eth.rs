@@ -4,9 +4,9 @@ use crate::{
     },
     Context,
 };
-use revm_primitives::{alloy_primitives::Keccak256};
 use revm_interpreter::Host;
 use revm_precompile::{utilities::left_pad, Log};
+use revm_primitives::alloy_primitives::Keccak256;
 use std::vec::Vec;
 
 const BVM_ETH_ADDR: Address = address!("dEAddEaDdeadDEadDEADDEAddEADDEAddead1111");
@@ -94,6 +94,7 @@ pub(crate) fn mint_bvm_eth<EXT, DB: Database>(context: &mut Context<EXT, DB>, et
 }
 
 pub(crate) fn transfer_bvm_eth<EXT, DB: Database>(context: &mut Context<EXT, DB>, eth_value: U256) {
+    let checkpoint = context.evm.journaled_state.checkpoint();
     let from = context.evm.inner.env.tx.caller;
     let to = match context.evm.inner.env.tx.transact_to {
         TxKind::Call(caller) => caller,
@@ -101,6 +102,7 @@ pub(crate) fn transfer_bvm_eth<EXT, DB: Database>(context: &mut Context<EXT, DB>
     };
 
     if from == to {
+        context.evm.journaled_state.checkpoint_revert(checkpoint);
         return;
     }
 
@@ -110,8 +112,9 @@ pub(crate) fn transfer_bvm_eth<EXT, DB: Database>(context: &mut Context<EXT, DB>
     let mut from_amount = context.sload(BVM_ETH_ADDR, from_key).unwrap().data;
     let mut to_amount = context.sload(BVM_ETH_ADDR, to_key).unwrap().data;
 
-    // mock, modify it
+    // mock, modify it, need error handling
     if from_amount < eth_value {
+        context.evm.journaled_state.checkpoint_revert(checkpoint);
         return;
     }
 

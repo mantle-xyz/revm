@@ -3,7 +3,6 @@ name = "example-block-traces"
 version = "0.0.0"
 publish = false
 edition = "2021"
-rust-version = "1.81"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -21,52 +20,23 @@ all = "warn"
 revm = { path = "../../crates/revm", features = [
     "std",
     "serde-json",
-    #    "ethersdb",
-    "optimism",
-    "kzg-rs",
-] }
-revm-primitives = { path = "../../crates/primitives", features = [
-    "std",
-    "serde",
-    "hashbrown",
-    "asm-keccak",
-    "portable",
+    "ethersdb",
     "optimism",
 ] }
-#ethers-providers = { version = "2.0", features = ["default", "optimism"] }
-#ethers-core = { version = "2.0.14", features = ["optimism"] }
+ethers-providers = { version = "2.0", features = ["default", "optimism"] }
+ethers-core = { version = "2.0.14", features = ["optimism"] }
 
 # tokio
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros"] }
 
 # alloy
-#alloy-eips = "0.4.2"
-#alloy-provider = "0.4.2"
-alloy-consensus = { version = "0.5.4", features = ["k256"] }
-#alloy-rpc-types = "0.4.2"
-alloy-primitives = { version = "0.8.5", features = ["rlp"] }
-alloy = { version = "0.4.2", features = [
-    "providers",
-    "eips",
-    "rpc-types",
-    "rlp",
-] }
+alloy-eips = "0.6.4"
+alloy-primitives = { version = "0.8.12", features = ["rlp"] }
+alloy-consensus = { version = "0.4.2", features = ["k256"] }
 
 #op-alloy
-op-alloy-consensus = { path = "../../../op-alloy/crates/consensus", features = [
-    "k256",
-] }
-op-alloy-network = { path = "../../../op-alloy/crates/network" }
-op-alloy-genesis = "0.6.2"
-
-#op-alloy-provider = "0.4.2"
-indicatif = "0.17"
-kona-executor = { path = "../../../kona/crates/executor" }
-kona-mpt = { path = "../../../kona/crates/mpt", default-features = false }
-kona-client = { path = "../../../kona/bin/client" }
-client = { path = "../client" }
+op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4", features = ["k256"] }
 
 # mics
 anyhow = "1.0.89"
-log = "0.4.22"
 dotenv = "0.15"
