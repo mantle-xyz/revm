@@ -32,7 +32,6 @@ tokio = { version = "1.40", features = ["rt-multi-thread", "macros"] }
 # alloy
 alloy-eips = "0.6.4"
 alloy-primitives = { version = "0.8.12", features = ["rlp"] }
-alloy-consensus = { version = "0.4.2", features = ["k256"] }
 
 #op-alloy
 op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4", features = ["k256"] }

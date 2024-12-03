@@ -86,9 +86,7 @@ impl CheckerRecord {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // let start = 71014131;// 4500
-    // let start = 71291726; // 4500, tx_number: 1
-    // let start = 71219156; // 4500, tx_number: 1
+    // let start = 66450341; // contract creation
     let start = 71207577;
     let record = Arc::new(Mutex::new(CheckerRecord::new()));
     for block_number in start..start + 1 {

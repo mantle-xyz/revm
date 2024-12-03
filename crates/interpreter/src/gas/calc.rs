@@ -379,10 +379,10 @@ pub fn validate_initial_tx_gas(
     // EIP-2028: Transaction data gas cost reduction
     initial_gas += non_zero_data_len
         * if spec_id.is_enabled_in(SpecId::ISTANBUL) {
-            16
-        } else {
-            68
-        };
+        16
+    } else {
+        68
+    };
 
     // get number of access list account and storages.
     if spec_id.is_enabled_in(SpecId::BERLIN) {
@@ -405,9 +405,10 @@ pub fn validate_initial_tx_gas(
 
     // EIP-3860: Limit and meter initcode
     // Init code stipend for bytecode analysis
-    if spec_id.is_enabled_in(SpecId::SHANGHAI) && is_create {
-        initial_gas += initcode_cost(input.len() as u64)
-    }
+    // FIXME: remove this when EIP-3860 is implemented in Mantle
+    // if spec_id.is_enabled_in(SpecId::SHANGHAI) && is_create {
+    //     initial_gas += initcode_cost(input.len() as u64)
+    // }
 
     //   EIP-7702
     if spec_id.is_enabled_in(SpecId::PRAGUE) {

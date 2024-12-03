@@ -128,20 +128,6 @@ dependencies = [
 
 [[package]]
 name = "alloy-consensus"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "705687d5bfd019fee57cf9e206b27b30a9a9617535d5590a02b171e813208f8e"
-dependencies = [
- "alloy-eips 0.4.2",
- "alloy-primitives",
- "alloy-rlp",
- "auto_impl",
- "c-kzg",
- "derive_more",
-]
-
-[[package]]
-name = "alloy-consensus"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae09ffd7c29062431dd86061deefe4e3c6f07fa0d674930095f8dcedb0baf02c"
@@ -208,7 +194,6 @@ checksum = "ea59dc42102bc9a1905dc57901edc6dd48b9f38115df86c7d252acba70d71d04"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
- "k256",
  "serde",
 ]
 
@@ -251,23 +236,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-serde 0.3.6",
- "c-kzg",
- "derive_more",
- "once_cell",
- "serde",
- "sha2",
-]
-
-[[package]]
-name = "alloy-eips"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ffb906284a1e1f63c4607da2068c8197458a352d0b3e9796e67353d72a9be85"
-dependencies = [
- "alloy-eip2930",
- "alloy-eip7702 0.1.1",
- "alloy-primitives",
- "alloy-rlp",
  "c-kzg",
  "derive_more",
  "once_cell",
@@ -2058,7 +2026,6 @@ dependencies = [
 name = "example-block-traces"
 version = "0.0.0"
 dependencies = [
- "alloy-consensus 0.4.2",
  "alloy-eips 0.6.4",
  "alloy-primitives",
  "anyhow",
