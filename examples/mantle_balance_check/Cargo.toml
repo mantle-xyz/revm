@@ -1,5 +1,5 @@
 [package]
-name = "example-block-traces"
+name = "example-balance-check"
 version = "0.0.0"
 publish = false
 edition = "2021"

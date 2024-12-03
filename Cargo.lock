@@ -2023,7 +2023,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "example-block-traces"
+name = "example-balance-check"
 version = "0.0.0"
 dependencies = [
  "alloy-eips 0.6.4",

@@ -8,19 +8,15 @@ use crate::{
     interpreter::{as_u64_saturated, return_ok, return_revert, Gas, InstructionResult},
     optimism,
     primitives::{
-        db::Database,
-        spec_to_generic, Account, EVMError, Env, ExecutionResult, HaltReason,
-        HashMap, InvalidTransaction, OptimismInvalidTransaction, ResultAndState, Spec,
-        SpecId,
-        SpecId::REGOLITH,
-        U256,
+        db::Database, spec_to_generic, Account, EVMError, Env, ExecutionResult, HaltReason,
+        HashMap, InvalidTransaction, OptimismInvalidTransaction, ResultAndState, Spec, SpecId,
+        SpecId::REGOLITH, U256,
     },
-    Context, ContextPrecompiles, FrameOrResult, FrameResult,
+    Context, ContextPrecompiles, FrameResult,
 };
-use core::{ops::Mul, str::FromStr};
+use core::ops::Mul;
 use revm_precompile::{secp256r1, PrecompileSpecId};
 use std::sync::Arc;
-
 
 pub fn optimism_handle_register<DB: Database, EXT>(handler: &mut EvmHandler<'_, EXT, DB>) {
     spec_to_generic!(handler.cfg.spec_id, {
@@ -281,10 +277,9 @@ pub fn reimburse_caller<SPEC: Spec, EXT, DB: Database>(
             .inner
             .journaled_state
             .load_account(caller, &mut context.evm.inner.db)?;
-        caller_account.data.info.balance =
-            caller_account.data.info.balance.saturating_add(
-                effective_gas_price * U256::from(gas.remaining() + gas.refunded() as u64)
-            );
+        caller_account.data.info.balance = caller_account.data.info.balance.saturating_add(
+            effective_gas_price * U256::from(gas.remaining() + gas.refunded() as u64),
+        );
     }
     Ok(())
 }
@@ -417,8 +412,8 @@ mod tests {
     use crate::{
         db::{EmptyDB, InMemoryDB},
         primitives::{
-            bytes, state::AccountInfo, Address, BedrockSpec, Bytes, Env, LatestSpec,
-            RegolithSpec, B256,
+            bytes, state::AccountInfo, Address, BedrockSpec, Bytes, Env, LatestSpec, RegolithSpec,
+            B256,
         },
         L1BlockInfo,
     };
