@@ -34,7 +34,9 @@ alloy-eips = "0.6.4"
 alloy-primitives = { version = "0.8.12", features = ["rlp"] }
 
 #op-alloy
-op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4", features = ["k256"] }
+op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", tag = "v0.6.5-m", features = [
+    "k256",
+] }
 
 # mics
 anyhow = "1.0.89"

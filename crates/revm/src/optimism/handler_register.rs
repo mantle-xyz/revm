@@ -57,7 +57,7 @@ pub fn validate_env<SPEC: Spec, DB: Database>(env: &Env) -> Result<(), EVMError<
         return Err(InvalidTransaction::OptimismError(
             OptimismInvalidTransaction::DepositSystemTxPostRegolith,
         )
-            .into());
+        .into());
     }
 
     env.validate_tx::<SPEC>()?;
@@ -172,20 +172,21 @@ pub fn last_frame_return<SPEC: Spec, EXT, DB: Database>(
 pub fn load_precompiles<SPEC: Spec, EXT, DB: Database>() -> ContextPrecompiles<DB> {
     let mut precompiles = ContextPrecompiles::new(PrecompileSpecId::from_spec_id(SPEC::SPEC_ID));
 
-    if SPEC::enabled(SpecId::FJORD) {
-        precompiles.extend([
-            // EIP-7212: secp256r1 P256verify
-            secp256r1::P256VERIFY,
-        ])
-    }
+    // Mantle precompiles
+    // see: https://github.com/mantlenetworkio/op-geth/pull/93
+    // if SPEC::enabled(SpecId::FJORD) {
+    precompiles.extend([
+        // EIP-7212: secp256r1 P256verify
+        secp256r1::P256VERIFY,
+    ]);
+    // }
 
-    if SPEC::enabled(SpecId::GRANITE) {
-        precompiles.extend([
-            // Restrict bn256Pairing input size
-            optimism::bn128::pair::GRANITE,
-        ])
-    }
-
+    // if SPEC::enabled(SpecId::GRANITE) {
+    //     precompiles.extend([
+    //         // Restrict bn256Pairing input size
+    //         optimism::bn128::pair::GRANITE,
+    //     ])
+    // }
     precompiles
 }
 

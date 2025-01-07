@@ -92,11 +92,9 @@ async fn main() -> anyhow::Result<()> {
                 local_fill!(b.basefee, Some(base_fee), U256::from_limbs);
             }
         })
-        .with_spec_id(SpecId::CANCUN)
         .modify_cfg_env(|c| {
             c.chain_id = chain_id;
         })
-        .optimism()
         .append_handler_register(inspector_handle_register)
         .build();
 
