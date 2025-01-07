@@ -700,6 +700,10 @@ pub struct OptimismFields {
     /// for non-optimism chains when the `optimism` feature is enabled,
     /// but the [CfgEnv] `optimism` field is set to false.
     pub enveloped_tx: Option<Bytes>,
+    /// EthValue means L2 BVM_ETH mint tag, nil means that there is no need to mint BVM_ETH.
+    pub eth_value: Option<u128>,
+    /// EthTxValue means L2 BVM_ETH tx tag, nil means that there is no need to transfer BVM_ETH to msg.To.
+    pub eth_tx_value: Option<u128>,
 }
 
 /// Transaction destination

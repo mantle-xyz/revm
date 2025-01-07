@@ -36,9 +36,10 @@ pub fn validate_tx_against_state<SPEC: Spec, EXT, DB: Database>(
 }
 
 /// Validate initial transaction gas.
-pub fn validate_initial_tx_gas<SPEC: Spec, DB: Database>(
-    env: &Env,
+pub fn validate_initial_tx_gas<SPEC: Spec, EXT, DB: Database>(
+    context: &mut Context<EXT, DB>,
 ) -> Result<u64, EVMError<DB::Error>> {
+    let env = context.evm.inner.env();
     let input = &env.tx.data;
     let is_create = env.tx.transact_to.is_create();
     let access_list = &env.tx.access_list;

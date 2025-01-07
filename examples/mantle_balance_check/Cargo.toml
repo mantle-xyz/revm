@@ -1,0 +1,43 @@
+[package]
+name = "example-balance-check"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+unreachable_pub = "warn"
+unused_must_use = "deny"
+rust_2018_idioms = "deny"
+
+[lints.rustdoc]
+all = "warn"
+
+[dependencies]
+revm = { path = "../../crates/revm", features = [
+    "std",
+    "serde-json",
+    "ethersdb",
+    "optimism",
+] }
+ethers-providers = { version = "2.0", features = ["default", "optimism"] }
+ethers-core = { version = "2.0.14", features = ["optimism"] }
+
+# tokio
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros"] }
+
+# alloy
+alloy-eips = "0.6.4"
+alloy-primitives = { version = "0.8.12", features = ["rlp"] }
+
+#op-alloy
+op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", tag = "v0.6.5-m", features = [
+    "k256",
+] }
+
+# mics
+anyhow = "1.0.89"
+dotenv = "0.15"

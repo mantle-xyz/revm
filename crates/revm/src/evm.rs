@@ -7,12 +7,14 @@ use crate::{
     },
     primitives::{
         specification::SpecId, BlockEnv, CfgEnv, EVMError, EVMResult, EnvWithHandlerCfg,
-        ExecutionResult, HandlerCfg, ResultAndState, TxEnv, TxKind, EOF_MAGIC_BYTES,
+        ExecutionResult, HandlerCfg, ResultAndState, TxEnv, TxKind, EOF_MAGIC_BYTES, U256,
     },
     Context, ContextWithHandlerCfg, Frame, FrameOrResult, FrameResult,
 };
 use core::fmt;
+use revm_interpreter::as_u64_saturated;
 use std::{boxed::Box, vec::Vec};
+use std::string::ToString;
 
 /// EVM call stack limit.
 pub const CALL_STACK_LIMIT: u64 = 1024;
@@ -198,7 +200,7 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
         let initial_gas_spend = self
             .handler
             .validation()
-            .initial_tx_gas(&self.context.evm.env)
+            .initial_tx_gas(&mut self.context)
             .inspect_err(|_e| self.clear())?;
         let output = self.transact_preverified_inner(initial_gas_spend);
         let output = self.handler.post_execution().end(&mut self.context, output);
@@ -213,7 +215,7 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
         let initial_gas_spend = self
             .handler
             .validation()
-            .initial_tx_gas(&self.context.evm.env)?;
+            .initial_tx_gas(&mut self.context)?;
         self.handler
             .validation()
             .tx_against_state(&mut self.context)?;
@@ -334,7 +336,43 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
         // deduce caller balance with its limit.
         pre_exec.deduct_caller(ctx)?;
 
-        let gas_limit = ctx.evm.env.tx.gas_limit - initial_gas_spend;
+        // The initial_gas_spend is multiplied by the token_ratio in non-deposit transactions
+        // so we don't need to multiply it again.
+        let mut gas_limit = ctx.evm.env.tx.gas_limit - initial_gas_spend;
+        // TODO: FIX ME
+        #[cfg(feature = "optimism")]
+        {
+            let env = ctx.env_mut();
+
+            if self.handler.cfg().is_optimism() {
+                let is_deposit = env.tx.optimism.source_hash.is_some();
+                let tx_system = env.tx.optimism.is_system_transaction.unwrap_or(false);
+                if !is_deposit && !tx_system {
+                    let Some(l1_block_info) = &ctx.evm.inner.l1_block_info else {
+                        return Err(EVMError::Custom(
+                            "[OPTIMISM] Failed to load L1 block information.".to_string(),
+                        ));
+                    };
+                    let Some(enveloped_tx) = &ctx.evm.inner.env.tx.optimism.enveloped_tx else {
+                        return Err(EVMError::Custom(
+                            "[OPTIMISM] Failed to load enveloped transaction.".to_string(),
+                        ));
+                    };
+
+                    let token_ratio = l1_block_info.get_token_ratio();
+                    let mut l1_cost =
+                        l1_block_info.calculate_tx_l1_cost(enveloped_tx, ctx.evm.spec_id());
+                    l1_cost = l1_cost.wrapping_div(ctx.evm.env.effective_gas_price());
+                    if l1_cost.gt(&U256::from(gas_limit)) {
+                        return Err(EVMError::Custom(
+                            "[OPTIMISM] L1 cost is higher than gas limit.".to_string(),
+                        ));
+                    }
+                    gas_limit = gas_limit - as_u64_saturated!(l1_cost);
+                    gas_limit = gas_limit / as_u64_saturated!(token_ratio);
+                }
+            }
+        }
 
         // apply EIP-7702 auth list.
         let eip7702_gas_refund = pre_exec.apply_eip7702_auth_list(ctx)? as i64;
@@ -392,7 +430,6 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use crate::{
         db::BenchmarkDB,
@@ -423,7 +460,7 @@ mod tests {
                         },
                         RecoveredAuthority::Valid(auth),
                     )]
-                    .into(),
+                        .into(),
                 );
                 tx.caller = caller;
                 tx.transact_to = TxKind::Call(auth);

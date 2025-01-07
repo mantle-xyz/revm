@@ -1,0 +1,39 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1.83"
+
+# alloy
+alloy-rlp = { version = "0.3.9", default-features = false }
+alloy-consensus = { version = "0.6.4", features = ["k256"] }
+alloy-primitives = { version = "0.8.12", features = ["rlp"] }
+alloy = { version = "0.6.4", features = [
+    "providers",
+    "eips",
+    "consensus",
+    "rlp",
+    "rpc-types",
+] }
+
+# op-alloy
+op-alloy = { version = "0.6.3", features = ["provider"] }
+op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
+
+#kona
+kona-mpt = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt", default-features = false }
+kona-preimage = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt", features = [
+    "rkyv",
+] }
+kona-executor = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
+kona-proof = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
+
+# mics
+serde_json = "1.0.132"
+derive_more = "1.0.0"
+anyhow = "1.0.89"
+spin = "0.9.8"
+tokio = "1.41.1"
+rkyv = "0.7.44"

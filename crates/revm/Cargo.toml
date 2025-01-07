@@ -25,6 +25,7 @@ all = "warn"
 # revm
 revm-interpreter = { path = "../interpreter", version = "13.0.0", default-features = false }
 revm-precompile = { path = "../precompile", version = "14.0.0", default-features = false }
+revm-primitives = { path = "../primitives", version = "13.0.0", default-features = false }
 
 # misc
 auto_impl = { version = "1.2", default-features = false }

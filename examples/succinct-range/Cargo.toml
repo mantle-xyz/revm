@@ -1,0 +1,52 @@
+[package]
+name = "succinct-range"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+revm = { path = "../../crates/revm", features = [
+    "std",
+    "serde-json",
+    "optimism",
+    "kzg-rs",
+] }
+revm-primitives = { path = "../../crates/primitives", features = [
+    "std",
+    "serde",
+    "hashbrown",
+    "asm-keccak",
+    "portable",
+    "optimism",
+] }
+
+# tokio
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros"] }
+
+# alloy
+alloy-consensus = { version = "0.6.4", features = ["k256"] }
+alloy-rpc-types-engine = "0.6.4"
+alloy-primitives = { version = "0.8.12", features = ["rlp"] }
+alloy = { version = "0.6.4", features = [
+    "providers",
+    "eips",
+    "rpc-types",
+    "rlp"
+] }
+alloy-rpc-types = { version = "0.6.4", default-features = false, features = ["debug"] }
+
+#op-alloy
+op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
+op-alloy-rpc-types = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
+op-alloy-rpc-types-engine = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
+op-alloy-genesis = { git = "https://github.com/mantle-xyz/op-alloy", branch = "mantle-alloy-0.6.4" }
+
+kona-driver = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
+kona-proof = { git = "https://github.com/mantle-xyz/kona", branch = "mantle-kona-mpt" }
+client = { path = "../client" }
+
+# mics
+anyhow = "1.0.89"
+log = "0.4.22"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tracing = "0.1.40"
+dotenv = "0.15"
