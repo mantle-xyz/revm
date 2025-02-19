@@ -13,8 +13,8 @@ use crate::{
 };
 use core::fmt;
 use revm_interpreter::as_u64_saturated;
-use std::{boxed::Box, vec::Vec};
 use std::string::ToString;
+use std::{boxed::Box, vec::Vec};
 
 /// EVM call stack limit.
 pub const CALL_STACK_LIMIT: u64 = 1024;
@@ -430,6 +430,7 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::{
         db::BenchmarkDB,
@@ -454,13 +455,13 @@ mod tests {
                 tx.authorization_list = Some(
                     vec![RecoveredAuthorization::new_unchecked(
                         Authorization {
-                            chain_id: 1,
+                            chain_id: U256::from(1),
                             address: delegate,
                             nonce: 0,
                         },
                         RecoveredAuthority::Valid(auth),
                     )]
-                        .into(),
+                    .into(),
                 );
                 tx.caller = caller;
                 tx.transact_to = TxKind::Call(auth);
