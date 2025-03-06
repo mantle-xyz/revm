@@ -239,9 +239,8 @@ pub fn refund<SPEC: Spec, EXT, DB: Database>(
     let is_deposit = env.tx.optimism.source_hash.is_some();
     let is_system_tx = env.tx.optimism.is_system_transaction.unwrap_or(false);
 
-    // FIX IT! magic number, i don't know what it is.
     let is_eth_mint = env.tx.optimism.eth_value.is_some();
-    if is_eth_mint {
+    if is_eth_mint && env.tx.data.len() != 0 {
         gas.set_remaining(gas.remaining().saturating_sub(4500));
     }
 
