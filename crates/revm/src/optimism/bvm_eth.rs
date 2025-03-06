@@ -9,6 +9,7 @@ use revm_interpreter::Host;
 use revm_precompile::{utilities::left_pad, Log};
 use revm_primitives::alloy_primitives::Keccak256;
 use std::vec::Vec;
+use std::string::ToString;
 
 const BVM_ETH_ADDR: Address = address!("dEAddEaDdeadDEadDEADDEAddEADDEAddead1111");
 /// keccak("Mint(address,uint256)") =
