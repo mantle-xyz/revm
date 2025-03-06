@@ -1,6 +1,7 @@
 use crate::{
     primitives::{
-        address, db::Database, fixed_bytes, Address, Bytes, FixedBytes, LogData, TxKind, U256,
+        address, db::Database, fixed_bytes, Address, Bytes, EVMError, FixedBytes, LogData, TxKind,
+        U256,
     },
     Context,
 };
@@ -18,10 +19,35 @@ const MINT_SELECTOR: FixedBytes<32> =
 /// "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 const TRANSFER_SELECTOR: FixedBytes<32> =
     fixed_bytes!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
+const TOTAL_SUPPLY_KEY: U256 = U256::from_limbs([2u64, 0, 0, 0]);
 
-/// Get the key for the BVM ETH balance.
-/// references:
-///  * <https://github.com/mantlenetworkio/op-geth/blob/develop/core/state_transition.go#L799>
+/// Custom error types for BVM ETH operations
+#[derive(Debug)]
+pub enum BvmEthError<DBError> {
+    InsufficientBalance,
+    StorageFailure,
+    NonceOverflow,
+    Custom(String),
+    Database(DBError),
+}
+
+impl<DBError> From<BvmEthError<DBError>> for EVMError<DBError> {
+    fn from(err: BvmEthError<DBError>) -> Self {
+        match err {
+            BvmEthError::InsufficientBalance => {
+                EVMError::Custom("Insufficient balance".to_string())
+            }
+            BvmEthError::StorageFailure => EVMError::Custom("Storage operation failed".to_string()),
+            BvmEthError::NonceOverflow => EVMError::Custom("Nonce overflow".to_string()),
+            BvmEthError::Custom(msg) => EVMError::Custom(msg),
+            BvmEthError::Database(db_err) => EVMError::Database(db_err),
+        }
+    }
+}
+
+/// Get the storage key for a BVM ETH balance
+/// References:
+/// * <https://github.com/mantlenetworkio/op-geth/blob/develop/core/state_transition.go#L799>
 fn get_bvm_eth_balance_key(addr: Address) -> U256 {
     let mut hasher = Keccak256::new();
     let position = [0u8; 32];
@@ -31,21 +57,23 @@ fn get_bvm_eth_balance_key(addr: Address) -> U256 {
     U256::from_be_slice(&hasher.finalize().as_slice())
 }
 
-pub(crate) fn warm_bvm_eth_contract<EXT, DB: Database>(context: &mut Context<EXT, DB>) {
-    let _ = context.load_account_delegated(BVM_ETH_ADDR).unwrap();
+pub(crate) fn warm_bvm_eth_contract<EXT, DB: Database>(
+    context: &mut Context<EXT, DB>,
+) -> Result<(), EVMError<DB::Error>> {
+    context.evm.inner.load_account(BVM_ETH_ADDR)?;
+    Ok(())
 }
 
-fn add_bvm_eth_total_supply<EXT, DB: Database>(context: &mut Context<EXT, DB>, eth_value: U256) {
-    // add bvm eth total supply
-    let bvm_eth_total_supply_key = U256::from(2);
-    let mut value_supply = context
-        .sload(BVM_ETH_ADDR, bvm_eth_total_supply_key)
-        .unwrap()
-        .data;
+fn add_bvm_eth_total_supply<EXT, DB: Database>(
+    context: &mut Context<EXT, DB>,
+    eth_value: U256,
+) -> Result<(), EVMError<DB::Error>> {
+    let mut value_supply = context.sload(BVM_ETH_ADDR, TOTAL_SUPPLY_KEY).unwrap().data;
     value_supply = value_supply.saturating_add(eth_value);
-    let _ = context
-        .sstore(BVM_ETH_ADDR, bvm_eth_total_supply_key, value_supply)
-        .unwrap();
+    context
+        .sstore(BVM_ETH_ADDR, TOTAL_SUPPLY_KEY, value_supply)
+        .ok_or(BvmEthError::StorageFailure)?;
+    Ok(())
 }
 
 fn generate_bvm_eth_mint_event(from: Address, eth_value: U256) -> Log {
@@ -71,39 +99,48 @@ fn generate_bvm_eth_transfer_event(from: Address, to: Address, eth_value: U256) 
     }
 }
 
-pub(crate) fn mint_bvm_eth<EXT, DB: Database>(context: &mut Context<EXT, DB>, eth_value: U256) {
-    let checkpoint = context.evm.journaled_state.checkpoint();
+pub(crate) fn mint_bvm_eth<EXT, DB: Database>(
+    context: &mut Context<EXT, DB>,
+    eth_value: U256,
+) -> Result<(), EVMError<DB::Error>> {
     let from = context.evm.inner.env.tx.caller;
     let key = get_bvm_eth_balance_key(from);
     let mut value = context.sload(BVM_ETH_ADDR, key).unwrap().data;
     value = value.saturating_add(eth_value);
 
-    let Some(_) = context.sstore(BVM_ETH_ADDR, key, value) else {
-        context.evm.journaled_state.checkpoint_revert(checkpoint);
-        return;
-    };
+    context
+        .sstore(BVM_ETH_ADDR, key, value)
+        .ok_or(BvmEthError::StorageFailure)?;
 
-    add_bvm_eth_total_supply(context, eth_value);
-
-    context.evm.touch(&BVM_ETH_ADDR);
-    context.evm.touch(&from);
-    context.evm.journaled_state.checkpoint_commit();
+    add_bvm_eth_total_supply(context, eth_value)?;
 
     let mint_log = generate_bvm_eth_mint_event(from, eth_value);
     context.log(mint_log);
+
+    Ok(())
 }
 
-pub(crate) fn transfer_bvm_eth<EXT, DB: Database>(context: &mut Context<EXT, DB>, eth_value: U256) {
-    let checkpoint = context.evm.journaled_state.checkpoint();
+pub(crate) fn transfer_bvm_eth<EXT, DB: Database>(
+    context: &mut Context<EXT, DB>,
+    eth_value: U256,
+) -> Result<(), EVMError<DB::Error>> {
     let from = context.evm.inner.env.tx.caller;
     let to = match context.evm.inner.env.tx.transact_to {
         TxKind::Call(caller) => caller,
-        TxKind::Create => Address::ZERO,
+        TxKind::Create => {
+            // Increase nonce of caller and check if it overflows
+            let Some(nonce) = context.evm.journaled_state.inc_nonce(from) else {
+                // can't happen on mainnet.
+                return Err(BvmEthError::NonceOverflow.into());
+            };
+            let old_nonce = nonce - 1;
+            from.create(old_nonce)
+        }
     };
 
     if from == to {
-        context.evm.journaled_state.checkpoint_revert(checkpoint);
-        return;
+        // no need to transfer to self
+        return Ok(());
     }
 
     let from_key = get_bvm_eth_balance_key(from);
@@ -112,37 +149,46 @@ pub(crate) fn transfer_bvm_eth<EXT, DB: Database>(context: &mut Context<EXT, DB>
     let mut from_amount = context.sload(BVM_ETH_ADDR, from_key).unwrap().data;
     let mut to_amount = context.sload(BVM_ETH_ADDR, to_key).unwrap().data;
 
-    // mock, modify it, need error handling
     if from_amount < eth_value {
-        context.evm.journaled_state.checkpoint_revert(checkpoint);
-        return;
+        return Err(BvmEthError::InsufficientBalance.into());
     }
 
     from_amount = from_amount.saturating_sub(eth_value);
     to_amount = to_amount.saturating_add(eth_value);
 
-    let _ = context.sstore(BVM_ETH_ADDR, from_key, from_amount).unwrap();
-    let _ = context.sstore(BVM_ETH_ADDR, to_key, to_amount).unwrap();
-
-    context.evm.touch(&BVM_ETH_ADDR);
-    context.evm.touch(&from);
-    context.evm.touch(&to);
-    context.evm.journaled_state.checkpoint_commit();
+    context
+        .sstore(BVM_ETH_ADDR, from_key, from_amount)
+        .ok_or(BvmEthError::StorageFailure)?;
+    context
+        .sstore(BVM_ETH_ADDR, to_key, to_amount)
+        .ok_or(BvmEthError::StorageFailure)?;
 
     let transfer_log = generate_bvm_eth_transfer_event(from, to, eth_value);
     context.log(transfer_log);
+
+    Ok(())
 }
 
 mod tests {
     use super::*;
     use core::str::FromStr;
+
     #[test]
     fn bvm_eth_balance_key_test() {
-        let address: Address = address!("667120e768cf024c2245dd6d9feece4b437c3518");
-        let key = get_bvm_eth_balance_key(address);
-        let expected_key =
+        let addr = address!("667120e768cf024c2245dd6d9feece4b437c3518");
+        let key = get_bvm_eth_balance_key(addr);
+        let expected =
             U256::from_str("0xfe0b4acb70bd1e455f00a22786aa76d07a905b7f77d9cbab254e4dddcbb681c9")
                 .unwrap();
-        assert_eq!(key, expected_key);
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn bvm_eth_total_supply_key_test() {
+        assert_eq!(
+            TOTAL_SUPPLY_KEY,
+            U256::from_str("0x0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap()
+        );
     }
 }
