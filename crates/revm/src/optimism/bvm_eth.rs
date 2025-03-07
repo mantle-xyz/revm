@@ -8,8 +8,8 @@ use crate::{
 use revm_interpreter::Host;
 use revm_precompile::{utilities::left_pad, Log};
 use revm_primitives::alloy_primitives::Keccak256;
+use std::string::{String, ToString};
 use std::vec::Vec;
-use std::string::{ToString, String};
 
 const BVM_ETH_ADDR: Address = address!("dEAddEaDdeadDEadDEADDEAddEADDEAddead1111");
 /// keccak("Mint(address,uint256)") =
@@ -25,7 +25,7 @@ const TOTAL_SUPPLY_KEY: U256 = U256::from_limbs([2u64, 0, 0, 0]);
 /// Custom error types for BVM ETH operations
 #[derive(Debug)]
 pub enum BvmEthError<DBError> {
-    InsufficientBalance,
+    EthTxValueTooLarge,
     StorageFailure,
     NonceOverflow,
     Custom(String),
@@ -35,8 +35,8 @@ pub enum BvmEthError<DBError> {
 impl<DBError> From<BvmEthError<DBError>> for EVMError<DBError> {
     fn from(err: BvmEthError<DBError>) -> Self {
         match err {
-            BvmEthError::InsufficientBalance => {
-                EVMError::Custom("Insufficient balance".to_string())
+            BvmEthError::EthTxValueTooLarge => {
+                EVMError::Custom("eth tx value is too large".to_string())
             }
             BvmEthError::StorageFailure => EVMError::Custom("Storage operation failed".to_string()),
             BvmEthError::NonceOverflow => EVMError::Custom("Nonce overflow".to_string()),
@@ -117,7 +117,7 @@ pub(crate) fn mint_bvm_eth<EXT, DB: Database>(
 
     let mint_log = generate_bvm_eth_mint_event(from, eth_value);
     context.log(mint_log);
-
+    context.evm.journaled_state.touch(&BVM_ETH_ADDR);
     Ok(())
 }
 
@@ -138,7 +138,6 @@ pub(crate) fn transfer_bvm_eth<EXT, DB: Database>(
             from.create(old_nonce)
         }
     };
-
     if from == to {
         // no need to transfer to self
         return Ok(());
@@ -151,7 +150,7 @@ pub(crate) fn transfer_bvm_eth<EXT, DB: Database>(
     let mut to_amount = context.sload(BVM_ETH_ADDR, to_key).unwrap().data;
 
     if from_amount < eth_value {
-        return Err(BvmEthError::InsufficientBalance.into());
+        return Err(BvmEthError::EthTxValueTooLarge.into());
     }
 
     from_amount = from_amount.saturating_sub(eth_value);
