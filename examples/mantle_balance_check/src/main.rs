@@ -1,12 +1,13 @@
 //! Optimism-specific constants, types, and helpers.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-use alloy_eips::eip2718::Decodable2718;
+// use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::Bytes;
 use anyhow::{anyhow, Result};
 use dotenv::dotenv;
 use ethers_core::types::{Transaction, H256};
 use ethers_providers::Middleware;
 use ethers_providers::{Http, Provider};
+use alloy_eips::eip2718::{Decodable2718, Encodable2718};
 use op_alloy_consensus::OpTxEnvelope;
 use revm::db::{CacheDB, EthersDB};
 use revm::inspectors::TracerEip3155;
@@ -87,11 +88,17 @@ impl CheckerRecord {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // let start = 66450341; // contract creation
-    let start = 71207577;
+    // let start = 71014130;
+    // let mut start = 74421811;
+    let mut start = 1203075;
     let record = Arc::new(Mutex::new(CheckerRecord::new()));
-    for block_number in start..start + 1 {
+    for block_number in start..start + 2 {
         range(block_number, record.clone()).await?;
     }
+    // start = 74439271;
+    // for block_number in start..start + 2 {
+    //     range(block_number, record.clone()).await?;
+    // }
     record.lock().unwrap().print();
     Ok(())
 }
@@ -101,13 +108,11 @@ async fn range(block_number: u64, record: Arc<Mutex<CheckerRecord>>) -> anyhow::
     let mantle_url = std::env::var("MANTLE_URL").unwrap();
 
     // Provider with debug tracing
-    let client = Provider::<Http>::try_from(
-        mantle_url,
-    )?;
+    let client = Provider::<Http>::try_from(mantle_url)?;
     let client = Arc::new(client);
 
     // Params
-    let chain_id: u64 = 5000;
+    let chain_id: u64 = 5005006;
     let block_number = block_number;
 
     // Fetch the transaction-rich block
@@ -198,7 +203,7 @@ async fn range(block_number: u64, record: Arc<Mutex<CheckerRecord>>) -> anyhow::
         let result = evm
             .transact_commit()
             .map_err(|e| anyhow!("Failed to transact: {e}"))?;
-        let gas_used = result.gas_used();
+            let gas_used = result.gas_used();
 
         let expected_gas_used = client
             .get_transaction_receipt(tx_hash)
@@ -208,6 +213,11 @@ async fn range(block_number: u64, record: Arc<Mutex<CheckerRecord>>) -> anyhow::
             .unwrap();
         print!("Expected gas used: {:?}, ", expected_gas_used);
         print!("Actual gas used: {:?} ", gas_used);
+        if result.is_success() {
+            println!("(Success)");
+        } else {
+            println!("(Failed)");
+        }
         if expected_gas_used.as_u64() == gas_used {
             println!("--- passed✅");
         } else {
@@ -402,7 +412,7 @@ pub fn prepare_tx_env(transaction: &OpTxEnvelope, encoded_transaction: &[u8]) ->
                 is_system_transaction: Some(tx.is_system_transaction),
                 enveloped_tx: Some(encoded_transaction.to_vec().into()),
                 eth_value: tx.eth_value,
-                eth_tx_value: tx.eth_value,
+                eth_tx_value: tx.eth_tx_value,
             };
             Ok(env)
         }

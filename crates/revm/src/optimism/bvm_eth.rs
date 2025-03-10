@@ -65,6 +65,10 @@ pub(crate) fn warm_bvm_eth_contract<EXT, DB: Database>(
     Ok(())
 }
 
+pub(crate) fn touch_bvm_eth_contract<EXT, DB: Database>(context: &mut Context<EXT, DB>) {
+    context.evm.journaled_state.touch(&BVM_ETH_ADDR);
+}
+
 fn add_bvm_eth_total_supply<EXT, DB: Database>(
     context: &mut Context<EXT, DB>,
     eth_value: U256,
@@ -117,7 +121,7 @@ pub(crate) fn mint_bvm_eth<EXT, DB: Database>(
 
     let mint_log = generate_bvm_eth_mint_event(from, eth_value);
     context.log(mint_log);
-    context.evm.journaled_state.touch(&BVM_ETH_ADDR);
+
     Ok(())
 }
 

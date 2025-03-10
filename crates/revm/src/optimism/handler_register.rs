@@ -197,14 +197,16 @@ pub fn deduct_caller<SPEC: Spec, EXT, DB: Database>(
 ) -> Result<(), EVMError<DB::Error>> {
     // mint BVM_ETH
     if let Some(eth_value) = context.evm.inner.env.tx.optimism.eth_value {
-        if eth_value > 0 {
+        if eth_value != 0 {
             optimism::bvm_eth::warm_bvm_eth_contract(context)?;
             optimism::bvm_eth::mint_bvm_eth(context, U256::from(eth_value))?;
+            optimism::bvm_eth::touch_bvm_eth_contract(context);
         }
         // transfer BVM_ETH
         if let Some(eth_tx_value) = context.evm.inner.env.tx.optimism.eth_tx_value {
-            if eth_tx_value > 0 {
+            if eth_tx_value != 0 {
                 optimism::bvm_eth::transfer_bvm_eth(context, U256::from(eth_tx_value))?;
+                optimism::bvm_eth::touch_bvm_eth_contract(context);
             }
         }
     }
