@@ -6,7 +6,8 @@ members = [
     "crates/primitives",
     "crates/interpreter",
     "crates/precompile",
-    # "examples/mantle_balance_check",
+    "examples/mantle_balance_check",
+    "examples/conflict_rate",
     # "examples/client",
     # "examples/succinct-range",
 ]
