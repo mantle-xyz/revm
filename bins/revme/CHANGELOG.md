@@ -6,7 +6,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.1](https://github.com/bluealloy/revm/compare/revme-v1.0.0...revme-v1.0.1) - 2024-10-23
+## [2.7.0](https://github.com/bluealloy/revm/compare/revm-v2.6.0...revm-v2.7.0) - 2025-03-21
+
+### Other
+
+- 857d5def chore: bump test suite to Vítkov v4.1.0 tag (#2281) 
+- 6d27c88d fix(optimism): Operator Fee Calculation & Deposit Identifier (#2257)
+
+## [2.6.0](https://github.com/bluealloy/revm/compare/revme-v2.5.0...revme-v2.6.0) - 2025-03-10
+
+### Other
+
+- updated the following local packages: revm
+
+## [2.5.0](https://github.com/bluealloy/revm/compare/revme-v2.4.0...revme-v2.5.0) - 2025-02-11
+
+### Other
+
+- updated the following local packages: revm
+
+## [2.4.0](https://github.com/bluealloy/revm/compare/revme-v2.3.0...revme-v2.4.0) - 2025-01-28
+
+### Other
+
+- devnet5 tests v1.3.0 ([#2021](https://github.com/bluealloy/revm/pull/2021))
+
+## [2.3.0](https://github.com/bluealloy/revm/compare/revme-v2.2.0...revme-v2.3.0) - 2025-01-13
+
+### Added
+
+- *(EIP-7623)* adjuct floor gas check order ([#1990](https://github.com/bluealloy/revm/pull/1990))
+
+### Other
+
+- v53 revm v19.2.0 ([#1972](https://github.com/bluealloy/revm/pull/1972))
+
+## [2.2.0](https://github.com/bluealloy/revm/compare/revme-v2.1.0...revme-v2.2.0) - 2024-12-26
+
+### Added
+
+- blst reprice, remove g1/g2 mul, eest test bump ([#1951](https://github.com/bluealloy/revm/pull/1951))
+- eip7691 fraction update ([#1900](https://github.com/bluealloy/revm/pull/1900))
+
+### Other
+
+- Uncouple blob count between CL and EL ([#1899](https://github.com/bluealloy/revm/pull/1899))
+
+## [2.1.0](https://github.com/bluealloy/revm/compare/revme-v2.0.0...revme-v2.1.0) - 2024-11-06
+
+### Other
+
+- Osaka Activation (release_49 branch) ([#1835](https://github.com/bluealloy/revm/pull/1835))
+- v49 release ([#1833](https://github.com/bluealloy/revm/pull/1833))
+
+## [2.0.0](https://github.com/bluealloy/revm/compare/revme-v1.0.0...revme-v2.0.0) - 2024-10-23
 
 ### Other
 

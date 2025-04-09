@@ -4,7 +4,91 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [19.7.0](https://github.com/bluealloy/revm/compare/revm-v19.6.0...revm-v19.7.0) - 2025-03-21
+
+### Other
+
+- 857d5def chore: bump test suite to Vítkov v4.1.0 tag (#2281) 
+- 6d27c88d fix(optimism): Operator Fee Calculation & Deposit Identifier (#2257)
+
+## [19.6.0](https://github.com/bluealloy/revm/compare/revm-v19.5.0...revm-v19.6.0) - 2025-03-10
+
+### Other
+
+- *bench* : reduce times for benches (#2161) (2 hours ago)
+
+
+## [19.5.0](https://github.com/bluealloy/revm/compare/revm-v19.4.0...revm-v19.5.0) - 2025-02-11
+
+### Fixed
+
+- *(op-isthmus)* missing granite precompiles and disable eof (#2065)
+- *(op)* add operator fee scalar scaling factor on refund (#2050)
+- fix ethersdb.rs forking ([#2047](https://github.com/bluealloy/revm/pull/2047))
+
+## [19.4.0](https://github.com/bluealloy/revm/compare/revm-v19.3.0...revm-v19.4.0) - 2025-01-28
+
+### Added
+
+- Include EIP7702 address for extcodecopy ([#2016](https://github.com/bluealloy/revm/pull/2016))
+- add precompiles for BLS12-381 to isthmus ([#2000](https://github.com/bluealloy/revm/pull/2000))
+
+### Fixed
+
+- *(op)* isthmus compilation ([#2022](https://github.com/bluealloy/revm/pull/2022))
+
+## [19.3.0](https://github.com/bluealloy/revm/compare/revm-v19.2.0...revm-v19.3.0) - 2025-01-13
+
+### Added
+
+- *(EIP-7623)* adjuct floor gas check order ([#1990](https://github.com/bluealloy/revm/pull/1990))
+
+## [19.2.0](https://github.com/bluealloy/revm/compare/revm-v19.1.0...revm-v19.2.0) - 2025-01-06
+
+### Fixed
+
+- *(op)* move l1block loading to verification ([#1970](https://github.com/bluealloy/revm/pull/1970))
+
+## [19.1.0](https://github.com/bluealloy/revm/compare/revm-v19.0.0...revm-v19.1.0) - 2025-01-06
+
+### Added
+
+- handle isthmus operator fee ([#1960](https://github.com/bluealloy/revm/pull/1960))
+
+### Other
+
+- optimize tx l1 fetches ([#1967](https://github.com/bluealloy/revm/pull/1967))
+
+## [19.0.0](https://github.com/bluealloy/revm/compare/revm-v18.0.0...revm-v19.0.0) - 2024-12-26
+
+### Added
+
+- apply latest EIP-7702 changes ([#1850](https://github.com/bluealloy/revm/pull/1850))
+- *(Prague)* EIP-7623 Increase Calldata Cost ([#1744](https://github.com/bluealloy/revm/pull/1744))
+
+### Other
+
+- eip7702 chainid u256 change ([#1950](https://github.com/bluealloy/revm/pull/1950))
+- refactor L1BlockInfo::tx_estimated_size_fjord ([#1862](https://github.com/bluealloy/revm/pull/1862))
+- [v50] perf: remove unneeded clones ([#1863](https://github.com/bluealloy/revm/pull/1863))
+- Add static Optimism precompiles for Fjord & Granite ([#1864](https://github.com/bluealloy/revm/pull/1864))
+
+## [18.0.0](https://github.com/bluealloy/revm/compare/revm-v17.1.0...revm-v18.0.0) - 2024-11-06
+
+### Added
+
+- to_plain_state ([#1778](https://github.com/bluealloy/revm/pull/1778)) ([#1841](https://github.com/bluealloy/revm/pull/1841))
+
+### Other
+
+- bump alloy-eip7702 and remove `Parity` re-export ([#1842](https://github.com/bluealloy/revm/pull/1842))
+- Osaka Activation (release_49 branch) ([#1835](https://github.com/bluealloy/revm/pull/1835))
+
+## [17.1.0](https://github.com/bluealloy/revm/compare/revm-v17.0.0...revm-v17.1.0) - 2024-10-23
+
+### Other
+
+- chore: bump alloydb deps ([#1832](https://github.com/bluealloy/revm/pull/1832))
 
 ## [17.0.0](https://github.com/bluealloy/revm/compare/revm-v16.0.0...revm-v17.0.0) - 2024-10-23
 

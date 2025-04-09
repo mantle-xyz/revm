@@ -1,3 +1,5 @@
+use revm_interpreter::gas::InitialAndFloorGas;
+
 use crate::{
     handler::mainnet,
     primitives::{db::Database, EVMError, Env, Spec},
@@ -15,8 +17,8 @@ pub type ValidateTxEnvAgainstState<'a, EXT, DB> =
     Arc<dyn Fn(&mut Context<EXT, DB>) -> Result<(), EVMError<<DB as Database>::Error>> + 'a>;
 
 /// Initial gas calculation handle
-pub type ValidateInitialTxGasHandle<'a, EXT, DB> =
-    Arc<dyn Fn(&mut Context<EXT, DB>) -> Result<u64, EVMError<<DB as Database>::Error>> + 'a>;
+pub type ValidateInitialTxGasHandle<'a, DB> =
+    Arc<dyn Fn(&mut Context<EXT, DB>) -> Result<InitialAndFloorGas, EVMError<<DB as Database>::Error>> + 'a>;
 
 /// Handles related to validation.
 pub struct ValidationHandler<'a, EXT, DB: Database> {
@@ -39,7 +41,7 @@ impl<'a, EXT: 'a, DB: Database + 'a> ValidationHandler<'a, EXT, DB> {
     }
 }
 
-impl<'a, EXT, DB: Database> ValidationHandler<'a, EXT, DB> {
+impl<EXT, DB: Database> ValidationHandler<'_, EXT, DB> {
     /// Validate env.
     pub fn env(&self, env: &Env) -> Result<(), EVMError<DB::Error>> {
         (self.env)(env)
@@ -49,7 +51,7 @@ impl<'a, EXT, DB: Database> ValidationHandler<'a, EXT, DB> {
     pub fn initial_tx_gas(
         &self,
         context: &mut Context<EXT, DB>,
-    ) -> Result<u64, EVMError<DB::Error>> {
+    ) -> Result<InitialAndFloorGas, EVMError<DB::Error>> {
         (self.initial_tx_gas)(context)
     }
 

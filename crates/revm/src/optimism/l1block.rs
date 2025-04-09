@@ -1,6 +1,7 @@
 use crate::optimism::fast_lz::flz_compress_len;
 use crate::primitives::{address, db::Database, Address, SpecId, U256};
 use core::ops::Mul;
+use revm_interpreter::Gas;
 
 const ZERO_BYTE_COST: u64 = 4;
 const NON_ZERO_BYTE_COST: u64 = 16;
@@ -11,6 +12,17 @@ const BASE_FEE_SCALAR_OFFSET: usize = 16;
 /// The two 4-byte Ecotone fee scalar values are packed into the same storage slot as the 8-byte sequence number.
 /// Byte offset within the storage slot of the 4-byte blobBaseFeeScalar attribute.
 const BLOB_BASE_FEE_SCALAR_OFFSET: usize = 20;
+/// The Isthmus operator fee scalar values are similarly packed. Byte offset within
+/// the storage slot of the 4-byte operatorFeeScalar attribute.
+const OPERATOR_FEE_SCALAR_OFFSET: usize = 20;
+/// The Isthmus operator fee scalar values are similarly packed. Byte offset within
+/// the storage slot of the 8-byte operatorFeeConstant attribute.
+const OPERATOR_FEE_CONSTANT_OFFSET: usize = 24;
+
+/// The fixed point decimal scaling factor associated with the operator fee scalar.
+///
+/// Allows users to use 6 decimal points of precision when specifying the operator_fee_scalar.
+const OPERATOR_FEE_SCALAR_DECIMAL: u64 = 1_000_000;
 
 const L1_BASE_FEE_SLOT: U256 = U256::from_limbs([1u64, 0, 0, 0]);
 const L1_OVERHEAD_SLOT: U256 = U256::from_limbs([5u64, 0, 0, 0]);
@@ -25,11 +37,18 @@ const ECOTONE_L1_BLOB_BASE_FEE_SLOT: U256 = U256::from_limbs([7u64, 0, 0, 0]);
 /// offsets [BASE_FEE_SCALAR_OFFSET] and [BLOB_BASE_FEE_SCALAR_OFFSET] respectively.
 const ECOTONE_L1_FEE_SCALARS_SLOT: U256 = U256::from_limbs([3u64, 0, 0, 0]);
 
+/// This storage slot stores the 32-bit operatorFeeScalar and operatorFeeConstant attributes at
+/// offsets [OPERATOR_FEE_SCALAR_OFFSET] and [OPERATOR_FEE_CONSTANT_OFFSET] respectively.
+const OPERATOR_FEE_SCALARS_SLOT: U256 = U256::from_limbs([8u64, 0, 0, 0]);
+
 /// An empty 64-bit set of scalar values.
 const EMPTY_SCALARS: [u8; 8] = [0u8; 8];
 
 /// The address of L1 fee recipient.
 pub const L1_FEE_RECIPIENT: Address = address!("420000000000000000000000000000000000001A");
+
+/// The address of the operator fee recipient.
+pub const OPERATOR_FEE_RECIPIENT: Address = address!("420000000000000000000000000000000000001B");
 
 /// The address of the base fee recipient.
 pub const BASE_FEE_RECIPIENT: Address = address!("4200000000000000000000000000000000000019");
@@ -69,7 +88,9 @@ pub struct L1BlockInfo {
     /// The current token ratio.
     pub token_ratio: Option<U256>,
     /// True if Ecotone is activated, but the L1 fee scalars have not yet been set.
-    pub(crate) empty_scalars: bool,
+    pub(crate) empty_ecotone_scalars: bool,
+    /// Last calculated l1 fee cost. Uses as a cache between validation and pre execution stages.
+    pub tx_l1_cost: Option<U256>,
 }
 
 impl L1BlockInfo {
@@ -112,7 +133,7 @@ impl L1BlockInfo {
 
             // Check if the L1 fee scalars are empty. If so, we use the Bedrock cost function. The L1 fee overhead is
             // only necessary if `empty_scalars` is true, as it was deprecated in Ecotone.
-            let empty_scalars = l1_blob_base_fee.is_zero()
+            let empty_ecotone_scalars = l1_blob_base_fee.is_zero()
                 && l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4]
                 == EMPTY_SCALARS;
             let l1_fee_overhead = empty_scalars
@@ -129,6 +150,52 @@ impl L1BlockInfo {
                 token_ratio: Some(token_ratio),
             })
         }
+    }
+
+    /// Calculate the operator fee for executing this transaction.
+    ///
+    /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
+    pub fn operator_fee_charge(&self, input: &[u8], gas_limit: U256, spec_id: SpecId) -> U256 {
+        // If the input is a deposit transaction, the default value is zero.
+        if input.first() == Some(&0x7E) {
+            return U256::ZERO;
+        }
+        if !spec_id.is_enabled_in(SpecId::ISTHMUS) {
+            return U256::ZERO;
+        }
+
+        self.operator_fee_charge_inner(gas_limit)
+    }
+
+    /// Calculate the operator fee for the given `gas`.
+    fn operator_fee_charge_inner(&self, gas: U256) -> U256 {
+        let operator_fee_scalar = self
+            .operator_fee_scalar
+            .expect("Missing operator fee scalar for isthmus L1 Block");
+        let operator_fee_constant = self
+            .operator_fee_constant
+            .expect("Missing operator fee constant for isthmus L1 Block");
+
+        let product =
+            gas.saturating_mul(operator_fee_scalar) / (U256::from(OPERATOR_FEE_SCALAR_DECIMAL));
+
+        product.saturating_add(operator_fee_constant)
+    }
+
+    /// Calculate the operator fee for executing this transaction.
+    ///
+    /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
+    pub fn operator_fee_refund(&self, gas: &Gas, spec_id: SpecId) -> U256 {
+        if !spec_id.is_enabled_in(SpecId::ISTHMUS) {
+            return U256::ZERO;
+        }
+
+        let operator_cost_gas_limit = self.operator_fee_charge_inner(U256::from(gas.limit()));
+        let operator_cost_gas_used = self.operator_fee_charge_inner(U256::from(
+            gas.limit() - (gas.remaining() + gas.refunded() as u64),
+        ));
+
+        operator_cost_gas_limit.saturating_sub(operator_cost_gas_used)
     }
 
     /// Calculate the data gas for posting the transaction on L1. Calldata costs 16 gas per byte
@@ -167,28 +234,40 @@ impl L1BlockInfo {
     // This value is computed based on the following formula:
     // max(minTransactionSize, intercept + fastlzCoef*fastlzSize)
     fn tx_estimated_size_fjord(&self, input: &[u8]) -> U256 {
-        let fastlz_size = U256::from(flz_compress_len(input));
+        let fastlz_size = flz_compress_len(input) as u64;
 
-        fastlz_size
-            .saturating_mul(U256::from(836_500))
-            .saturating_sub(U256::from(42_585_600))
-            .max(U256::from(100_000_000))
+        U256::from(
+            fastlz_size
+                .saturating_mul(L1_COST_FASTLZ_COEF)
+                .saturating_sub(L1_COST_INTERCEPT)
+                .max(MIN_TX_SIZE_SCALED),
+        )
+    }
+
+    /// Clears the cached L1 cost of the transaction.
+    pub fn clear_tx_l1_cost(&mut self) {
+        self.tx_l1_cost = None;
     }
 
     /// Calculate the gas cost of a transaction based on L1 block data posted on L2, depending on the [SpecId] passed.
-    pub fn calculate_tx_l1_cost(&self, input: &[u8], spec_id: SpecId) -> U256 {
-        // If the input is a deposit transaction or empty, the default value is zero.
-        if input.is_empty() || input.first() == Some(&0x7F) {
-            return U256::ZERO;
+    /// And cache the result for future use.
+    pub fn calculate_tx_l1_cost(&mut self, input: &[u8], spec_id: SpecId) -> U256 {
+        if let Some(tx_l1_cost) = self.tx_l1_cost {
+            return tx_l1_cost;
         }
-
-        if spec_id.is_enabled_in(SpecId::FJORD) {
+        // If the input is a deposit transaction or empty, the default value is zero.
+        let tx_l1_cost = if input.is_empty() || input.first() == Some(&0x7E) {
+            return U256::ZERO;
+        } else if spec_id.is_enabled_in(SpecId::FJORD) {
             self.calculate_tx_l1_cost_fjord(input)
         } else if spec_id.is_enabled_in(SpecId::ECOTONE) {
             self.calculate_tx_l1_cost_ecotone(input, spec_id)
         } else {
             self.calculate_tx_l1_cost_bedrock(input, spec_id)
-        }
+        };
+
+        self.tx_l1_cost = Some(tx_l1_cost);
+        tx_l1_cost
     }
 
     /// Calculate the gas cost of a transaction based on L1 block data posted on L2, pre-Ecotone.
@@ -216,7 +295,7 @@ impl L1BlockInfo {
         // There is an edgecase where, for the very first Ecotone block (unless it is activated at Genesis), we must
         // use the Bedrock cost function. To determine if this is the case, we can check if the Ecotone parameters are
         // unset.
-        if self.empty_scalars {
+        if self.empty_ecotone_scalars {
             return self.calculate_tx_l1_cost_bedrock(input, spec_id);
         }
 
@@ -329,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_calculate_tx_l1_cost() {
-        let l1_block_info = L1BlockInfo {
+        let mut l1_block_info = L1BlockInfo {
             l1_base_fee: U256::from(1_000),
             l1_fee_overhead: Some(U256::from(1_000)),
             l1_base_fee_scalar: U256::from(1_000),
@@ -345,11 +424,13 @@ mod tests {
         let input = bytes!("");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::REGOLITH);
         assert_eq!(gas_cost, U256::ZERO);
+        l1_block_info.clear_tx_l1_cost();
 
-        // Deposit transactions with the EIP-2718 type of 0x7F should result in zero
-        let input = bytes!("7FFACADE");
+        // Deposit transactions with the EIP-2718 type of 0x7E should result in zero
+        let input = bytes!("7EFACADE");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::REGOLITH);
         assert_eq!(gas_cost, U256::ZERO);
+        l1_block_info.clear_tx_l1_cost();
     }
 
     #[test]
@@ -370,19 +451,22 @@ mod tests {
         let input = bytes!("FACADE");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::ECOTONE);
         assert_eq!(gas_cost, U256::from(51));
+        l1_block_info.clear_tx_l1_cost();
 
         // Zero rollup data gas cost should result in zero
         let input = bytes!("");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::ECOTONE);
         assert_eq!(gas_cost, U256::ZERO);
+        l1_block_info.clear_tx_l1_cost();
 
-        // Deposit transactions with the EIP-2718 type of 0x7F should result in zero
-        let input = bytes!("7FFACADE");
+        // Deposit transactions with the EIP-2718 type of 0x7E should result in zero
+        let input = bytes!("7EFACADE");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::ECOTONE);
         assert_eq!(gas_cost, U256::ZERO);
+        l1_block_info.clear_tx_l1_cost();
 
         // If the scalars are empty, the bedrock cost function should be used.
-        l1_block_info.empty_scalars = true;
+        l1_block_info.empty_ecotone_scalars = true;
         let input = bytes!("FACADE");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::ECOTONE);
         assert_eq!(gas_cost, U256::from(1_048_000));
@@ -483,7 +567,7 @@ mod tests {
         // l1FeeScaled = baseFeeScalar*l1BaseFee*16 + blobFeeScalar*l1BlobBaseFee
         //             = 1000 * 1000 * 16 + 1000 * 1000
         //             = 17e6
-        let l1_block_info = L1BlockInfo {
+        let mut l1_block_info = L1BlockInfo {
             l1_base_fee: U256::from(1_000),
             l1_base_fee_scalar: U256::from(1_000),
             l1_blob_base_fee: Some(U256::from(1_000)),
@@ -501,6 +585,7 @@ mod tests {
         //        = 1700
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::FJORD);
         assert_eq!(gas_cost, U256::from(1700));
+        l1_block_info.clear_tx_l1_cost();
 
         // fastLzSize = 202
         // estimatedSize = max(minTransactionSize, intercept + fastlzCoef*fastlzSize)
@@ -512,14 +597,16 @@ mod tests {
         //        = 2148
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::FJORD);
         assert_eq!(gas_cost, U256::from(2148));
+        l1_block_info.clear_tx_l1_cost();
 
         // Zero rollup data gas cost should result in zero
         let input = bytes!("");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::FJORD);
         assert_eq!(gas_cost, U256::ZERO);
+        l1_block_info.clear_tx_l1_cost();
 
-        // Deposit transactions with the EIP-2718 type of 0x7F should result in zero
-        let input = bytes!("7FFACADE");
+        // Deposit transactions with the EIP-2718 type of 0x7E should result in zero
+        let input = bytes!("7EFACADE");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, SpecId::FJORD);
         assert_eq!(gas_cost, U256::ZERO);
     }
@@ -558,5 +645,22 @@ mod tests {
         let l1_fee = l1_block_info.calculate_tx_l1_cost_fjord(TX);
 
         assert_eq!(l1_fee, expected_l1_fee)
+    }
+
+    #[test]
+    fn test_operator_fee_refund() {
+        let gas = Gas::new(50000);
+
+        let l1_block_info = L1BlockInfo {
+            l1_base_fee: U256::from(1055991687),
+            l1_base_fee_scalar: U256::from(5227),
+            operator_fee_scalar: Some(U256::from(2000)),
+            operator_fee_constant: Some(U256::from(5)),
+            ..Default::default()
+        };
+
+        let refunded = l1_block_info.operator_fee_refund(&gas, SpecId::ISTHMUS);
+
+        assert_eq!(refunded, U256::from(100))
     }
 }

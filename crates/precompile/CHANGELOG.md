@@ -6,6 +6,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [16.2.0](https://github.com/bluealloy/revm/compare/revm-v16.1.0...revm-v16.2.0) - 2025-03-21
+
+### Other
+
+- 857d5def chore: bump test suite to Vítkov v4.1.0 tag (#2281) 
+- 6d27c88d fix(optimism): Operator Fee Calculation & Deposit Identifier (#2257)
+
+## [16.1.0](https://github.com/bluealloy/revm/compare/revm-precompile-v16.0.0...revm-precompile-v16.1.0) - 2025-02-11
+
+### Other
+
+- revm v19.4.0 tag v54
+
+## [16.0.0](https://github.com/bluealloy/revm/compare/revm-precompile-v15.0.0...revm-precompile-v16.0.0) - 2024-12-26
+
+### Added
+
+- blst reprice, remove g1/g2 mul, eest test bump ([#1951](https://github.com/bluealloy/revm/pull/1951))
+- add Isthmus spec ([#1948](https://github.com/bluealloy/revm/pull/1948))
+
+## [15.0.0](https://github.com/bluealloy/revm/compare/revm-precompile-v14.0.0...revm-precompile-v15.0.0) - 2024-11-06
+
+### Other
+
+- bump alloy-eip7702 and remove `Parity` re-export ([#1842](https://github.com/bluealloy/revm/pull/1842))
+- *(precompile)* use secp256k1 global context for ecrecover  ([#1845](https://github.com/bluealloy/revm/pull/1845))
+
 ## [14.0.0](https://github.com/bluealloy/revm/compare/revm-precompile-v13.0.0...revm-precompile-v14.0.0) - 2024-10-23
 
 ### Other
