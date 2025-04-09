@@ -340,7 +340,7 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
 
         // The initial_gas is multiplied by the token_ratio in non-deposit transactions
         // so we don't need to multiply it again.
-        let mut gas_limit = ctx.evm.env.tx.gas_limit - gas.initial_gas;;
+        let mut gas_limit = ctx.evm.env.tx.gas_limit - gas.initial_gas;
         #[cfg(feature = "optimism")]
         {
             let env = ctx.env_mut();

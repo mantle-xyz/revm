@@ -29,15 +29,14 @@ pub fn load_accounts<SPEC: Spec, EXT, DB: Database>(
 
     // load coinbase
     // EIP-3651: Warm COINBASE. Starts the `COINBASE` address warm
-    // FIXME: remove this when EIP-3651 is implemented in Mantle
-    // if SPEC::enabled(SHANGHAI) {
-    //     let coinbase = context.evm.inner.env.block.coinbase;
-    //     context
-    //         .evm
-    //         .journaled_state
-    //         .warm_preloaded_addresses
-    //         .insert(coinbase);
-    // }
+    if SPEC::enabled(SHANGHAI) {
+        let coinbase = context.evm.inner.env.block.coinbase;
+        context
+            .evm
+            .journaled_state
+            .warm_preloaded_addresses
+            .insert(coinbase);
+    }
 
     // Load access list
     context.evm.load_access_list()?;

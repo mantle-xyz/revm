@@ -17,8 +17,10 @@ pub type ValidateTxEnvAgainstState<'a, EXT, DB> =
     Arc<dyn Fn(&mut Context<EXT, DB>) -> Result<(), EVMError<<DB as Database>::Error>> + 'a>;
 
 /// Initial gas calculation handle
-pub type ValidateInitialTxGasHandle<'a, DB> =
-    Arc<dyn Fn(&mut Context<EXT, DB>) -> Result<InitialAndFloorGas, EVMError<<DB as Database>::Error>> + 'a>;
+pub type ValidateInitialTxGasHandle<'a, EXT, DB> = Arc<
+    dyn Fn(&mut Context<EXT, DB>) -> Result<InitialAndFloorGas, EVMError<<DB as Database>::Error>>
+        + 'a,
+>;
 
 /// Handles related to validation.
 pub struct ValidationHandler<'a, EXT, DB: Database> {
