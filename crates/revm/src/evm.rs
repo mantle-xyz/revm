@@ -349,7 +349,8 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
                 let is_deposit = env.tx.optimism.source_hash.is_some();
                 let tx_system = env.tx.optimism.is_system_transaction.unwrap_or(false);
                 if !is_deposit && !tx_system {
-                    let Some(l1_block_info) = &ctx.evm.inner.l1_block_info else {
+                    let spec_id = ctx.evm.spec_id();
+                    let Some(l1_block_info) = ctx.evm.inner.l1_block_info.as_mut() else {
                         return Err(EVMError::Custom(
                             "[OPTIMISM] Failed to load L1 block information.".to_string(),
                         ));
@@ -362,7 +363,7 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
 
                     let token_ratio = l1_block_info.get_token_ratio();
                     let mut l1_cost =
-                        l1_block_info.calculate_tx_l1_cost(enveloped_tx, ctx.evm.spec_id());
+                        l1_block_info.calculate_tx_l1_cost(enveloped_tx, spec_id);
                     l1_cost = l1_cost.wrapping_div(ctx.evm.env.effective_gas_price());
                     if l1_cost.gt(&U256::from(gas_limit)) {
                         return Err(EVMError::Custom(

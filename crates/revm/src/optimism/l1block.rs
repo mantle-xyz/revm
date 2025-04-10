@@ -12,17 +12,17 @@ const BASE_FEE_SCALAR_OFFSET: usize = 16;
 /// The two 4-byte Ecotone fee scalar values are packed into the same storage slot as the 8-byte sequence number.
 /// Byte offset within the storage slot of the 4-byte blobBaseFeeScalar attribute.
 const BLOB_BASE_FEE_SCALAR_OFFSET: usize = 20;
-/// The Isthmus operator fee scalar values are similarly packed. Byte offset within
-/// the storage slot of the 4-byte operatorFeeScalar attribute.
-const OPERATOR_FEE_SCALAR_OFFSET: usize = 20;
-/// The Isthmus operator fee scalar values are similarly packed. Byte offset within
-/// the storage slot of the 8-byte operatorFeeConstant attribute.
-const OPERATOR_FEE_CONSTANT_OFFSET: usize = 24;
+// /// The Isthmus operator fee scalar values are similarly packed. Byte offset within
+// /// the storage slot of the 4-byte operatorFeeScalar attribute.
+// const OPERATOR_FEE_SCALAR_OFFSET: usize = 20;
+// /// The Isthmus operator fee scalar values are similarly packed. Byte offset within
+// /// the storage slot of the 8-byte operatorFeeConstant attribute.
+// const OPERATOR_FEE_CONSTANT_OFFSET: usize = 24;
 
-/// The fixed point decimal scaling factor associated with the operator fee scalar.
-///
-/// Allows users to use 6 decimal points of precision when specifying the operator_fee_scalar.
-const OPERATOR_FEE_SCALAR_DECIMAL: u64 = 1_000_000;
+// /// The fixed point decimal scaling factor associated with the operator fee scalar.
+// ///
+// /// Allows users to use 6 decimal points of precision when specifying the operator_fee_scalar.
+// const OPERATOR_FEE_SCALAR_DECIMAL: u64 = 1_000_000;
 
 const L1_BASE_FEE_SLOT: U256 = U256::from_limbs([1u64, 0, 0, 0]);
 const L1_OVERHEAD_SLOT: U256 = U256::from_limbs([5u64, 0, 0, 0]);
@@ -37,9 +37,9 @@ const ECOTONE_L1_BLOB_BASE_FEE_SLOT: U256 = U256::from_limbs([7u64, 0, 0, 0]);
 /// offsets [BASE_FEE_SCALAR_OFFSET] and [BLOB_BASE_FEE_SCALAR_OFFSET] respectively.
 const ECOTONE_L1_FEE_SCALARS_SLOT: U256 = U256::from_limbs([3u64, 0, 0, 0]);
 
-/// This storage slot stores the 32-bit operatorFeeScalar and operatorFeeConstant attributes at
-/// offsets [OPERATOR_FEE_SCALAR_OFFSET] and [OPERATOR_FEE_CONSTANT_OFFSET] respectively.
-const OPERATOR_FEE_SCALARS_SLOT: U256 = U256::from_limbs([8u64, 0, 0, 0]);
+// /// This storage slot stores the 32-bit operatorFeeScalar and operatorFeeConstant attributes at
+// /// offsets [OPERATOR_FEE_SCALAR_OFFSET] and [OPERATOR_FEE_CONSTANT_OFFSET] respectively.
+// const OPERATOR_FEE_SCALARS_SLOT: U256 = U256::from_limbs([8u64, 0, 0, 0]);
 
 /// An empty 64-bit set of scalar values.
 const EMPTY_SCALARS: [u8; 8] = [0u8; 8];
@@ -60,7 +60,18 @@ pub const L1_BLOCK_CONTRACT: Address = address!("4200000000000000000000000000000
 pub const GAS_ORACLE_CONTRACT: Address = address!("420000000000000000000000000000000000000F");
 
 /// The address of the sequencer fee wallet, which is block coinbase.
-pub const SEQUENCER_FEE_VAULT_ADDRESS: Address = address!("4200000000000000000000000000000000000011");
+pub const SEQUENCER_FEE_VAULT_ADDRESS: Address =
+    address!("4200000000000000000000000000000000000011");
+
+/// <https://github.com/ethereum-optimism/op-geth/blob/647c346e2bef36219cc7b47d76b1cb87e7ca29e4/core/types/rollup_cost.go#L79>
+const L1_COST_FASTLZ_COEF: u64 = 836_500;
+
+/// <https://github.com/ethereum-optimism/op-geth/blob/647c346e2bef36219cc7b47d76b1cb87e7ca29e4/core/types/rollup_cost.go#L78>
+/// Inverted to be used with `saturating_sub`.
+const L1_COST_INTERCEPT: u64 = 42_585_600;
+
+/// <https://github.com/ethereum-optimism/op-geth/blob/647c346e2bef36219cc7b47d76b1cb87e7ca29e4/core/types/rollup_cost.go#82>
+const MIN_TX_SIZE_SCALED: u64 = 100 * 1_000_000;
 
 /// L1 block info
 ///
@@ -135,19 +146,20 @@ impl L1BlockInfo {
             // only necessary if `empty_scalars` is true, as it was deprecated in Ecotone.
             let empty_ecotone_scalars = l1_blob_base_fee.is_zero()
                 && l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4]
-                == EMPTY_SCALARS;
-            let l1_fee_overhead = empty_scalars
+                    == EMPTY_SCALARS;
+            let l1_fee_overhead = empty_ecotone_scalars
                 .then(|| db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT))
                 .transpose()?;
 
+            // Pre-isthmus L1 block info
             Ok(L1BlockInfo {
                 l1_base_fee,
                 l1_base_fee_scalar,
                 l1_blob_base_fee: Some(l1_blob_base_fee),
                 l1_blob_base_fee_scalar: Some(l1_blob_base_fee_scalar),
-                empty_scalars,
+                empty_ecotone_scalars,
                 l1_fee_overhead,
-                token_ratio: Some(token_ratio),
+                ..Default::default()
             })
         }
     }
@@ -168,18 +180,19 @@ impl L1BlockInfo {
     }
 
     /// Calculate the operator fee for the given `gas`.
-    fn operator_fee_charge_inner(&self, gas: U256) -> U256 {
-        let operator_fee_scalar = self
-            .operator_fee_scalar
-            .expect("Missing operator fee scalar for isthmus L1 Block");
-        let operator_fee_constant = self
-            .operator_fee_constant
-            .expect("Missing operator fee constant for isthmus L1 Block");
+    fn operator_fee_charge_inner(&self, _gas: U256) -> U256 {
+        // let operator_fee_scalar = self
+        //     .operator_fee_scalar
+        //     .expect("Missing operator fee scalar for isthmus L1 Block");
+        // let operator_fee_constant = self
+        //     .operator_fee_constant
+        //     .expect("Missing operator fee constant for isthmus L1 Block");
 
-        let product =
-            gas.saturating_mul(operator_fee_scalar) / (U256::from(OPERATOR_FEE_SCALAR_DECIMAL));
+        // let product =
+        //     gas.saturating_mul(operator_fee_scalar) / (U256::from(OPERATOR_FEE_SCALAR_DECIMAL));
 
-        product.saturating_add(operator_fee_constant)
+        // product.saturating_add(operator_fee_constant)
+        U256::ZERO
     }
 
     /// Calculate the operator fee for executing this transaction.

@@ -5,7 +5,9 @@ use crate::{
         mainnet::{self, deduct_caller_inner},
         register::EvmHandler,
     },
-    interpreter::{as_u64_saturated, return_ok, return_revert, Gas, InstructionResult},
+    interpreter::{
+        as_u64_saturated, gas::InitialAndFloorGas, return_ok, return_revert, Gas, InstructionResult,
+    },
     optimism,
     primitives::{
         db::Database, spec_to_generic, Account, EVMError, Env, ExecutionResult, HaltReason,
@@ -17,8 +19,6 @@ use crate::{
 use core::{cmp::Ordering, ops::Mul};
 use revm_precompile::PrecompileSpecId;
 use std::{boxed::Box, string::ToString, sync::Arc};
-
-use super::l1block::OPERATOR_FEE_RECIPIENT;
 
 pub fn optimism_handle_register<DB: Database, EXT>(handler: &mut EvmHandler<'_, EXT, DB>) {
     spec_to_generic!(handler.cfg.spec_id, {
@@ -189,10 +189,9 @@ pub fn validate_tx_against_state<SPEC: Spec, EXT, DB: Database>(
     Ok(())
 }
 
-//
 pub fn validate_initial_tx_gas<SPEC: Spec, EXT, DB: Database>(
     context: &mut Context<EXT, DB>,
-) -> Result<u64, EVMError<DB::Error>> {
+) -> Result<InitialAndFloorGas, EVMError<DB::Error>> {
     let mut initial_gas_spend = mainnet::validate_initial_tx_gas::<SPEC, EXT, DB>(context)?;
 
     // the L1-cost fee is only computed for Optimism non-deposit transactions.
@@ -205,7 +204,8 @@ pub fn validate_initial_tx_gas<SPEC: Spec, EXT, DB: Database>(
         context.evm.inner.l1_block_info = Some(l1_block_info.clone());
 
         let token_ratio = l1_block_info.get_token_ratio();
-        initial_gas_spend = initial_gas_spend
+        initial_gas_spend.initial_gas = initial_gas_spend
+            .initial_gas
             .checked_mul(as_u64_saturated!(token_ratio))
             .ok_or(EVMError::Transaction(
                 InvalidTransaction::CallGasCostMoreThanGasLimit,
@@ -289,16 +289,26 @@ pub fn refund<SPEC: Spec, EXT, DB: Database>(
     gas: &mut Gas,
     eip7702_refund: i64,
 ) {
-    gas.record_refund(eip7702_refund);
-
     let env = context.evm.inner.env();
     let is_deposit = env.tx.optimism.source_hash.is_some();
-    let is_regolith = SPEC::enabled(REGOLITH);
+    let is_system_tx = env.tx.optimism.is_system_transaction.unwrap_or(false);
 
-    // Prior to Regolith, deposit transactions did not receive gas refunds.
-    let is_gas_refund_disabled = env.cfg.is_gas_refund_disabled() || (is_deposit && !is_regolith);
-    if !is_gas_refund_disabled {
-        gas.set_final_refund(SPEC::SPEC_ID.is_enabled_in(SpecId::LONDON));
+    let is_eth_mint = env.tx.optimism.eth_value.is_some();
+    if is_eth_mint && env.tx.data.len() != 0 {
+        gas.set_remaining(gas.remaining().saturating_sub(4500));
+    }
+
+    if !is_deposit && !is_system_tx {
+        mainnet::refund::<SPEC, EXT, DB>(context, gas, eip7702_refund);
+        let Some(l1_block_info) = &context.evm.inner.l1_block_info else {
+            return;
+        };
+        let token_ratio = l1_block_info.get_token_ratio();
+        gas.set_refund(gas.refunded().mul(as_u64_saturated!(token_ratio) as i64));
+        gas.set_remaining(gas.remaining().mul(as_u64_saturated!(token_ratio)));
+    } else {
+        // Deposit transactions do not receive refunds.
+        gas.set_refund(0);
     }
 }
 
@@ -356,36 +366,6 @@ pub fn deduct_caller<SPEC: Spec, EXT, DB: Database>(
     Ok(())
 }
 
-/// Record Eip-7702 refund and calculate final refund.
-#[inline]
-pub fn refund<SPEC: Spec, EXT, DB: Database>(
-    context: &mut Context<EXT, DB>,
-    gas: &mut Gas,
-    eip7702_refund: i64,
-) {
-    let env = context.evm.inner.env();
-    let is_deposit = env.tx.optimism.source_hash.is_some();
-    let is_system_tx = env.tx.optimism.is_system_transaction.unwrap_or(false);
-
-    let is_eth_mint = env.tx.optimism.eth_value.is_some();
-    if is_eth_mint && env.tx.data.len() != 0 {
-        gas.set_remaining(gas.remaining().saturating_sub(4500));
-    }
-
-    if !is_deposit && !is_system_tx {
-        mainnet::refund::<SPEC, EXT, DB>(context, gas, eip7702_refund);
-        let Some(l1_block_info) = &context.evm.inner.l1_block_info else {
-            return;
-        };
-        let token_ratio = l1_block_info.get_token_ratio();
-        gas.set_refund(gas.refunded().mul(as_u64_saturated!(token_ratio) as i64));
-        gas.set_remaining(gas.remaining().mul(as_u64_saturated!(token_ratio)));
-    } else {
-        // Deposit transactions do not receive refunds.
-        gas.set_refund(0);
-    }
-}
-
 /// Reimburse the caller with gas that were not spend.
 #[inline]
 pub fn reimburse_caller<SPEC: Spec, EXT, DB: Database>(
@@ -441,18 +421,18 @@ pub fn reward_beneficiary<SPEC: Spec, EXT, DB: Database>(
             .basefee
             .mul(U256::from(gas.spent() - gas.refunded() as u64));
 
-        // We can only touch the operator fee vault if the Isthmus spec is enabled.
-        if SPEC::SPEC_ID.is_enabled_in(SpecId::ISTHMUS) {
-            // Send the operator fee of the transaction to the coinbase.
-            let mut operator_fee_vault_account = context
-                .evm
-                .inner
-                .journaled_state
-                .load_account(OPERATOR_FEE_RECIPIENT, &mut context.evm.inner.db)?;
+        // // We can only touch the operator fee vault if the Isthmus spec is enabled.
+        // [TODO]: Wait for ISTHMUS spec to be enabled.
+        // if SPEC::SPEC_ID.is_enabled_in(SpecId::ISTHMUS) {
+        //     // Send the operator fee of the transaction to the coinbase.
+        //     let mut operator_fee_vault_account = context
+        //         .evm
+        //         .inner
+        //         .journaled_state
+        //         .load_account(OPERATOR_FEE_RECIPIENT, &mut context.evm.inner.db)?;
 
-            operator_fee_vault_account.mark_touch();
-            operator_fee_vault_account.data.info.balance += operator_fee_cost;
-        }
+        //     operator_fee_vault_account.mark_touch();
+        // }
     }
     Ok(())
 }
