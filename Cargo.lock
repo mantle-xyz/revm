@@ -2758,6 +2758,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mantle-revm"
+version = "3.0.1"
+dependencies = [
+ "alloy-sol-types",
+ "anyhow",
+ "auto_impl",
+ "once_cell",
+ "revm",
+ "rstest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.8",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
