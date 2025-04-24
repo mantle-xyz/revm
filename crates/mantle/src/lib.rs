@@ -25,3 +25,4 @@ pub use l1block::L1BlockInfo;
 pub use result::OpHaltReason;
 pub use spec::*;
 pub use transaction::{error::OpTransactionError, estimate_tx_compressed_size, OpTransaction};
+pub use transaction::bvm_eth::*;
