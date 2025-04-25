@@ -2,7 +2,7 @@
 use crate::{
     api::exec::OpContextTr,
     constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},
-    transaction::{deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr},
+    transaction::{bvm_eth, deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr},
     L1BlockInfo, OpHaltReason, OpSpecId,
 };
 use revm::{
@@ -130,7 +130,12 @@ where
         let spec = ctx.cfg().spec();
         let caller = ctx.tx().caller();
         let is_deposit = ctx.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-
+        if let Some(eth_value) = ctx.tx().eth_value() {
+            bvm_eth::mint_bvm_eth(ctx, U256::from(eth_value)).map_err(ERROR::from)?;
+        }
+        if let Some(eth_tx_value) = ctx.tx().eth_tx_value() {
+            bvm_eth::transfer_bvm_eth(ctx, U256::from(eth_tx_value)).map_err(ERROR::from)?;
+        }
         // If the transaction is a deposit with a `mint` value, add the mint value
         // in wei to the caller's balance. This should be persisted to the database
         // prior to the rest of execution.

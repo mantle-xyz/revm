@@ -25,6 +25,12 @@ pub trait OpTxTr: Transaction {
     fn is_deposit(&self) -> bool {
         self.tx_type() == DEPOSIT_TRANSACTION_TYPE
     }
+    
+    /// Returns the eth value of the deposit transaction
+    fn eth_value(&self) -> Option<u128>;
+
+    /// Returns the eth tx value of the deposit transaction
+    fn eth_tx_value(&self) -> Option<u128>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +164,14 @@ impl<T: Transaction> OpTxTr for OpTransaction<T> {
     fn is_system_transaction(&self) -> bool {
         self.deposit.is_system_transaction
     }
+
+    fn eth_value(&self) -> Option<u128> {
+        self.deposit.eth_value
+    }
+
+    fn eth_tx_value(&self) -> Option<u128> {
+        self.deposit.eth_tx_value
+    }
 }
 
 #[cfg(test)]
@@ -182,6 +196,8 @@ mod tests {
                 is_system_transaction: false,
                 mint: Some(0u128),
                 source_hash: B256::default(),
+                eth_value: Some(100),
+                eth_tx_value: Some(100),
             },
         };
         // Verify transaction type

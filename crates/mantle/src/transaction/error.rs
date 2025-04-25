@@ -39,6 +39,8 @@ pub enum OpTransactionError {
     /// are cause for non-inclusion, so a special [OpHaltReason][crate::OpHaltReason] variant was introduced to handle this
     /// case for failed deposit transactions.
     HaltedDepositPostRegolith,
+    /// BVM ETH operation errors
+    BvmEth(BvmEthError),
 }
 
 impl TransactionError for OpTransactionError {}
@@ -59,6 +61,7 @@ impl Display for OpTransactionError {
                     "deposit transaction halted post-regolith; error will be bubbled up to main return handler"
                 )
             }
+            Self::BvmEth(error) => error.fmt(f),
         }
     }
 }
@@ -76,3 +79,40 @@ impl<DBError> From<OpTransactionError> for EVMError<DBError, OpTransactionError>
         Self::Transaction(value)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BvmEthError{
+    EthTxValueTooLarge,
+    NonceOverflow,
+    DBError,
+    InsufficientFunds,
+}
+
+impl TransactionError for BvmEthError {}
+
+impl Display for BvmEthError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::EthTxValueTooLarge => write!(f, "eth tx value is too large"),
+            Self::NonceOverflow => write!(f, "nonce overflow"),
+            Self::DBError => write!(f, "database error during BVM ETH operation"),
+            Self::InsufficientFunds => write!(f, "insufficient BVM ETH funds"),
+        }
+    }
+}
+
+impl core::error::Error for BvmEthError {}
+
+impl From<BvmEthError> for OpTransactionError {
+    fn from(value: BvmEthError) -> Self {
+        Self::BvmEth(value)
+    }
+}
+
+impl<DBError> From<BvmEthError> for EVMError<DBError, OpTransactionError> {
+    fn from(value: BvmEthError) -> Self {
+        Self::Transaction(OpTransactionError::BvmEth(value))
+    }
+}
+

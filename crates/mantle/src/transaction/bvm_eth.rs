@@ -1,8 +1,8 @@
 use crate::api::exec::OpContextTr;
+use crate::transaction::error::{BvmEthError, OpTransactionError};
 use alloy_sol_types::SolValue;
 use revm::{
     context::{JournalTr, Transaction},
-    context_interface::result::EVMError,
     primitives::{
         address, fixed_bytes, keccak256, Address, Bytes, FixedBytes, Log, LogData, TxKind, U256,
     },
@@ -20,28 +20,6 @@ const MINT_SELECTOR: FixedBytes<32> =
 const TRANSFER_SELECTOR: FixedBytes<32> =
     fixed_bytes!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 
-/// Custom error types for BVM ETH operations
-#[derive(Debug)]
-pub enum BvmEthError {
-    EthTxValueTooLarge,
-    StorageFailure,
-    NonceOverflow,
-    Custom(String),
-}
-
-impl<DBError> From<BvmEthError> for EVMError<DBError> {
-    fn from(err: BvmEthError) -> Self {
-        match err {
-            BvmEthError::EthTxValueTooLarge => {
-                EVMError::Custom("eth tx value is too large".to_string())
-            }
-            BvmEthError::StorageFailure => EVMError::Custom("Storage operation failed".to_string()),
-            BvmEthError::NonceOverflow => EVMError::Custom("Nonce overflow".to_string()),
-            BvmEthError::Custom(msg) => EVMError::Custom(msg),
-        }
-    }
-}
-
 /// Get the storage key for a BVM ETH balance
 /// References:
 /// * <https://github.com/mantlenetworkio/op-geth/blob/v1.1.1/core/state_transition.go#L803>
@@ -56,39 +34,29 @@ fn get_bvm_eth_total_supply_slot() -> U256 {
     U256::from_limbs([2u64, 0, 0, 0])
 }
 
-pub(crate) fn warm_bvm_eth_contract<CTX, DBError>(
-    context: &mut CTX,
-) -> Result<(), EVMError<DBError>>
+pub(crate) fn warm_bvm_eth_contract<CTX, DBError>(context: &mut CTX) -> Result<(), DBError>
 where
     CTX: OpContextTr,
     CTX::Db: Database<Error = DBError>,
-    EVMError<DBError>: From<DBError>,
 {
     context.journal().load_account(BVM_ETH_ADDR)?;
     Ok(())
 }
 
-pub(crate) fn touch_bvm_eth_contract<CTX, DBError>(
-    context: &mut CTX,
-) -> Result<(), EVMError<DBError>>
+pub(crate) fn touch_bvm_eth_contract<CTX, DBError>(context: &mut CTX) -> Result<(), DBError>
 where
     CTX: OpContextTr,
     CTX::Db: Database<Error = DBError>,
-    EVMError<DBError>: From<DBError>,
 {
     context.journal().touch_account(BVM_ETH_ADDR);
     Ok(())
 }
 
 /// Add the value of ETH to the total supply of BVM ETH
-fn add_bvm_eth_total_supply<CTX, DBError>(
-    context: &mut CTX,
-    eth_value: U256,
-) -> Result<(), EVMError<DBError>>
+fn add_bvm_eth_total_supply<CTX, DBError>(context: &mut CTX, eth_value: U256) -> Result<(), DBError>
 where
     CTX: OpContextTr,
     CTX::Db: Database<Error = DBError>,
-    EVMError<DBError>: From<DBError>,
 {
     let total_supply_slot = get_bvm_eth_total_supply_slot();
     let value_supply = context
@@ -125,23 +93,30 @@ fn generate_bvm_eth_transfer_event(from: Address, to: Address, eth_value: U256) 
     }
 }
 
-pub(crate) fn mint_bvm_eth<CTX, DBError>(
+pub fn mint_bvm_eth<CTX, DBError>(
     context: &mut CTX,
     eth_value: U256,
-) -> Result<(), EVMError<DBError>>
+) -> Result<(), OpTransactionError>
 where
     CTX: OpContextTr,
     CTX::Db: Database<Error = DBError>,
-    EVMError<DBError>: From<DBError>,
 {
     let from = context.tx().caller();
     let slot = get_bvm_eth_balance_slot(from);
-    let value = context.journal().sload(BVM_ETH_ADDR, slot)?.data;
+    let value = context
+        .journal()
+        .sload(BVM_ETH_ADDR, slot)
+        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?
+        .data;
     let new_value = value.saturating_add(eth_value);
 
-    context.journal().sstore(BVM_ETH_ADDR, slot, new_value)?;
+    context
+        .journal()
+        .sstore(BVM_ETH_ADDR, slot, new_value)
+        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?;
 
-    add_bvm_eth_total_supply(context, eth_value)?;
+    add_bvm_eth_total_supply(context, eth_value)
+        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?;
 
     let mint_log = generate_bvm_eth_mint_event(from, eth_value);
     context.journal().log(mint_log);
@@ -149,23 +124,24 @@ where
     Ok(())
 }
 
-pub(crate) fn transfer_bvm_eth<CTX, DBError>(
+pub(crate) fn transfer_bvm_eth<CTX>(
     context: &mut CTX,
     eth_value: U256,
-) -> Result<(), EVMError<DBError>>
+) -> Result<(), OpTransactionError>
 where
     CTX: OpContextTr,
-    CTX::Db: Database<Error = DBError>,
-    EVMError<DBError>: From<DBError>,
 {
     let from = context.tx().caller();
     let to = match context.tx().kind() {
         TxKind::Call(caller) => caller,
         TxKind::Create => {
             // Increase nonce of caller and check if it overflows
-            let Some(nonce) = context.journal().inc_account_nonce(from)? else {
-                // can't happen on mainnet.
-                return Err(BvmEthError::NonceOverflow.into());
+            let Some(nonce) = context
+                .journal()
+                .inc_account_nonce(from)
+                .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?
+            else {
+                return Err(OpTransactionError::BvmEth(BvmEthError::NonceOverflow));
             };
             let old_nonce = nonce - 1;
             from.create(old_nonce)
@@ -179,21 +155,31 @@ where
     let from_slot = get_bvm_eth_balance_slot(from);
     let to_slot = get_bvm_eth_balance_slot(to);
 
-    let from_amount = context.journal().sload(BVM_ETH_ADDR, from_slot)?.data;
-    let to_amount = context.journal().sload(BVM_ETH_ADDR, to_slot)?.data;
-
+    let from_amount = context
+        .journal()
+        .sload(BVM_ETH_ADDR, from_slot)
+        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?
+        .data;
+    let to_amount = context
+        .journal()
+        .sload(BVM_ETH_ADDR, to_slot)
+        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?
+        .data;
+    
     if from_amount < eth_value {
-        return Err(BvmEthError::EthTxValueTooLarge.into());
+        return Err(OpTransactionError::BvmEth(BvmEthError::InsufficientFunds));
     }
     let new_from_amount = from_amount.saturating_sub(eth_value);
     let new_to_amount = to_amount.saturating_add(eth_value);
 
     context
         .journal()
-        .sstore(BVM_ETH_ADDR, from_slot, new_from_amount)?;
+        .sstore(BVM_ETH_ADDR, from_slot, new_from_amount)
+        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?;
     context
         .journal()
-        .sstore(BVM_ETH_ADDR, to_slot, new_to_amount)?;
+        .sstore(BVM_ETH_ADDR, to_slot, new_to_amount)
+        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?;
 
     let transfer_log = generate_bvm_eth_transfer_event(from, to, eth_value);
     context.journal().log(transfer_log);
