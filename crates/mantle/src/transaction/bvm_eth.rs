@@ -1,5 +1,5 @@
 use crate::api::exec::OpContextTr;
-use crate::transaction::error::{BvmEthError, OpTransactionError};
+use crate::transaction::error::{db_error, BvmEthError, OpTransactionError};
 use alloy_sol_types::SolValue;
 use revm::{
     context::{JournalTr, Transaction},
@@ -8,6 +8,7 @@ use revm::{
     },
     Database,
 };
+use std::fmt::Display;
 
 /// The native token of Mantle is MNT, and BVM_ETH is an ERC20 address that serves as a wrapper token for ETH
 const BVM_ETH_ADDR: Address = address!("dEAddEaDdeadDEadDEADDEAddEADDEAddead1111");
@@ -93,7 +94,7 @@ fn generate_bvm_eth_transfer_event(from: Address, to: Address, eth_value: U256) 
     }
 }
 
-pub fn mint_bvm_eth<CTX, DBError>(
+pub fn mint_bvm_eth<CTX, DBError: Display>(
     context: &mut CTX,
     eth_value: U256,
 ) -> Result<(), OpTransactionError>
@@ -106,17 +107,16 @@ where
     let value = context
         .journal()
         .sload(BVM_ETH_ADDR, slot)
-        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?
+        .map_err(db_error)?
         .data;
     let new_value = value.saturating_add(eth_value);
 
     context
         .journal()
         .sstore(BVM_ETH_ADDR, slot, new_value)
-        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?;
+        .map_err(db_error)?;
 
-    add_bvm_eth_total_supply(context, eth_value)
-        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?;
+    add_bvm_eth_total_supply(context, eth_value).map_err(db_error)?;
 
     let mint_log = generate_bvm_eth_mint_event(from, eth_value);
     context.journal().log(mint_log);
@@ -124,12 +124,13 @@ where
     Ok(())
 }
 
-pub(crate) fn transfer_bvm_eth<CTX>(
+pub(crate) fn transfer_bvm_eth<CTX, DBError: Display>(
     context: &mut CTX,
     eth_value: U256,
 ) -> Result<(), OpTransactionError>
 where
     CTX: OpContextTr,
+    CTX::Db: Database<Error = DBError>,
 {
     let from = context.tx().caller();
     let to = match context.tx().kind() {
@@ -139,7 +140,7 @@ where
             let Some(nonce) = context
                 .journal()
                 .inc_account_nonce(from)
-                .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?
+                .map_err(db_error)?
             else {
                 return Err(OpTransactionError::BvmEth(BvmEthError::NonceOverflow));
             };
@@ -158,14 +159,14 @@ where
     let from_amount = context
         .journal()
         .sload(BVM_ETH_ADDR, from_slot)
-        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?
+        .map_err(db_error)?
         .data;
     let to_amount = context
         .journal()
         .sload(BVM_ETH_ADDR, to_slot)
-        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?
+        .map_err(db_error)?
         .data;
-    
+
     if from_amount < eth_value {
         return Err(OpTransactionError::BvmEth(BvmEthError::InsufficientFunds));
     }
@@ -175,11 +176,11 @@ where
     context
         .journal()
         .sstore(BVM_ETH_ADDR, from_slot, new_from_amount)
-        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?;
+        .map_err(db_error)?;
     context
         .journal()
         .sstore(BVM_ETH_ADDR, to_slot, new_to_amount)
-        .map_err(|_| OpTransactionError::BvmEth(BvmEthError::DBError))?;
+        .map_err(db_error)?;
 
     let transfer_log = generate_bvm_eth_transfer_event(from, to, eth_value);
     context.journal().log(transfer_log);
