@@ -85,7 +85,7 @@ impl<DBError> From<OpTransactionError> for EVMError<DBError, OpTransactionError>
 pub enum BvmEthError{
     EthTxValueTooLarge,
     NonceOverflow,
-    DBError,
+    DBError(String),
     InsufficientFunds,
 }
 
@@ -96,7 +96,7 @@ impl Display for BvmEthError {
         match self {
             Self::EthTxValueTooLarge => write!(f, "eth tx value is too large"),
             Self::NonceOverflow => write!(f, "nonce overflow"),
-            Self::DBError => write!(f, "database error during BVM ETH operation"),
+            Self::DBError(error) => write!(f, "database error: {}", error),
             Self::InsufficientFunds => write!(f, "insufficient BVM ETH funds"),
         }
     }
@@ -114,5 +114,9 @@ impl<DBError> From<BvmEthError> for EVMError<DBError, OpTransactionError> {
     fn from(value: BvmEthError) -> Self {
         Self::Transaction(OpTransactionError::BvmEth(value))
     }
+}
+
+pub fn db_error<E: Display>(error: E) -> OpTransactionError {
+    OpTransactionError::BvmEth(BvmEthError::DBError(error.to_string()))
 }
 
