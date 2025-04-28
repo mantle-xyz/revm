@@ -1,13 +1,10 @@
 //!Handler related to Optimism chain
 use crate::{
-    api::exec::OpContextTr,
-    constants::BASE_FEE_RECIPIENT,
-    transaction::{bvm_eth, deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr},
-    L1BlockInfo, OpHaltReason, OpSpecId,
+    api::exec::OpContextTr, constants::{BASE_FEE_RECIPIENT, GAS_ORACLE_CONTRACT}, transaction::{bvm_eth, deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr}, BvmEth, L1BlockInfo, OpHaltReason, OpSpecId
 };
 use revm::{
     context_interface::{
-        result::{EVMError, ExecutionResult, FromStringError, ResultAndState},
+        result::{EVMError, ExecutionResult, FromStringError, InvalidTransaction, ResultAndState},
         Block, Cfg, ContextTr, JournalTr, Transaction,
     },
     handler::{
@@ -15,9 +12,9 @@ use revm::{
         Handler, MainnetHandler,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorFrame, InspectorHandler},
-    interpreter::{interpreter::EthInterpreter, FrameInput, Gas},
+    interpreter::{interpreter::EthInterpreter, FrameInput, Gas, InitialAndFloorGas},
     primitives::hardfork::SpecId,
-    primitives::{HashMap, U256},
+    primitives::{Address, HashMap, TxKind, U256},
     state::Account,
     Database,
 };
@@ -82,19 +79,47 @@ where
         self.mainnet.validate_env(evm)
     }
 
+    fn validate_initial_tx_gas(
+        &self,
+        evm: &mut Self::Evm,
+    ) -> Result<revm::interpreter::InitialAndFloorGas, Self::Error> {
+        let mut initial_gas = self.mainnet.validate_initial_tx_gas(evm)?;
+
+        let context = evm.ctx();
+        let block_number = context.block().number();
+        let spec = context.cfg().spec();
+        if context.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE {
+            Ok(initial_gas)
+        } else {
+            let to = match context.tx().kind() {
+                TxKind::Call(to) => to,
+                TxKind::Create => Address::ZERO,
+            };
+            // The L1-cost fee is only computed for Optimism non-deposit transactions.
+            if context.chain().l2_block != block_number || to == GAS_ORACLE_CONTRACT {
+                // L1 block info is stored in the context for later use.
+                // and it will be reloaded from the database if it is not for the current block or the token ratio is updated.(when the gas oracle is updated)
+                *context.chain() = L1BlockInfo::try_fetch(context.db(), block_number, spec)?;
+            }
+
+            // if the tx is not a deposit transaction, we need to multiply the initial gas by the token ratio
+            let token_ratio = context.chain().get_token_ratio();
+            initial_gas.initial_gas = initial_gas
+                .initial_gas
+                .checked_mul(token_ratio.try_into().unwrap())
+                .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
+            Ok(initial_gas)
+        }
+    }
+
     fn validate_tx_against_state(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
         let context = evm.ctx();
         let spec = context.cfg().spec();
-        let block_number = context.block().number();
         if context.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE {
             return Ok(());
         } else {
-            // The L1-cost fee is only computed for Optimism non-deposit transactions.
-            if context.chain().l2_block != block_number {
-                // L1 block info is stored in the context for later use.
-                // and it will be reloaded from the database if it is not for the current block.
-                *context.chain() = L1BlockInfo::try_fetch(context.db(), block_number, spec)?;
-            }
+            // Do nothing
+            // We stored the L1 block info in the context in validate_initial_tx_gas
         }
 
         let enveloped_tx = context
@@ -104,7 +129,7 @@ where
             .clone();
 
         // compute L1 cost
-        let mut additional_cost = context.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
+        let additional_cost = context.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
 
         let tx_caller = context.tx().caller();
 
@@ -121,17 +146,21 @@ where
         let spec = ctx.cfg().spec();
         let caller = ctx.tx().caller();
         let is_deposit = ctx.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        if let Some(eth_value) = ctx.tx().eth_value() {
-            bvm_eth::mint_bvm_eth(ctx, U256::from(eth_value)).map_err(ERROR::from)?;
-        }
-        if let Some(eth_tx_value) = ctx.tx().eth_tx_value() {
-            bvm_eth::transfer_bvm_eth(ctx, U256::from(eth_tx_value)).map_err(ERROR::from)?;
-        }
+
         // If the transaction is a deposit with a `mint` value, add the mint value
         // in wei to the caller's balance. This should be persisted to the database
         // prior to the rest of execution.
         let mut tx_l1_cost = U256::ZERO;
         if is_deposit {
+            // mint the eth value to the caller
+            if let Some(eth_value) = ctx.tx().eth_value() {
+                BvmEth::mint(ctx, U256::from(eth_value)).map_err(ERROR::from)?;
+            }
+            // transfer the eth tx value to the caller
+            if let Some(eth_tx_value) = ctx.tx().eth_tx_value() {
+                BvmEth::transfer(ctx, U256::from(eth_tx_value)).map_err(ERROR::from)?;
+            }
+
             let tx = ctx.tx();
             if let Some(mint) = tx.mint() {
                 let mut caller_account = ctx.journal().load_account(caller)?;
@@ -408,6 +437,15 @@ where
     >,
 {
     type IT = EthInterpreter;
+
+    fn inspect_execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &InitialAndFloorGas,
+    ) -> Result<FrameResult, Self::Error> {
+        let result = self.mainnet.inspect_execution(evm, init_and_floor_gas)?;
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
