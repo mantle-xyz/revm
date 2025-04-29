@@ -158,6 +158,12 @@ impl Gas {
 
         MemoryExtensionResult::Extended
     }
+
+    /// Set the remaining gas.
+    #[inline]
+    pub fn set_remaining(&mut self, remaining: u64) {
+        self.remaining = remaining;
+    }
 }
 
 pub enum MemoryExtensionResult {

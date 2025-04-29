@@ -1,6 +1,9 @@
 //!Handler related to Optimism chain
 use crate::{
-    api::exec::OpContextTr, constants::{BASE_FEE_RECIPIENT, GAS_ORACLE_CONTRACT}, transaction::{bvm_eth, deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr}, BvmEth, L1BlockInfo, OpHaltReason, OpSpecId
+    api::exec::OpContextTr,
+    constants::{BASE_FEE_RECIPIENT, GAS_ORACLE_CONTRACT},
+    transaction::{deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr},
+    BvmEth, L1BlockInfo, OpHaltReason, OpSpecId,
 };
 use revm::{
     context_interface::{
@@ -9,7 +12,7 @@ use revm::{
     },
     handler::{
         handler::EvmTrError, validation::validate_tx_against_account, EvmTr, Frame, FrameResult,
-        Handler, MainnetHandler,
+        Handler, ItemOrResult, MainnetHandler,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorFrame, InspectorHandler},
     interpreter::{interpreter::EthInterpreter, FrameInput, Gas, InitialAndFloorGas},
@@ -235,6 +238,7 @@ where
                     // the Bedrock hardfork that did not incur any gas costs.
                     gas.erase_cost(tx_gas_limit);
                 }
+                // [TODO] Maybe we should move the [refund] logic to this function.
             }
         } else if instruction_result.is_revert() {
             // On Optimism, deposit transactions report gas usage uniquely to other
@@ -261,24 +265,10 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <Self::Frame as Frame>::FrameResult,
     ) -> Result<(), Self::Error> {
-        self.mainnet.reimburse_caller(evm, exec_result)?;
-
-        // let context = evm.ctx();
-        // if context.tx().tx_type() != DEPOSIT_TRANSACTION_TYPE {
-        //     let caller = context.tx().caller();
-        //     let spec = context.cfg().spec();
-        //     let operator_fee_refund = context.chain().operator_fee_refund(exec_result.gas(), spec);
-
-        //     let caller_account = context.journal().load_account(caller)?;
-
-        //     // In additional to the normal transaction fee, additionally refund the caller
-        //     // for the operator fee.
-        //     caller_account.data.info.balance = caller_account
-        //         .data
-        //         .info
-        //         .balance
-        //         .saturating_add(operator_fee_refund);
-        // }
+        let context = evm.ctx();
+        if context.tx().tx_type() != DEPOSIT_TRANSACTION_TYPE {
+            self.mainnet.reimburse_caller(evm, exec_result)?;
+        }
 
         Ok(())
     }
@@ -293,7 +283,7 @@ where
 
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
-
+        let is_system = evm.ctx().tx().is_system_transaction();
         // Prior to Regolith, deposit transactions did not receive gas refunds.
         let is_gas_refund_disabled = is_deposit && !is_regolith;
         if !is_gas_refund_disabled {
@@ -304,6 +294,19 @@ where
                     .into_eth_spec()
                     .is_enabled_in(SpecId::LONDON),
             );
+            return;
+        }
+
+        if !is_system && !is_deposit {
+            let token_ratio = evm.ctx().chain().get_token_ratio();
+            let gas = exec_result.gas_mut();
+            let refund = gas.refunded();
+            let new_refund = refund.saturating_mul(token_ratio.try_into().unwrap());
+            gas.set_refund(new_refund);
+
+            let remaining = gas.remaining();
+            let new_remaining = remaining.saturating_mul(token_ratio.try_into().unwrap());
+            gas.set_remaining(new_remaining);
         }
     }
 
@@ -443,8 +446,55 @@ where
         evm: &mut Self::Evm,
         init_and_floor_gas: &InitialAndFloorGas,
     ) -> Result<FrameResult, Self::Error> {
-        let result = self.mainnet.inspect_execution(evm, init_and_floor_gas)?;
-        Ok(result)
+        let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
+        let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+
+        // l1cost = l1cost / effective_gas_price
+        // gas_limit = gas_limit - l1cost
+        // gas_limit = gas_limit / token_ratio
+        if !is_deposit {
+            let ctx = evm.ctx();
+            let spec = ctx.cfg().spec();
+
+            let token_ratio = ctx.chain().get_token_ratio();
+
+            let enveloped_tx = ctx
+                .tx()
+                .enveloped_tx()
+                .expect("all not deposit tx have enveloped tx")
+                .clone();
+            let basefee = ctx.block().basefee() as u128;
+            let mut tx_l1_cost = ctx.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
+            let effective_gas_price = ctx.tx().effective_gas_price(basefee);
+
+            if effective_gas_price > 0 {
+                tx_l1_cost = tx_l1_cost.wrapping_div(U256::from(effective_gas_price));
+            }
+
+            if tx_l1_cost.gt(&U256::from(gas_limit)) {
+                return Err(ERROR::from(OpTransactionError::Base(
+                    InvalidTransaction::CallGasCostMoreThanGasLimit {
+                        initial_gas: init_and_floor_gas.initial_gas,
+                        gas_limit,
+                    },
+                )));
+            }
+
+            gas_limit = gas_limit.wrapping_sub(tx_l1_cost.try_into().unwrap());
+            gas_limit = gas_limit.wrapping_div(token_ratio.try_into().unwrap());
+        }
+
+        // Create first frame action
+        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let first_frame = self.inspect_first_frame_init(evm, first_frame_input)?;
+
+        let mut frame_result = match first_frame {
+            ItemOrResult::Item(frame) => self.inspect_run_exec_loop(evm, frame)?,
+            ItemOrResult::Result(result) => result,
+        };
+
+        self.last_frame_result(evm, &mut frame_result)?;
+        Ok(frame_result)
     }
 }
 
@@ -453,7 +503,7 @@ mod tests {
     use super::*;
     use crate::{api::default_ctx::OpContext, DefaultOp, OpBuilder};
     use revm::{
-        context::{Context, TransactionType},
+        context::Context,
         context_interface::result::InvalidTransaction,
         database::InMemoryDB,
         database_interface::EmptyDB,
