@@ -1,16 +1,34 @@
 //! Optimism-specific constants, types, and helpers.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use alloy_consensus::Transaction;
-use alloy_eips::{BlockId, BlockNumberOrTag};
-use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
+use alloy_consensus::{
+    SignableTransaction, Transaction, TxEip1559, TxEip2930, TxEip7702, TxLegacy,
+};
+use alloy_eips::{BlockId, Decodable2718, Typed2718};
+use alloy_primitives::{Address, Bytes, Sealable, B256};
+use alloy_provider::{
+    network::primitives::BlockTransactions, Provider, ProviderBuilder, RootProvider,
+};
+use alloy_rpc_types_engine::PayloadAttributes;
+use alloy_rpc_types_eth::Block;
 use indicatif::ProgressBar;
+use mantle_revm::{
+    api::{builder::OpBuilder, default_ctx::DefaultOp},
+    spec::OpSpecId,
+    transaction,
+    transaction::deposit::DepositTransactionParts,
+    OpTransaction,
+};
+use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
+use op_alloy_network::Optimism;
+// use op_alloy_rpc_types_engine::Block as OpBlock;
 use revm::{
+    context::{block, tx::TxEnv},
     database::{AlloyDB, CacheDB, StateBuilder},
     database_interface::WrapDatabaseAsync,
     inspector::{inspectors::TracerEip3155, InspectEvm},
     primitives::TxKind,
-    Context, MainBuilder, MainContext,
+    Context,
 };
 use std::fs::create_dir_all;
 use std::fs::OpenOptions;
@@ -45,25 +63,22 @@ async fn main() -> anyhow::Result<()> {
     create_dir_all("traces")?;
 
     // Set up the HTTP transport which is consumed by the RPC client.
-    let rpc_url = "https://mainnet.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27".parse()?;
+    let rpc_url = "".parse()?;
 
     // Create a provider
-    let client = ProviderBuilder::new().on_http(rpc_url);
+    let client = ProviderBuilder::<_, _, Optimism>::default().on_http(rpc_url);
 
     // Params
-    let chain_id: u64 = 1;
-    let block_number = 10889447;
+    let chain_id: u64 = 5000;
+    let block_number = 78896111;
 
     // Fetch the transaction-rich block
-    let block = match client
-        .get_block_by_number(BlockNumberOrTag::Number(block_number))
-        .full()
+    let block = client
+        .get_block_by_number(block_number.into())
         .await
-    {
-        Ok(Some(block)) => block,
-        Ok(None) => anyhow::bail!("Block not found"),
-        Err(error) => anyhow::bail!("Error: {:?}", error),
-    };
+        .expect("Failed to get parent block")
+        .expect("Block not found");
+
     println!("Fetched block number: {}", block.header.number);
     let previous_block_number = block_number - 1;
 
@@ -71,10 +86,10 @@ async fn main() -> anyhow::Result<()> {
     let prev_id: BlockId = previous_block_number.into();
     // SAFETY: This cannot fail since this is in the top-level tokio runtime
 
-    let state_db = WrapDatabaseAsync::new(AlloyDB::new(client, prev_id)).unwrap();
+    let state_db = WrapDatabaseAsync::new(AlloyDB::new(client.clone(), prev_id)).unwrap();
     let cache_db: CacheDB<_> = CacheDB::new(state_db);
     let mut state = StateBuilder::new_with_database(cache_db).build();
-    let ctx = Context::mainnet()
+    let ctx = Context::op()
         .with_db(&mut state)
         .modify_block_chained(|b| {
             b.number = block.header.number;
@@ -87,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .modify_cfg_chained(|c| {
             c.chain_id = chain_id;
+            c.spec = OpSpecId::CANYON;
         });
 
     let write = OpenOptions::new()
@@ -98,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
         write.expect("Failed to open file"),
     )));
     let writer = FlushWriter::new(Arc::clone(&inner));
-    let mut evm = ctx.build_mainnet_with_inspector(TracerEip3155::new(Box::new(writer)));
+    let mut evm = ctx.build_op_with_inspector(TracerEip3155::new(Box::new(writer)));
 
     let txs = block.transactions.len();
     println!("Found {txs} transactions.");
@@ -110,34 +126,26 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all("traces").expect("Failed to create traces directory");
 
     // Fill in CfgEnv
-    let BlockTransactions::Full(transactions) = block.transactions else {
+    let BlockTransactions::Hashes(transactions) = block.transactions else {
         panic!("Wrong transaction type")
     };
 
-    for tx in transactions {
-        evm.modify_tx(|etx| {
-            etx.caller = tx.inner.signer();
-            etx.gas_limit = tx.gas_limit();
-            etx.gas_price = tx.gas_price().unwrap_or(tx.inner.max_fee_per_gas());
-            etx.value = tx.value();
-            etx.data = tx.input().to_owned();
-            etx.gas_priority_fee = tx.max_priority_fee_per_gas();
-            etx.chain_id = Some(chain_id);
-            etx.nonce = tx.nonce();
-            if let Some(access_list) = tx.access_list() {
-                etx.access_list = access_list.clone()
-            } else {
-                etx.access_list = Default::default();
-            }
+    for (i, tx_hash) in transactions.iter().enumerate() {
+        let raw_tx = client
+            .clone()
+            .client()
+            .request::<&[B256; 1], Bytes>("debug_getRawTransaction", &[*tx_hash])
+            .await
+            .expect("Block not found");
+        let tx = OpTxEnvelope::decode_2718(&mut raw_tx.as_ref()).unwrap();
 
-            etx.kind = match tx.to() {
-                Some(to_address) => TxKind::Call(to_address),
-                None => TxKind::Create,
-            };
+        let optx = prepare_tx_env(&tx, tx.recover_signer().unwrap(), raw_tx);
+
+        evm.0.modify_tx(|etx| {
+            *etx = optx;
         });
 
-        // Construct the file writer to write the trace to
-        let tx_number = tx.transaction_index.unwrap_or_default();
+        let tx_number = i;
         let file_name = format!("traces/{}.json", tx_number);
         let write = OpenOptions::new()
             .write(true)
@@ -171,4 +179,161 @@ async fn main() -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+/// NOTE: TEMPORARY FUNCTION
+pub fn prepare_tx_env(tx: &OpTxEnvelope, caller: Address, encoded: Bytes) -> OpTransaction<TxEnv> {
+    let base = match tx {
+        OpTxEnvelope::Legacy(tx) => from_recovered_tx_legacy(tx.tx(), caller),
+        OpTxEnvelope::Eip1559(tx) => from_recovered_tx_eip1559(tx.tx(), caller),
+        OpTxEnvelope::Eip2930(tx) => from_recovered_tx_eip2930(tx.tx(), caller),
+        OpTxEnvelope::Eip7702(tx) => from_recovered_tx_eip7702(tx.tx(), caller),
+        OpTxEnvelope::Deposit(tx) => {
+            let TxDeposit {
+                to,
+                value,
+                gas_limit,
+                input,
+                source_hash: _,
+                from: _,
+                mint: _,
+                is_system_transaction: _,
+            } = tx.inner();
+            TxEnv {
+                tx_type: tx.ty(),
+                caller,
+                gas_limit: *gas_limit,
+                kind: *to,
+                value: *value,
+                data: input.clone(),
+                ..Default::default()
+            }
+        }
+    };
+
+    let deposit = if let OpTxEnvelope::Deposit(tx) = tx {
+        DepositTransactionParts {
+            source_hash: tx.source_hash,
+            mint: tx.mint,
+            is_system_transaction: tx.is_system_transaction,
+            eth_value: None,
+            eth_tx_value: None,
+        }
+    } else {
+        Default::default()
+    };
+
+    OpTransaction {
+        base,
+        enveloped_tx: Some(encoded),
+        deposit,
+    }
+}
+
+fn from_recovered_tx_legacy(tx: &TxLegacy, caller: Address) -> TxEnv {
+    let TxLegacy {
+        chain_id,
+        nonce,
+        gas_price,
+        gas_limit,
+        to,
+        value,
+        input,
+    } = tx;
+    TxEnv {
+        tx_type: tx.ty(),
+        caller,
+        gas_limit: *gas_limit,
+        gas_price: *gas_price,
+        kind: *to,
+        value: *value,
+        data: input.clone(),
+        nonce: *nonce,
+        chain_id: *chain_id,
+        ..Default::default()
+    }
+}
+
+fn from_recovered_tx_eip1559(tx: &TxEip1559, caller: Address) -> TxEnv {
+    let TxEip1559 {
+        chain_id,
+        nonce,
+        gas_limit,
+        to,
+        value,
+        input,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+        access_list,
+    } = tx;
+    TxEnv {
+        tx_type: tx.ty(),
+        caller,
+        gas_limit: *gas_limit,
+        gas_price: *max_fee_per_gas,
+        kind: *to,
+        value: *value,
+        data: input.clone(),
+        nonce: *nonce,
+        chain_id: Some(*chain_id),
+        gas_priority_fee: Some(*max_priority_fee_per_gas),
+        access_list: access_list.clone(),
+        ..Default::default()
+    }
+}
+
+fn from_recovered_tx_eip2930(tx: &TxEip2930, caller: Address) -> TxEnv {
+    let TxEip2930 {
+        chain_id,
+        nonce,
+        gas_price,
+        gas_limit,
+        to,
+        value,
+        access_list,
+        input,
+    } = tx;
+    TxEnv {
+        tx_type: tx.ty(),
+        caller,
+        gas_limit: *gas_limit,
+        gas_price: *gas_price,
+        kind: *to,
+        value: *value,
+        data: input.clone(),
+        chain_id: Some(*chain_id),
+        nonce: *nonce,
+        access_list: access_list.clone(),
+        ..Default::default()
+    }
+}
+
+fn from_recovered_tx_eip7702(tx: &TxEip7702, caller: Address) -> TxEnv {
+    let TxEip7702 {
+        chain_id,
+        nonce,
+        gas_limit,
+        to,
+        value,
+        input,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+        access_list,
+        authorization_list,
+    } = tx;
+    TxEnv {
+        tx_type: tx.ty(),
+        caller,
+        gas_limit: *gas_limit,
+        gas_price: *max_fee_per_gas,
+        kind: TxKind::Call(*to),
+        value: *value,
+        data: input.clone(),
+        nonce: *nonce,
+        chain_id: Some(*chain_id),
+        gas_priority_fee: Some(*max_priority_fee_per_gas),
+        access_list: access_list.clone(),
+        authorization_list: authorization_list.clone(),
+        ..Default::default()
+    }
 }
