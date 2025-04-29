@@ -1,29 +1,22 @@
 //! Optimism-specific constants, types, and helpers.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use alloy_consensus::{
-    SignableTransaction, Transaction, TxEip1559, TxEip2930, TxEip7702, TxLegacy,
-};
+use alloy_consensus::{TxEip1559, TxEip2930, TxEip7702, TxLegacy};
 use alloy_eips::{BlockId, Decodable2718, Typed2718};
-use alloy_primitives::{Address, Bytes, Sealable, B256};
-use alloy_provider::{
-    network::primitives::BlockTransactions, Provider, ProviderBuilder, RootProvider,
-};
-use alloy_rpc_types_engine::PayloadAttributes;
-use alloy_rpc_types_eth::Block;
+use alloy_primitives::{Address, Bytes, B256};
+use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
+use dotenv::dotenv;
 use indicatif::ProgressBar;
 use mantle_revm::{
     api::{builder::OpBuilder, default_ctx::DefaultOp},
     spec::OpSpecId,
-    transaction,
     transaction::deposit::DepositTransactionParts,
     OpTransaction,
 };
 use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
 use op_alloy_network::Optimism;
-// use op_alloy_rpc_types_engine::Block as OpBlock;
 use revm::{
-    context::{block, tx::TxEnv},
+    context::tx::TxEnv,
     database::{AlloyDB, CacheDB, StateBuilder},
     database_interface::WrapDatabaseAsync,
     inspector::{inspectors::TracerEip3155, InspectEvm},
@@ -60,7 +53,9 @@ impl Write for FlushWriter {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Set up the HTTP transport which is consumed by the RPC client.
-    let rpc_url = "".parse()?;
+    dotenv().ok();
+    let mantle_url = std::env::var("MANTLE_URL").unwrap();
+    let rpc_url = mantle_url.parse()?;
 
     // Create a provider
     let client = ProviderBuilder::<_, _, Optimism>::default().on_http(rpc_url);
