@@ -353,6 +353,11 @@ where
         //     );
         //     return;
         // }
+        let is_eth_mint = evm.ctx().tx().eth_value().is_some();
+        if is_eth_mint {
+            let gas = exec_result.gas_mut();
+            gas.set_remaining(gas.remaining().saturating_sub(4500));
+        }
 
         let gas = exec_result.gas_mut();
         if !is_system && !is_deposit {
