@@ -16,7 +16,6 @@ use revm::{
     },
     inspector::{Inspector, InspectorEvmTr, InspectorFrame, InspectorHandler},
     interpreter::{interpreter::EthInterpreter, FrameInput, Gas, InitialAndFloorGas},
-    primitives::hardfork::SpecId,
     primitives::{Address, HashMap, TxKind, U256},
     state::Account,
     Database,
@@ -109,6 +108,11 @@ where
             let token_ratio = context.chain().get_token_ratio();
             initial_gas.initial_gas = initial_gas
                 .initial_gas
+                .checked_mul(token_ratio.try_into().unwrap())
+                .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
+
+            initial_gas.floor_gas = initial_gas
+                .floor_gas
                 .checked_mul(token_ratio.try_into().unwrap())
                 .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
             Ok(initial_gas)
@@ -273,6 +277,59 @@ where
         Ok(())
     }
 
+    fn execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &InitialAndFloorGas,
+    ) -> Result<FrameResult, Self::Error> {
+        let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
+        let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+        // l1cost = l1cost / effective_gas_price
+        // gas_limit = gas_limit - l1cost
+        // gas_limit = gas_limit / token_ratio
+        if !is_deposit {
+            let ctx = evm.ctx();
+            let spec = ctx.cfg().spec();
+
+            let token_ratio = ctx.chain().get_token_ratio();
+
+            let enveloped_tx = ctx
+                .tx()
+                .enveloped_tx()
+                .expect("all not deposit tx have enveloped tx")
+                .clone();
+            let basefee = ctx.block().basefee() as u128;
+            let mut tx_l1_cost = ctx.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
+            let effective_gas_price = ctx.tx().effective_gas_price(basefee);
+
+            if effective_gas_price > 0 {
+                tx_l1_cost = tx_l1_cost.wrapping_div(U256::from(effective_gas_price));
+            }
+
+            if tx_l1_cost.gt(&U256::from(gas_limit)) {
+                return Err(ERROR::from(OpTransactionError::Base(
+                    InvalidTransaction::CallGasCostMoreThanGasLimit {
+                        initial_gas: init_and_floor_gas.initial_gas,
+                        gas_limit,
+                    },
+                )));
+            }
+
+            gas_limit = gas_limit.wrapping_sub(tx_l1_cost.try_into().unwrap());
+            gas_limit = gas_limit.wrapping_div(token_ratio.try_into().unwrap());
+        }
+
+        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let first_frame = self.first_frame_init(evm, first_frame_input)?;
+        let mut frame_result = match first_frame {
+            ItemOrResult::Item(frame) => self.run_exec_loop(evm, frame)?,
+            ItemOrResult::Result(result) => result,
+        };
+
+        self.last_frame_result(evm, &mut frame_result)?;
+        Ok(frame_result)
+    }
+
     fn refund(
         &self,
         evm: &mut Self::Evm,
@@ -282,24 +339,24 @@ where
         exec_result.gas_mut().record_refund(eip7702_refund);
 
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
         let is_system = evm.ctx().tx().is_system_transaction();
+        // let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
         // Prior to Regolith, deposit transactions did not receive gas refunds.
-        let is_gas_refund_disabled = is_deposit && !is_regolith;
-        if !is_gas_refund_disabled {
-            exec_result.gas_mut().set_final_refund(
-                evm.ctx()
-                    .cfg()
-                    .spec()
-                    .into_eth_spec()
-                    .is_enabled_in(SpecId::LONDON),
-            );
-            return;
-        }
+        // let is_gas_refund_disabled = is_deposit && !is_regolith;
+        // if !is_gas_refund_disabled {
+        //     exec_result.gas_mut().set_final_refund(
+        //         evm.ctx()
+        //             .cfg()
+        //             .spec()
+        //             .into_eth_spec()
+        //             .is_enabled_in(SpecId::LONDON),
+        //     );
+        //     return;
+        // }
 
+        let gas = exec_result.gas_mut();
         if !is_system && !is_deposit {
             let token_ratio = evm.ctx().chain().get_token_ratio();
-            let gas = exec_result.gas_mut();
             let refund = gas.refunded();
             let new_refund = refund.saturating_mul(token_ratio.try_into().unwrap());
             gas.set_refund(new_refund);
@@ -307,6 +364,8 @@ where
             let remaining = gas.remaining();
             let new_remaining = remaining.saturating_mul(token_ratio.try_into().unwrap());
             gas.set_remaining(new_remaining);
+        } else {
+            gas.set_refund(0);
         }
     }
 
@@ -448,7 +507,6 @@ where
     ) -> Result<FrameResult, Self::Error> {
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
-
         // l1cost = l1cost / effective_gas_price
         // gas_limit = gas_limit - l1cost
         // gas_limit = gas_limit / token_ratio
