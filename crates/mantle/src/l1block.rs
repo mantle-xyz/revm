@@ -51,7 +51,7 @@ impl L1BlockInfo {
 
         let _ = db.basic(GAS_ORACLE_CONTRACT)?;
         let l1_base_fee = db.storage(L1_BLOCK_CONTRACT, L1_BASE_FEE_SLOT)?;
-        let token_ratio = db.storage(L1_BLOCK_CONTRACT, TOKEN_RATIO_SLOT)?;
+        let token_ratio = db.storage(GAS_ORACLE_CONTRACT, TOKEN_RATIO_SLOT)?;
 
         let l1_fee_overhead = db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?;
         let l1_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
