@@ -9,13 +9,14 @@ use revm::{
     Database,
 };
 use std::fmt::Display;
+use std::vec;
 
 pub trait BvmEthContextTrait: OpContextTr {
     type DbError: Display;
 }
 
-impl<T, E> BvmEthContextTrait for T 
-where 
+impl<T, E> BvmEthContextTrait for T
+where
     T: OpContextTr,
     T::Db: Database<Error = E>,
     E: Display,
@@ -48,10 +49,7 @@ impl BvmEth {
     }
 
     /// Mint BVM ETH for a given context and amount
-    pub fn mint<CTX>(
-        context: &mut CTX,
-        eth_value: U256,
-    ) -> Result<(), OpTransactionError>
+    pub fn mint<CTX>(context: &mut CTX, eth_value: U256) -> Result<(), OpTransactionError>
     where
         CTX: BvmEthContextTrait,
     {
@@ -68,10 +66,7 @@ impl BvmEth {
     }
 
     /// Transfer BVM ETH for a given context and amount
-    pub fn transfer<CTX>(
-        context: &mut CTX,
-        eth_value: U256,
-    ) -> Result<(), OpTransactionError>
+    pub fn transfer<CTX>(context: &mut CTX, eth_value: U256) -> Result<(), OpTransactionError>
     where
         CTX: BvmEthContextTrait,
     {
@@ -87,10 +82,7 @@ impl BvmEth {
     }
 
     /// Add the value of ETH to the total supply of BVM ETH
-    fn add_total_supply<CTX>(
-        context: &mut CTX,
-        eth_value: U256,
-    ) -> Result<(), OpTransactionError>
+    fn add_total_supply<CTX>(context: &mut CTX, eth_value: U256) -> Result<(), OpTransactionError>
     where
         CTX: BvmEthContextTrait,
     {
@@ -150,10 +142,7 @@ impl BvmEth {
     }
 
     /// Get account balance
-    fn get_balance<CTX>(
-        context: &mut CTX,
-        account: Address,
-    ) -> Result<U256, OpTransactionError>
+    fn get_balance<CTX>(context: &mut CTX, account: Address) -> Result<U256, OpTransactionError>
     where
         CTX: BvmEthContextTrait,
     {
@@ -190,10 +179,7 @@ impl BvmEth {
     }
 
     /// Inner implementation of transfer
-    fn transfer_inner<CTX>(
-        context: &mut CTX,
-        eth_value: U256,
-    ) -> Result<(), OpTransactionError>
+    fn transfer_inner<CTX>(context: &mut CTX, eth_value: U256) -> Result<(), OpTransactionError>
     where
         CTX: BvmEthContextTrait,
     {

@@ -3,6 +3,7 @@ use revm::context_interface::{
     result::{EVMError, InvalidTransaction},
     transaction::TransactionError,
 };
+use std::string::{String, ToString};
 
 /// Optimism transaction validation error.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -82,7 +83,7 @@ impl<DBError> From<OpTransactionError> for EVMError<DBError, OpTransactionError>
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum BvmEthError{
+pub enum BvmEthError {
     EthTxValueTooLarge,
     NonceOverflow,
     DBError(String),
@@ -119,4 +120,3 @@ impl<DBError> From<BvmEthError> for EVMError<DBError, OpTransactionError> {
 pub fn db_error<E: Display>(error: E) -> OpTransactionError {
     OpTransactionError::BvmEth(BvmEthError::DBError(error.to_string()))
 }
-
