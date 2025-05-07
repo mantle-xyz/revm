@@ -150,14 +150,12 @@ where
 
     fn deduct_caller(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
         let ctx = evm.ctx();
-        let spec = ctx.cfg().spec();
         let caller = ctx.tx().caller();
         let is_deposit = ctx.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
 
         // If the transaction is a deposit with a `mint` value, add the mint value
         // in wei to the caller's balance. This should be persisted to the database
         // prior to the rest of execution.
-        let mut tx_l1_cost = U256::ZERO;
         if is_deposit {
             // mint the eth value to the caller
             if let Some(eth_value) = ctx.tx().eth_value() {
@@ -173,27 +171,12 @@ where
                 let mut caller_account = ctx.journal().load_account(caller)?;
                 caller_account.info.balance += U256::from(mint);
             }
-        } else {
-            let enveloped_tx = ctx
-                .tx()
-                .enveloped_tx()
-                .expect("all not deposit tx have enveloped tx")
-                .clone();
-            tx_l1_cost = ctx.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
         }
 
         // We deduct caller max balance after minting and before deducing the
         // L1 cost, max values is already checked in pre_validate but L1 cost wasn't.
         self.mainnet.deduct_caller(evm)?;
 
-        // If the transaction is not a deposit transaction, subtract the L1 data fee from the
-        // caller's balance directly after minting the requested amount of ETH.
-        // Additionally deduct the operator fee from the caller's account.
-        if !is_deposit {
-            let ctx = evm.ctx();
-            let mut caller_account = ctx.journal().load_account(caller)?;
-            caller_account.info.balance = caller_account.info.balance.saturating_sub(tx_l1_cost);
-        }
         Ok(())
     }
 

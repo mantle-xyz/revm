@@ -40,8 +40,6 @@ op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = 
 ] }
 op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v141", default-features = false }
 
-# progress bar
-indicatif.workspace = true
 
 # misc
 anyhow.workspace = true
