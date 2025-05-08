@@ -1,14 +1,14 @@
 //!Handler related to Optimism chain
 use crate::{
     api::exec::OpContextTr,
-    constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},
+    constants::{BASE_FEE_RECIPIENT, GAS_ORACLE_CONTRACT},
     transaction::{deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr},
-    L1BlockInfo, OpHaltReason, OpSpecId,
+    BvmEth, L1BlockInfo, OpHaltReason, OpSpecId,
 };
 use revm::{
     context::{result::InvalidTransaction, LocalContextTr},
     context_interface::{
-        result::{EVMError, ExecutionResult, FromStringError, ResultAndState},
+        result::{EVMError, ExecutionResult, FromStringError, InvalidTransaction, ResultAndState},
         Block, Cfg, ContextTr, JournalTr, Transaction,
     },
     handler::{
@@ -125,7 +125,25 @@ where
                 let operator_fee_charge = ctx.chain().operator_fee_charge(&enveloped_tx, gas_limit);
                 additional_cost = additional_cost.saturating_add(operator_fee_charge);
             }
+            // Reset the l2_block if the tx is set token ratio, we need reload token ratio from the database in next transaction
+            if to == GAS_ORACLE_CONTRACT {
+                context.chain().reset_l2_block();
+            }
+
+            // if the tx is not a deposit transaction, we need to multiply the initial gas by the token ratio
+            let token_ratio = context.chain().get_token_ratio();
+            initial_gas.initial_gas = initial_gas
+                .initial_gas
+                .checked_mul(token_ratio.try_into().unwrap())
+                .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
+
+            initial_gas.floor_gas = initial_gas
+                .floor_gas
+                .checked_mul(token_ratio.try_into().unwrap())
+                .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
+            Ok(initial_gas)
         }
+    }
 
         let (tx, journal) = ctx.tx_journal();
 
@@ -241,6 +259,7 @@ where
                     // the Bedrock hardfork that did not incur any gas costs.
                     gas.erase_cost(tx_gas_limit);
                 }
+                // [TODO] Maybe we should move the [refund] logic to this function.
             }
         } else if instruction_result.is_revert() {
             // On Optimism, deposit transactions report gas usage uniquely to other
@@ -267,26 +286,65 @@ where
         evm: &mut Self::Evm,
         exec_result: &mut <Self::Frame as Frame>::FrameResult,
     ) -> Result<(), Self::Error> {
-        self.mainnet.reimburse_caller(evm, exec_result)?;
-
         let context = evm.ctx();
         if context.tx().tx_type() != DEPOSIT_TRANSACTION_TYPE {
-            let caller = context.tx().caller();
-            let spec = context.cfg().spec();
-            let operator_fee_refund = context.chain().operator_fee_refund(exec_result.gas(), spec);
-
-            let caller_account = context.journal().load_account(caller)?;
-
-            // In additional to the normal transaction fee, additionally refund the caller
-            // for the operator fee.
-            caller_account.data.info.balance = caller_account
-                .data
-                .info
-                .balance
-                .saturating_add(operator_fee_refund);
+            self.mainnet.reimburse_caller(evm, exec_result)?;
         }
 
         Ok(())
+    }
+
+    fn execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &InitialAndFloorGas,
+    ) -> Result<FrameResult, Self::Error> {
+        let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
+        let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+        // l1cost = l1cost / effective_gas_price
+        // gas_limit = gas_limit - l1cost
+        // gas_limit = gas_limit / token_ratio
+        if !is_deposit {
+            let ctx = evm.ctx();
+            let spec = ctx.cfg().spec();
+
+            let token_ratio = ctx.chain().get_token_ratio();
+
+            let enveloped_tx = ctx
+                .tx()
+                .enveloped_tx()
+                .expect("all not deposit tx have enveloped tx")
+                .clone();
+            let basefee = ctx.block().basefee() as u128;
+            let mut tx_l1_cost = ctx.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
+            let effective_gas_price = ctx.tx().effective_gas_price(basefee);
+
+            if effective_gas_price > 0 {
+                tx_l1_cost = tx_l1_cost.wrapping_div(U256::from(effective_gas_price));
+            }
+
+            if tx_l1_cost.gt(&U256::from(gas_limit)) {
+                return Err(ERROR::from(OpTransactionError::Base(
+                    InvalidTransaction::CallGasCostMoreThanGasLimit {
+                        initial_gas: init_and_floor_gas.initial_gas,
+                        gas_limit,
+                    },
+                )));
+            }
+
+            gas_limit = gas_limit.wrapping_sub(tx_l1_cost.try_into().unwrap());
+            gas_limit = gas_limit.wrapping_div(token_ratio.try_into().unwrap());
+        }
+
+        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let first_frame = self.first_frame_init(evm, first_frame_input)?;
+        let mut frame_result = match first_frame {
+            ItemOrResult::Item(frame) => self.run_exec_loop(evm, frame)?,
+            ItemOrResult::Result(result) => result,
+        };
+
+        self.last_frame_result(evm, &mut frame_result)?;
+        Ok(frame_result)
     }
 
     fn refund(
@@ -298,18 +356,38 @@ where
         exec_result.gas_mut().record_refund(eip7702_refund);
 
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
-
+        let is_system = evm.ctx().tx().is_system_transaction();
+        // let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
         // Prior to Regolith, deposit transactions did not receive gas refunds.
-        let is_gas_refund_disabled = is_deposit && !is_regolith;
-        if !is_gas_refund_disabled {
-            exec_result.gas_mut().set_final_refund(
-                evm.ctx()
-                    .cfg()
-                    .spec()
-                    .into_eth_spec()
-                    .is_enabled_in(SpecId::LONDON),
-            );
+        // let is_gas_refund_disabled = is_deposit && !is_regolith;
+        // if !is_gas_refund_disabled {
+        //     exec_result.gas_mut().set_final_refund(
+        //         evm.ctx()
+        //             .cfg()
+        //             .spec()
+        //             .into_eth_spec()
+        //             .is_enabled_in(SpecId::LONDON),
+        //     );
+        //     return;
+        // }
+        let is_eth_mint = evm.ctx().tx().eth_value().is_some();
+        if is_eth_mint {
+            let gas = exec_result.gas_mut();
+            gas.set_remaining(gas.remaining().saturating_sub(4500));
+        }
+
+        let gas = exec_result.gas_mut();
+        if !is_system && !is_deposit {
+            let token_ratio = evm.ctx().chain().get_token_ratio();
+            let refund = gas.refunded();
+            let new_refund = refund.saturating_mul(token_ratio.try_into().unwrap());
+            gas.set_refund(new_refund);
+
+            let remaining = gas.remaining();
+            let new_remaining = remaining.saturating_mul(token_ratio.try_into().unwrap());
+            gas.set_remaining(new_remaining);
+        } else {
+            gas.set_refund(0);
         }
     }
 
@@ -325,32 +403,6 @@ where
             self.mainnet.reward_beneficiary(evm, exec_result)?;
             let basefee = evm.ctx().block().basefee() as u128;
 
-            // If the transaction is not a deposit transaction, fees are paid out
-            // to both the Base Fee Vault as well as the L1 Fee Vault.
-            let ctx = evm.ctx();
-            let enveloped = ctx.tx().enveloped_tx().cloned();
-            let spec = ctx.cfg().spec();
-            let l1_block_info = ctx.chain();
-
-            let Some(enveloped_tx) = &enveloped else {
-                return Err(ERROR::from_string(
-                    "[OPTIMISM] Failed to load enveloped transaction.".into(),
-                ));
-            };
-
-            let l1_cost = l1_block_info.calculate_tx_l1_cost(enveloped_tx, spec);
-            let mut operator_fee_cost = U256::ZERO;
-            if spec.is_enabled_in(OpSpecId::ISTHMUS) {
-                operator_fee_cost = l1_block_info.operator_fee_charge(
-                    enveloped_tx,
-                    U256::from(exec_result.gas().spent() - exec_result.gas().refunded() as u64),
-                );
-            }
-            // Send the L1 cost of the transaction to the L1 Fee Vault.
-            let mut l1_fee_vault_account = ctx.journal().load_account(L1_FEE_RECIPIENT)?;
-            l1_fee_vault_account.mark_touch();
-            l1_fee_vault_account.info.balance += l1_cost;
-
             // Send the base fee of the transaction to the Base Fee Vault.
             let mut base_fee_vault_account =
                 evm.ctx().journal().load_account(BASE_FEE_RECIPIENT)?;
@@ -358,12 +410,6 @@ where
             base_fee_vault_account.info.balance += U256::from(basefee.saturating_mul(
                 (exec_result.gas().spent() - exec_result.gas().refunded() as u64) as u128,
             ));
-
-            // Send the operator fee of the transaction to the coinbase.
-            let mut operator_fee_vault_account =
-                evm.ctx().journal().load_account(OPERATOR_FEE_RECIPIENT)?;
-            operator_fee_vault_account.mark_touch();
-            operator_fee_vault_account.data.info.balance += operator_fee_cost;
         }
         Ok(())
     }
@@ -476,6 +522,61 @@ where
     >,
 {
     type IT = EthInterpreter;
+
+    fn inspect_execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &InitialAndFloorGas,
+    ) -> Result<FrameResult, Self::Error> {
+        let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
+        let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+        // l1cost = l1cost / effective_gas_price
+        // gas_limit = gas_limit - l1cost
+        // gas_limit = gas_limit / token_ratio
+        if !is_deposit {
+            let ctx = evm.ctx();
+            let spec = ctx.cfg().spec();
+
+            let token_ratio = ctx.chain().get_token_ratio();
+
+            let enveloped_tx = ctx
+                .tx()
+                .enveloped_tx()
+                .expect("all not deposit tx have enveloped tx")
+                .clone();
+            let basefee = ctx.block().basefee() as u128;
+            let mut tx_l1_cost = ctx.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
+            let effective_gas_price = ctx.tx().effective_gas_price(basefee);
+
+            if effective_gas_price > 0 {
+                tx_l1_cost = tx_l1_cost.wrapping_div(U256::from(effective_gas_price));
+            }
+
+            if tx_l1_cost.gt(&U256::from(gas_limit)) {
+                return Err(ERROR::from(OpTransactionError::Base(
+                    InvalidTransaction::CallGasCostMoreThanGasLimit {
+                        initial_gas: init_and_floor_gas.initial_gas,
+                        gas_limit,
+                    },
+                )));
+            }
+
+            gas_limit = gas_limit.wrapping_sub(tx_l1_cost.try_into().unwrap());
+            gas_limit = gas_limit.wrapping_div(token_ratio.try_into().unwrap());
+        }
+
+        // Create first frame action
+        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let first_frame = self.inspect_first_frame_init(evm, first_frame_input)?;
+
+        let mut frame_result = match first_frame {
+            ItemOrResult::Item(frame) => self.inspect_run_exec_loop(evm, frame)?,
+            ItemOrResult::Result(result) => result,
+        };
+
+        self.last_frame_result(evm, &mut frame_result)?;
+        Ok(frame_result)
+    }
 }
 
 #[cfg(test)]
@@ -500,7 +601,6 @@ mod tests {
         primitives::{bytes, Address, Bytes, B256},
         state::AccountInfo,
     };
-    use rstest::rstest;
     use std::boxed::Box;
 
     /// Creates frame result.
@@ -576,7 +676,7 @@ mod tests {
         let gas = call_last_frame_return(ctx.clone(), InstructionResult::Stop, ret_gas);
         assert_eq!(gas.remaining(), 90);
         assert_eq!(gas.spent(), 10);
-        assert_eq!(gas.refunded(), 2); // min(20, 10/5)
+        assert_eq!(gas.refunded(), 0); // min(20, 10/5)
 
         let gas = call_last_frame_return(ctx, InstructionResult::Revert, ret_gas);
         assert_eq!(gas.remaining(), 90);
@@ -808,7 +908,7 @@ mod tests {
 
         // Check the account balance is updated.
         let account = evm.ctx().journal().load_account(caller).unwrap();
-        assert_eq!(account.info.balance, U256::from(1));
+        assert_eq!(account.info.balance, U256::from(1049));
     }
 
     #[test]
@@ -976,68 +1076,5 @@ mod tests {
                 OpTransactionError::HaltedDepositPostRegolith
             ))
         )
-    }
-
-    #[rstest]
-    #[case::deposit(true)]
-    #[case::dyn_fee(false)]
-    fn test_operator_fee_refund(#[case] is_deposit: bool) {
-        const SENDER: Address = Address::ZERO;
-        const GAS_PRICE: u128 = 0xFF;
-        const OP_FEE_MOCK_PARAM: u128 = 0xFFFF;
-
-        let ctx = Context::op()
-            .modify_tx_chained(|tx| {
-                tx.base.tx_type = if is_deposit {
-                    DEPOSIT_TRANSACTION_TYPE
-                } else {
-                    TransactionType::Eip1559 as u8
-                };
-                tx.base.gas_price = GAS_PRICE;
-                tx.base.gas_priority_fee = None;
-                tx.base.caller = SENDER;
-            })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
-
-        let mut evm = ctx.build_op();
-        let handler = OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<_, _, _>>::new();
-
-        // Set the operator fee scalar & constant to non-zero values in the L1 block info.
-        evm.ctx().chain.operator_fee_scalar = Some(U256::from(OP_FEE_MOCK_PARAM));
-        evm.ctx().chain.operator_fee_constant = Some(U256::from(OP_FEE_MOCK_PARAM));
-
-        let mut gas = Gas::new(100);
-        gas.set_spent(10);
-        let mut exec_result = FrameResult::Call(CallOutcome::new(
-            InterpreterResult {
-                result: InstructionResult::Return,
-                output: Default::default(),
-                gas,
-            },
-            0..0,
-        ));
-
-        // Reimburse the caller for the unspent portion of the fees.
-        handler
-            .reimburse_caller(&mut evm, &mut exec_result)
-            .unwrap();
-
-        // Compute the expected refund amount. If the transaction is a deposit, the operator fee refund never
-        // applies. If the transaction is not a deposit, the operator fee refund is added to the refund amount.
-        let mut expected_refund =
-            U256::from(GAS_PRICE * (gas.remaining() + gas.refunded() as u64) as u128);
-        let op_fee_refund = evm
-            .ctx()
-            .chain()
-            .operator_fee_refund(&gas, OpSpecId::ISTHMUS);
-        assert!(op_fee_refund > U256::ZERO);
-
-        if !is_deposit {
-            expected_refund += op_fee_refund;
-        }
-
-        // Check that the caller was reimbursed the correct amount of ETH.
-        let account = evm.ctx().journal().load_account(SENDER).unwrap();
-        assert_eq!(account.info.balance, expected_refund);
     }
 }

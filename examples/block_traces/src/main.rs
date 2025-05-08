@@ -6,7 +6,7 @@ use alloy_eips::{BlockId, Decodable2718, Typed2718};
 use alloy_primitives::{Address, Bytes, B256};
 use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
 use dotenv::dotenv;
-use mantle_revm::{
+use op_revm::{
     api::{builder::OpBuilder, default_ctx::DefaultOp},
     spec::OpSpecId,
     transaction::deposit::DepositTransactionParts,
@@ -37,8 +37,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Params
     let chain_id: u64 = 5000;
-    let start_block = 78896111;
-    let end_block = 78896112;
+    let start_block = 79262933;
+    let end_block = 79262933;
 
     for i in start_block..=end_block {
         println!("Processing block number: {}", i);
@@ -99,7 +99,8 @@ async fn process_block(
         panic!("Wrong transaction type")
     };
 
-    for (_i, tx_hash) in transactions.iter().enumerate() {
+    for tx_hash in transactions.iter() {
+        println!("tx_hash: {}", tx_hash);
         let raw_tx = client
             .clone()
             .client()

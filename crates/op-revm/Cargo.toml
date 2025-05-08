@@ -25,6 +25,7 @@ all = "warn"
 # revm
 revm = { workspace = true, features = ["secp256r1"] }
 auto_impl.workspace = true
+alloy-sol-types.workspace = true
 
 # static precompile sets.
 once_cell = { workspace = true, features = ["alloc"] }
@@ -34,8 +35,6 @@ serde = { workspace = true, features = ["derive", "rc"], optional = true }
 
 [dev-dependencies]
 anyhow.workspace = true
-rstest.workspace = true
-alloy-sol-types.workspace = true
 sha2.workspace = true
 serde_json = { workspace = true, features = ["alloc"] }
 alloy-primitives.workspace = true
