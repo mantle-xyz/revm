@@ -125,7 +125,6 @@ where
 
     fn validate_tx_against_state(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
         let context = evm.ctx();
-        let spec = context.cfg().spec();
         if context.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE {
             return Ok(());
         } else {
@@ -133,22 +132,15 @@ where
             // We stored the L1 block info in the context in validate_initial_tx_gas
         }
 
-        let enveloped_tx = context
-            .tx()
-            .enveloped_tx()
-            .expect("all not deposit tx have enveloped tx")
-            .clone();
-
-        // compute L1 cost
-        let additional_cost = context.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
-
         let tx_caller = context.tx().caller();
 
         // Load acc
         let account = context.journal().load_account_code(tx_caller)?;
         let account = account.data.info.clone();
 
-        validate_tx_against_account(&account, context, additional_cost)?;
+        // NOTE: we don't need to calculate the L1 cost here, because we already did in validate_initial_tx_gas
+        // see also: https://github.com/mantlenetworkio/op-geth/pull/90
+        validate_tx_against_account(&account, context, U256::ZERO)?;
         Ok(())
     }
 
