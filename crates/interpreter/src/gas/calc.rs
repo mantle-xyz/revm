@@ -414,9 +414,10 @@ pub fn calculate_initial_tx_gas(
 
     // EIP-3860: Limit and meter initcode
     // Init code stipend for bytecode analysis
-    if spec_id.is_enabled_in(SpecId::SHANGHAI) && is_create {
-        gas.initial_gas += initcode_cost(input.len())
-    }
+    // [TODO] remove this when EIP-3860 is implemented in Mantle
+    // if spec_id.is_enabled_in(SpecId::SHANGHAI) && is_create {
+    //     gas.initial_gas += initcode_cost(input.len())
+    // }
 
     // EIP-7702
     if spec_id.is_enabled_in(SpecId::PRAGUE) {
