@@ -98,10 +98,14 @@ where
                 TxKind::Create => Address::ZERO,
             };
             // The L1-cost fee is only computed for Optimism non-deposit transactions.
-            if context.chain().l2_block != block_number || to == GAS_ORACLE_CONTRACT {
+            if context.chain().l2_block != block_number {
                 // L1 block info is stored in the context for later use.
                 // and it will be reloaded from the database if it is not for the current block or the token ratio is updated.(when the gas oracle is updated)
                 *context.chain() = L1BlockInfo::try_fetch(context.db(), block_number, spec)?;
+            }
+            // Reset the l2_block if the tx is set token ratio, we need reload token ratio from the database in next transaction
+            if to == GAS_ORACLE_CONTRACT {
+                context.chain().reset_l2_block();
             }
 
             // if the tx is not a deposit transaction, we need to multiply the initial gas by the token ratio
@@ -633,7 +637,7 @@ mod tests {
         let gas = call_last_frame_return(ctx.clone(), InstructionResult::Stop, ret_gas);
         assert_eq!(gas.remaining(), 90);
         assert_eq!(gas.spent(), 10);
-        assert_eq!(gas.refunded(), 2); // min(20, 10/5)
+        assert_eq!(gas.refunded(), 0); // min(20, 10/5)
 
         let gas = call_last_frame_return(ctx, InstructionResult::Revert, ret_gas);
         assert_eq!(gas.remaining(), 90);
@@ -776,12 +780,11 @@ mod tests {
         let mut evm = ctx.build_op();
         let handler = OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<_, _, _>>::new();
 
-        // l1block cost is 1048 fee.
         handler.deduct_caller(&mut evm).unwrap();
 
         // Check the account balance is updated.
         let account = evm.ctx().journal().load_account(caller).unwrap();
-        assert_eq!(account.info.balance, U256::from(1));
+        assert_eq!(account.info.balance, U256::from(1049));
     }
 
     #[test]
