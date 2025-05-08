@@ -126,6 +126,11 @@ impl L1BlockInfo {
     pub fn get_token_ratio(&self) -> U256 {
         self.token_ratio.unwrap_or(U256::from(1))
     }
+
+    /// Reset the l2_block to 0.
+    pub fn reset_l2_block(&mut self) {
+        self.l2_block = 0;
+    }
 }
 
 #[cfg(test)]
@@ -295,5 +300,15 @@ mod tests {
 
         let l1_fee = l1_block_info.calculate_tx_l1_cost(TX, OpSpecId::REGOLITH);
         assert_eq!(l1_fee, expected_l1_fee)
+    }
+
+    #[test]
+    fn test_reset_l2_block() {
+        let mut l1_block_info = L1BlockInfo {
+            l2_block: 1,
+            ..Default::default()
+        };
+        l1_block_info.reset_l2_block();
+        assert_eq!(l1_block_info.l2_block, 0);
     }
 }
