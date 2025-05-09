@@ -8,16 +8,16 @@ use crate::{
 use revm::{
     context::{result::InvalidTransaction, LocalContextTr},
     context_interface::{
-        result::{EVMError, ExecutionResult, FromStringError, InvalidTransaction, ResultAndState},
+        result::{EVMError, ExecutionResult, FromStringError, ResultAndState},
         Block, Cfg, ContextTr, JournalTr, Transaction,
     },
     handler::{
         handler::EvmTrError, pre_execution::validate_account_nonce_and_code, EvmTr, Frame,
-        FrameResult, Handler, MainnetHandler,
+        FrameResult, Handler, ItemOrResult, MainnetHandler,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorFrame, InspectorHandler},
-    interpreter::{interpreter::EthInterpreter, FrameInput, Gas},
-    primitives::{hardfork::SpecId, HashMap, U256},
+    interpreter::{interpreter::EthInterpreter, FrameInput, Gas, InitialAndFloorGas},
+    primitives::{Address, HashMap, TxKind, U256},
     state::Account,
     Database,
 };
@@ -83,49 +83,45 @@ where
         self.mainnet.validate_env(evm)
     }
 
-    fn validate_against_state_and_deduct_caller(
+    /**
+     * Validates and calculates the initial gas requirements for a transaction.
+     *
+     * For deposit transactions, this simply returns the base gas calculation from the mainnet handler.
+     * For non-deposit transactions, this method:
+     * 1. Updates L1 block info in the following scenarios:
+     *    - When the current transaction belongs to a different block than previously cached
+     *    - When the transaction target is the gas oracle contract, indicating a token ratio update
+     *      that needs to be reloaded for the next transaction
+     * 2. Adjusts both initial_gas and floor_gas by multiplying with the token ratio
+     *
+     * The token ratio adjustment is essential for properly accounting for the price difference
+     * between ETH and MNT.
+     */
+    fn validate_initial_tx_gas(
         &self,
         evm: &mut Self::Evm,
-    ) -> Result<(), Self::Error> {
-        let ctx = evm.ctx();
+    ) -> Result<InitialAndFloorGas, Self::Error> {
+        let mut initial_gas = self.mainnet.validate_initial_tx_gas(evm)?;
 
-        let basefee = ctx.block().basefee() as u128;
-        let blob_price = ctx.block().blob_gasprice().unwrap_or_default();
-        let is_deposit = ctx.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let spec = ctx.cfg().spec();
-        let block_number = ctx.block().number();
-        let is_balance_check_disabled = ctx.cfg().is_balance_check_disabled();
-        let is_eip3607_disabled = ctx.cfg().is_eip3607_disabled();
-        let is_nonce_check_disabled = ctx.cfg().is_nonce_check_disabled();
-        let mint = ctx.tx().mint();
-
-        let mut additional_cost = U256::ZERO;
-
-        // The L1-cost fee is only computed for Optimism non-deposit transactions.
-        if !is_deposit {
-            // L1 block info is stored in the context for later use.
-            // and it will be reloaded from the database if it is not for the current block.
-            if ctx.chain().l2_block != block_number {
-                *ctx.chain() = L1BlockInfo::try_fetch(ctx.db(), block_number, spec)?;
+        let context = evm.ctx();
+        let block_number = context.block().number();
+        let spec = context.cfg().spec();
+        if context.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE {
+            Ok(initial_gas)
+        } else {
+            let to = match context.tx().kind() {
+                TxKind::Call(to) => to,
+                TxKind::Create => Address::ZERO,
+            };
+            // The L1-cost fee is only computed for Optimism non-deposit transactions.
+            if context.chain().l2_block != block_number {
+                // L1 block info is stored in the context for later use.
+                // and it will be reloaded from the database if it is not for the current block or the token ratio is updated.(when the gas oracle is updated)
+                *context.chain() = L1BlockInfo::try_fetch(context.db(), block_number, spec)?;
             }
 
-            // account for additional cost of l1 fee and operator fee
-            let enveloped_tx = ctx
-                .tx()
-                .enveloped_tx()
-                .expect("all not deposit tx have enveloped tx")
-                .clone();
-
-            // compute L1 cost
-            additional_cost = ctx.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
-
-            // compute operator fee
-            if spec.is_enabled_in(OpSpecId::ISTHMUS) {
-                let gas_limit = U256::from(ctx.tx().gas_limit());
-                let operator_fee_charge = ctx.chain().operator_fee_charge(&enveloped_tx, gas_limit);
-                additional_cost = additional_cost.saturating_add(operator_fee_charge);
-            }
             // Reset the l2_block if the tx is set token ratio, we need reload token ratio from the database in next transaction
+            // [TODO] verify selector of the tx
             if to == GAS_ORACLE_CONTRACT {
                 context.chain().reset_l2_block();
             }
@@ -144,6 +140,49 @@ where
             Ok(initial_gas)
         }
     }
+
+    fn validate_against_state_and_deduct_caller(
+        &self,
+        evm: &mut Self::Evm,
+    ) -> Result<(), Self::Error> {
+        let ctx = evm.ctx();
+
+        let basefee = ctx.block().basefee() as u128;
+        let blob_price = ctx.block().blob_gasprice().unwrap_or_default();
+        let is_deposit = ctx.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
+        let is_balance_check_disabled = ctx.cfg().is_balance_check_disabled();
+        let is_eip3607_disabled = ctx.cfg().is_eip3607_disabled();
+        let is_nonce_check_disabled = ctx.cfg().is_nonce_check_disabled();
+        let mint = ctx.tx().mint();
+
+        let additional_cost = U256::ZERO;
+
+        // // The L1-cost fee is only computed for Optimism non-deposit transactions.
+        // if !is_deposit {
+        //     // L1 block info is stored in the context for later use.
+        //     // and it will be reloaded from the database if it is not for the current block.
+        //     if ctx.chain().l2_block != block_number {
+        //         *ctx.chain() = L1BlockInfo::try_fetch(ctx.db(), block_number, spec)?;
+        //     }
+
+        //     // account for additional cost of l1 fee and operator fee
+        //     let enveloped_tx = ctx
+        //         .tx()
+        //         .enveloped_tx()
+        //         .expect("all not deposit tx have enveloped tx")
+        //         .clone();
+
+        //     // compute L1 cost
+        //     additional_cost = ctx.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
+        // }
+        if is_deposit {
+            if let Some(eth_value) = ctx.tx().eth_value() {
+                BvmEth::mint(ctx, U256::from(eth_value)).map_err(ERROR::from)?;
+            }
+            if let Some(eth_tx_value) = ctx.tx().eth_tx_value() {
+                BvmEth::transfer(ctx, U256::from(eth_tx_value)).map_err(ERROR::from)?;
+            }
+        }
 
         let (tx, journal) = ctx.tx_journal();
 
@@ -584,10 +623,7 @@ mod tests {
     use super::*;
     use crate::{
         api::default_ctx::OpContext,
-        constants::{
-            BASE_FEE_SCALAR_OFFSET, ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT,
-            L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, OPERATOR_FEE_SCALARS_SLOT,
-        },
+        constants::{L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT},
         DefaultOp, OpBuilder,
     };
     use alloy_primitives::uint;
@@ -795,84 +831,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reload_l1_block_info_isthmus() {
-        const BLOCK_NUM: u64 = 100;
-        const L1_BASE_FEE: U256 = uint!(1_U256);
-        const L1_BLOB_BASE_FEE: U256 = uint!(2_U256);
-        const L1_BASE_FEE_SCALAR: u64 = 3;
-        const L1_BLOB_BASE_FEE_SCALAR: u64 = 4;
-        const L1_FEE_SCALARS: U256 = U256::from_limbs([
-            0,
-            (L1_BASE_FEE_SCALAR << (64 - BASE_FEE_SCALAR_OFFSET * 2)) | L1_BLOB_BASE_FEE_SCALAR,
-            0,
-            0,
-        ]);
-        const OPERATOR_FEE_SCALAR: u64 = 5;
-        const OPERATOR_FEE_CONST: u64 = 6;
-        const OPERATOR_FEE: U256 =
-            U256::from_limbs([OPERATOR_FEE_CONST, OPERATOR_FEE_SCALAR, 0, 0]);
-
-        let mut db = InMemoryDB::default();
-        let l1_block_contract = db.load_account(L1_BLOCK_CONTRACT).unwrap();
-        l1_block_contract
-            .storage
-            .insert(L1_BASE_FEE_SLOT, L1_BASE_FEE);
-        l1_block_contract
-            .storage
-            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, L1_BLOB_BASE_FEE);
-        l1_block_contract
-            .storage
-            .insert(ECOTONE_L1_FEE_SCALARS_SLOT, L1_FEE_SCALARS);
-        l1_block_contract
-            .storage
-            .insert(OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE);
-        db.insert_account_info(
-            Address::ZERO,
-            AccountInfo {
-                balance: U256::from(1000),
-                ..Default::default()
-            },
-        );
-
-        let ctx = Context::op()
-            .with_db(db)
-            .with_chain(L1BlockInfo {
-                l2_block: BLOCK_NUM + 1, // ahead by one block
-                ..Default::default()
-            })
-            .with_block(BlockEnv {
-                number: BLOCK_NUM,
-                ..Default::default()
-            })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
-
-        let mut evm = ctx.build_op();
-
-        assert_ne!(evm.ctx().chain().l2_block, BLOCK_NUM);
-
-        let handler = OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<_, _, _>>::new();
-        handler
-            .validate_against_state_and_deduct_caller(&mut evm)
-            .unwrap();
-
-        assert_eq!(
-            *evm.ctx().chain(),
-            L1BlockInfo {
-                l2_block: BLOCK_NUM,
-                l1_base_fee: L1_BASE_FEE,
-                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
-                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
-                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
-                empty_ecotone_scalars: false,
-                l1_fee_overhead: None,
-                operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
-                operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
-                tx_l1_cost: Some(U256::ZERO),
-            }
-        );
-    }
-
-    #[test]
     fn test_remove_l1_cost() {
         let caller = Address::ZERO;
         let mut db = InMemoryDB::default();
@@ -912,45 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_operator_cost() {
-        let caller = Address::ZERO;
-        let mut db = InMemoryDB::default();
-        db.insert_account_info(
-            caller,
-            AccountInfo {
-                balance: U256::from(151),
-                ..Default::default()
-            },
-        );
-        let ctx = Context::op()
-            .with_db(db)
-            .with_chain(L1BlockInfo {
-                operator_fee_scalar: Some(U256::from(10_000_000)),
-                operator_fee_constant: Some(U256::from(50)),
-                ..Default::default()
-            })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
-            .modify_tx_chained(|tx| {
-                tx.base.gas_limit = 10;
-                tx.enveloped_tx = Some(bytes!("FACADE"));
-            });
-
-        let mut evm = ctx.build_op();
-        let handler = OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<_, _, _>>::new();
-
-        // operator fee cost is operator_fee_scalar * gas_limit / 1e6 + operator_fee_constant
-        // 10_000_000 * 10 / 1_000_000 + 50 = 150
-        handler
-            .validate_against_state_and_deduct_caller(&mut evm)
-            .unwrap();
-
-        // Check the account balance is updated.
-        let account = evm.ctx().journal().load_account(caller).unwrap();
-        assert_eq!(account.info.balance, U256::from(1));
-    }
-
-    #[test]
-    fn test_remove_l1_cost_lack_of_funds() {
+    fn test_remove_l1_cost_full_gas() {
         let caller = Address::ZERO;
         let mut db = InMemoryDB::default();
         db.insert_account_info(
@@ -977,16 +897,9 @@ mod tests {
         let mut evm = ctx.build_op();
         let handler = OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<_, _, _>>::new();
 
-        // l1block cost is 1048 fee.
         assert_eq!(
             handler.validate_against_state_and_deduct_caller(&mut evm),
-            Err(EVMError::Transaction(
-                InvalidTransaction::LackOfFundForMaxFee {
-                    fee: Box::new(U256::from(1048)),
-                    balance: Box::new(U256::from(48)),
-                }
-                .into(),
-            ))
+            Ok(())
         );
     }
 

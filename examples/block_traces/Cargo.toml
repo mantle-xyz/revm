@@ -24,7 +24,7 @@ all = "warn"
 [dependencies]
 # revm
 revm = { workspace = true, features = ["std", "alloydb", "serde-json"] }
-op-revm = { path = "../../crates/optimism/" }
+op-revm = { path = "../../crates/op-revm/" }
 
 # tokio
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

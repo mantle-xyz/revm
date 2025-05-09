@@ -127,9 +127,9 @@ impl L1BlockInfo {
         self.token_ratio.unwrap_or(U256::from(1))
     }
 
-    /// Reset the l2_block to 0.
+    /// Reset the l2_block to u64::MAX.
     pub fn reset_l2_block(&mut self) {
-        self.l2_block = 0;
+        self.l2_block = u64::MAX;
     }
 }
 
@@ -309,6 +309,6 @@ mod tests {
             ..Default::default()
         };
         l1_block_info.reset_l2_block();
-        assert_eq!(l1_block_info.l2_block, 0);
+        assert_eq!(l1_block_info.l2_block, u64::MAX);
     }
 }

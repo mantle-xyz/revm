@@ -273,7 +273,7 @@ impl ToTxEnv for TxEip7702 {
             chain_id: Some(self.chain_id),
             gas_priority_fee: Some(self.max_priority_fee_per_gas),
             access_list: self.access_list.clone(),
-            authorization_list: self.authorization_list.clone(),
+            authorization_list: vec![],
             ..Default::default()
         }
     }
