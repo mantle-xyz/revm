@@ -209,11 +209,27 @@ where
             }
             .into());
         } else {
-            tx.effective_balance_spending(basefee, blob_price).expect(
-                "effective balance is always smaller than max balance so it can't overflow",
-            );
+            let effective_balance_spending =
+                tx.effective_balance_spending(basefee, blob_price).expect(
+                    "effective balance is always smaller than max balance so it can't overflow",
+                );
+
+            // subtracting max balance spending with value that is going to be deducted later in the call.
+            let gas_balance_spending = effective_balance_spending - tx.value();
+
+            // If the transaction is not a deposit transaction, subtract the L1 data fee from the
+            // caller's balance directly after minting the requested amount of ETH.
+            // Additionally deduct the operator fee from the caller's account.
+            //
+            // In case of deposit additional cost will be zero.
+            let op_gas_balance_spending = gas_balance_spending.saturating_add(additional_cost);
+
+            caller_account.info.balance = caller_account
+                .info
+                .balance
+                .saturating_sub(op_gas_balance_spending);
         }
-        
+
         // Touch account so we know it is changed.
         caller_account.mark_touch();
 

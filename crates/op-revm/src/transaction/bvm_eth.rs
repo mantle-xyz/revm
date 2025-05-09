@@ -65,41 +65,6 @@ impl BvmEth {
         Ok(())
     }
 
-    /// 直接使用journal和caller地址铸造BVM ETH
-    pub fn mint_with_journal<J>(
-        journal: &mut J,
-        caller: Address,
-        eth_value: U256
-    ) -> Result<(), OpTransactionError>
-    where
-        J: JournalTr,
-    {
-        journal
-            .load_account(Self::ADDRESS)
-            .map_err(db_error)?;
-
-        // 获取当前余额
-        let slot = Self::get_balance_slot(caller);
-        let current_balance = journal.sload(Self::ADDRESS, slot).map_err(db_error)?.data;
-        let new_balance = current_balance.saturating_add(eth_value);
-
-        // 更新余额
-        journal.sstore(Self::ADDRESS, slot, new_balance).map_err(db_error)?;
-
-        // 更新总供应量
-        let total_supply_slot = Self::get_total_supply_slot();
-        let value_supply = journal.sload(Self::ADDRESS, total_supply_slot).map_err(db_error)?.data;
-        let new_value_supply = value_supply.saturating_add(eth_value);
-        journal.sstore(Self::ADDRESS, total_supply_slot, new_value_supply).map_err(db_error)?;
-
-        // 生成Mint事件日志
-        let mint_log = Self::generate_mint_event(caller, eth_value);
-        journal.log(mint_log);
-
-        journal.touch_account(Self::ADDRESS);
-        Ok(())
-    }
-
     /// Transfer BVM ETH for a given context and amount
     pub fn transfer<CTX>(context: &mut CTX, eth_value: U256) -> Result<(), OpTransactionError>
     where
@@ -113,50 +78,6 @@ impl BvmEth {
         Self::transfer_inner(context, eth_value)?;
 
         context.journal().touch_account(Self::ADDRESS);
-        Ok(())
-    }
-
-    /// 直接使用journal转移BVM ETH
-    pub fn transfer_with_journal<J>(
-        journal: &mut J,
-        from: Address,
-        to: Address,
-        eth_value: U256
-    ) -> Result<(), OpTransactionError>
-    where
-        J: JournalTr,
-    {
-        journal
-            .load_account(Self::ADDRESS)
-            .map_err(db_error)?;
-
-        if from == to {
-            return Ok(());
-        }
-
-        // 获取当前余额
-        let from_slot = Self::get_balance_slot(from);
-        let from_amount = journal.sload(Self::ADDRESS, from_slot).map_err(db_error)?.data;
-        
-        let to_slot = Self::get_balance_slot(to);
-        let to_amount = journal.sload(Self::ADDRESS, to_slot).map_err(db_error)?.data;
-
-        if from_amount < eth_value {
-            return Err(OpTransactionError::BvmEth(BvmEthError::InsufficientFunds));
-        }
-
-        let new_from_amount = from_amount.saturating_sub(eth_value);
-        let new_to_amount = to_amount.saturating_add(eth_value);
-
-        // 更新余额
-        journal.sstore(Self::ADDRESS, from_slot, new_from_amount).map_err(db_error)?;
-        journal.sstore(Self::ADDRESS, to_slot, new_to_amount).map_err(db_error)?;
-
-        // 生成Transfer事件日志
-        let transfer_log = Self::generate_transfer_event(from, to, eth_value);
-        journal.log(transfer_log);
-
-        journal.touch_account(Self::ADDRESS);
         Ok(())
     }
 
