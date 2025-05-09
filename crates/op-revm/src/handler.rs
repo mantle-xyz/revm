@@ -157,24 +157,6 @@ where
 
         let additional_cost = U256::ZERO;
 
-        // // The L1-cost fee is only computed for Optimism non-deposit transactions.
-        // if !is_deposit {
-        //     // L1 block info is stored in the context for later use.
-        //     // and it will be reloaded from the database if it is not for the current block.
-        //     if ctx.chain().l2_block != block_number {
-        //         *ctx.chain() = L1BlockInfo::try_fetch(ctx.db(), block_number, spec)?;
-        //     }
-
-        //     // account for additional cost of l1 fee and operator fee
-        //     let enveloped_tx = ctx
-        //         .tx()
-        //         .enveloped_tx()
-        //         .expect("all not deposit tx have enveloped tx")
-        //         .clone();
-
-        //     // compute L1 cost
-        //     additional_cost = ctx.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
-        // }
         if is_deposit {
             if let Some(eth_value) = ctx.tx().eth_value() {
                 BvmEth::mint(ctx, U256::from(eth_value)).map_err(ERROR::from)?;
@@ -247,6 +229,8 @@ where
                 .balance
                 .saturating_sub(op_gas_balance_spending);
         }
+        // Touch account so we know it is changed.
+        caller_account.mark_touch();
 
         // Touch account so we know it is changed.
         caller_account.mark_touch();
@@ -621,15 +605,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        api::default_ctx::OpContext,
-        constants::{L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT},
-        DefaultOp, OpBuilder,
-    };
-    use alloy_primitives::uint;
+    use crate::{api::default_ctx::OpContext, DefaultOp, OpBuilder};
     use revm::{
-        context::{BlockEnv, Context, TransactionType},
-        context_interface::result::InvalidTransaction,
+        context::Context,
         database::InMemoryDB,
         database_interface::EmptyDB,
         handler::EthFrame,
@@ -637,7 +615,6 @@ mod tests {
         primitives::{bytes, Address, Bytes, B256},
         state::AccountInfo,
     };
-    use std::boxed::Box;
 
     /// Creates frame result.
     fn call_last_frame_return(

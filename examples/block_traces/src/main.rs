@@ -6,16 +6,17 @@ use alloy_eips::{BlockId, Decodable2718, Typed2718};
 use alloy_primitives::{Address, Bytes, B256};
 use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
 use dotenv::dotenv;
+use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
+use op_alloy_network::Optimism;
 use op_revm::{
     api::{builder::OpBuilder, default_ctx::DefaultOp},
     spec::OpSpecId,
     transaction::deposit::DepositTransactionParts,
     OpTransaction,
 };
-use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
-use op_alloy_network::Optimism;
 use revm::{
     context::tx::TxEnv,
+    context_interface::either::Either,
     database::{AlloyDB, CacheDB, StateBuilder},
     database_interface::WrapDatabaseAsync,
     primitives::TxKind,
@@ -273,7 +274,11 @@ impl ToTxEnv for TxEip7702 {
             chain_id: Some(self.chain_id),
             gas_priority_fee: Some(self.max_priority_fee_per_gas),
             access_list: self.access_list.clone(),
-            authorization_list: vec![],
+            authorization_list: self
+                .authorization_list
+                .iter()
+                .map(|auth| Either::Left(auth.clone()))
+                .collect(),
             ..Default::default()
         }
     }
