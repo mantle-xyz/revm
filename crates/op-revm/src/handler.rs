@@ -231,7 +231,7 @@ where
         }
 
         // Touch account so we know it is changed.
-        caller_account.mark_touch();
+        // caller_account.mark_touch();
 
         // Touch account so we know it is changed.
         caller_account.mark_touch();
