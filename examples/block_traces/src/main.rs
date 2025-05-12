@@ -26,8 +26,6 @@ use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    create_dir_all("traces")?;
-
     // Set up the HTTP transport which is consumed by the RPC client.
     dotenv().ok();
     let mantle_url = std::env::var("MANTLE_URL").unwrap();
