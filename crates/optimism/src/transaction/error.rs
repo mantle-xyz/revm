@@ -3,6 +3,7 @@ use revm::context_interface::{
     result::{EVMError, InvalidTransaction},
     transaction::TransactionError,
 };
+use std::string::{String, ToString};
 
 /// Optimism transaction validation error.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -39,6 +40,8 @@ pub enum OpTransactionError {
     /// are cause for non-inclusion, so a special [OpHaltReason][crate::OpHaltReason] variant was introduced to handle this
     /// case for failed deposit transactions.
     HaltedDepositPostRegolith,
+    /// BVM ETH operation errors
+    BvmEth(BvmEthError),
 }
 
 impl TransactionError for OpTransactionError {}
@@ -59,6 +62,7 @@ impl Display for OpTransactionError {
                     "deposit transaction halted post-regolith; error will be bubbled up to main return handler"
                 )
             }
+            Self::BvmEth(error) => error.fmt(f),
         }
     }
 }
@@ -75,4 +79,44 @@ impl<DBError> From<OpTransactionError> for EVMError<DBError, OpTransactionError>
     fn from(value: OpTransactionError) -> Self {
         Self::Transaction(value)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BvmEthError {
+    EthTxValueTooLarge,
+    NonceOverflow,
+    DBError(String),
+    InsufficientFunds,
+}
+
+impl TransactionError for BvmEthError {}
+
+impl Display for BvmEthError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::EthTxValueTooLarge => write!(f, "eth tx value is too large"),
+            Self::NonceOverflow => write!(f, "nonce overflow"),
+            Self::DBError(error) => write!(f, "database error: {}", error),
+            Self::InsufficientFunds => write!(f, "insufficient BVM ETH funds"),
+        }
+    }
+}
+
+impl core::error::Error for BvmEthError {}
+
+impl From<BvmEthError> for OpTransactionError {
+    fn from(value: BvmEthError) -> Self {
+        Self::BvmEth(value)
+    }
+}
+
+impl<DBError> From<BvmEthError> for EVMError<DBError, OpTransactionError> {
+    fn from(value: BvmEthError) -> Self {
+        Self::Transaction(OpTransactionError::BvmEth(value))
+    }
+}
+
+pub fn db_error<E: Display>(error: E) -> OpTransactionError {
+    OpTransactionError::BvmEth(BvmEthError::DBError(error.to_string()))
 }

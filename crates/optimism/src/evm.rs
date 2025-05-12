@@ -295,10 +295,6 @@ mod tests {
                 tx.base.kind = TxKind::Call(bls12_381_const::G1_ADD_ADDRESS);
                 tx.base.gas_limit = 21_000 + bls12_381_const::G1_ADD_BASE_GAS_FEE - 1;
             })
-            .modify_chain_chained(|l1_block| {
-                l1_block.operator_fee_constant = Some(U256::ZERO);
-                l1_block.operator_fee_scalar = Some(U256::ZERO)
-            })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
         let mut evm = ctx.build_op();
@@ -321,10 +317,6 @@ mod tests {
             .modify_tx_chained(|tx| {
                 tx.base.kind = TxKind::Call(bls12_381_const::G1_ADD_ADDRESS);
                 tx.base.gas_limit = 21_000 + bls12_381_const::G1_ADD_BASE_GAS_FEE;
-            })
-            .modify_chain_chained(|l1_block| {
-                l1_block.operator_fee_constant = Some(U256::ZERO);
-                l1_block.operator_fee_scalar = Some(U256::ZERO)
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
@@ -365,10 +357,6 @@ mod tests {
                 tx.base.kind = TxKind::Call(bls12_381_const::G1_MSM_ADDRESS);
                 tx.base.data = input;
                 tx.base.gas_limit = initial_gas + gs1_msm_gas;
-            })
-            .modify_chain_chained(|l1_block| {
-                l1_block.operator_fee_constant = Some(U256::ZERO);
-                l1_block.operator_fee_scalar = Some(U256::ZERO)
             })
             .modify_cfg_chained(|cfg| cfg.spec = SPEC_ID)
     }
@@ -431,10 +419,6 @@ mod tests {
                 tx.base.kind = TxKind::Call(bls12_381_const::G2_ADD_ADDRESS);
                 tx.base.gas_limit = 21_000 + bls12_381_const::G2_ADD_BASE_GAS_FEE - 1;
             })
-            .modify_chain_chained(|l1_block| {
-                l1_block.operator_fee_constant = Some(U256::ZERO);
-                l1_block.operator_fee_scalar = Some(U256::ZERO)
-            })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
         let mut evm = ctx.build_op();
@@ -457,10 +441,6 @@ mod tests {
             .modify_tx_chained(|tx| {
                 tx.base.kind = TxKind::Call(bls12_381_const::G2_ADD_ADDRESS);
                 tx.base.gas_limit = 21_000 + bls12_381_const::G2_ADD_BASE_GAS_FEE;
-            })
-            .modify_chain_chained(|l1_block| {
-                l1_block.operator_fee_constant = Some(U256::ZERO);
-                l1_block.operator_fee_scalar = Some(U256::ZERO)
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
@@ -502,10 +482,6 @@ mod tests {
                 tx.base.kind = TxKind::Call(bls12_381_const::G2_MSM_ADDRESS);
                 tx.base.data = input;
                 tx.base.gas_limit = initial_gas + gs2_msm_gas;
-            })
-            .modify_chain_chained(|l1_block| {
-                l1_block.operator_fee_constant = Some(U256::ZERO);
-                l1_block.operator_fee_scalar = Some(U256::ZERO)
             })
             .modify_cfg_chained(|cfg| cfg.spec = SPEC_ID)
     }
@@ -584,10 +560,6 @@ mod tests {
                 tx.base.data = input;
                 tx.base.gas_limit = initial_gas + pairing_gas;
             })
-            .modify_chain_chained(|l1_block| {
-                l1_block.operator_fee_constant = Some(U256::ZERO);
-                l1_block.operator_fee_scalar = Some(U256::ZERO)
-            })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
     }
 
@@ -663,10 +635,6 @@ mod tests {
                 tx.base.data = input;
                 tx.base.gas_limit = initial_gas + bls12_381_const::MAP_FP_TO_G1_BASE_GAS_FEE;
             })
-            .modify_chain_chained(|l1_block| {
-                l1_block.operator_fee_constant = Some(U256::ZERO);
-                l1_block.operator_fee_scalar = Some(U256::ZERO)
-            })
             .modify_cfg_chained(|cfg| cfg.spec = SPEC_ID)
     }
 
@@ -723,10 +691,6 @@ mod tests {
                 tx.base.kind = TxKind::Call(bls12_381_const::MAP_FP2_TO_G2_ADDRESS);
                 tx.base.data = input;
                 tx.base.gas_limit = initial_gas + bls12_381_const::MAP_FP2_TO_G2_BASE_GAS_FEE;
-            })
-            .modify_chain_chained(|l1_block| {
-                l1_block.operator_fee_constant = Some(U256::ZERO);
-                l1_block.operator_fee_scalar = Some(U256::ZERO)
             })
             .modify_cfg_chained(|cfg| cfg.spec = SPEC_ID)
     }

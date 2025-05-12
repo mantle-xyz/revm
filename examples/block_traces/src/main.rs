@@ -6,7 +6,7 @@ use alloy_eips::{BlockId, Decodable2718, Typed2718};
 use alloy_primitives::{Address, Bytes, B256};
 use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
 use dotenv::dotenv;
-use mantle_revm::{
+use op_revm::{
     api::{builder::OpBuilder, default_ctx::DefaultOp},
     spec::OpSpecId,
     transaction::deposit::DepositTransactionParts,
