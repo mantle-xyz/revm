@@ -16,7 +16,7 @@ use revm::{
     },
     inspector::{Inspector, InspectorEvmTr, InspectorFrame, InspectorHandler},
     interpreter::{interpreter::EthInterpreter, FrameInput, Gas, InitialAndFloorGas},
-    primitives::{Address, HashMap, TxKind, U256},
+    primitives::{hardfork::SpecId, Address, HashMap, TxKind, U256},
     state::Account,
     Database,
 };
@@ -319,23 +319,34 @@ where
 
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let is_system = evm.ctx().tx().is_system_transaction();
-        // let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
-        // Prior to Regolith, deposit transactions did not receive gas refunds.
-        // let is_gas_refund_disabled = is_deposit && !is_regolith;
-        // if !is_gas_refund_disabled {
-        //     exec_result.gas_mut().set_final_refund(
-        //         evm.ctx()
-        //             .cfg()
-        //             .spec()
-        //             .into_eth_spec()
-        //             .is_enabled_in(SpecId::LONDON),
-        //     );
-        //     return;
-        // }
+
         let is_eth_mint = evm.ctx().tx().eth_value().is_some();
         if is_eth_mint {
             let gas = exec_result.gas_mut();
             gas.set_remaining(gas.remaining().saturating_sub(4500));
+        }
+
+        let gas = exec_result.gas_mut();
+        let limit = gas.limit();
+        if !is_system && !is_deposit {
+            let token_ratio = evm.ctx().chain().get_token_ratio();
+            let new_limit = gas.limit().saturating_div(token_ratio.try_into().unwrap());
+            gas.set_limit(new_limit);
+        } else {
+            gas.set_refund(0);
+        }
+
+        let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
+        // Prior to Regolith, deposit transactions did not receive gas refunds.
+        let is_gas_refund_disabled = is_deposit && !is_regolith;
+        if !is_gas_refund_disabled {
+            exec_result.gas_mut().set_final_refund(
+                evm.ctx()
+                    .cfg()
+                    .spec()
+                    .into_eth_spec()
+                    .is_enabled_in(SpecId::LONDON),
+            );
         }
 
         let gas = exec_result.gas_mut();
@@ -348,8 +359,8 @@ where
             let remaining = gas.remaining();
             let new_remaining = remaining.saturating_mul(token_ratio.try_into().unwrap());
             gas.set_remaining(new_remaining);
-        } else {
-            gas.set_refund(0);
+
+            gas.set_limit(limit);
         }
     }
 
@@ -808,10 +819,7 @@ mod tests {
         let handler = OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<_, _, _>>::new();
 
         // l1block cost is 1048 fee.
-        assert_eq!(
-            handler.validate_tx_against_state(&mut evm),
-            Ok(())
-        );
+        assert_eq!(handler.validate_tx_against_state(&mut evm), Ok(()));
     }
 
     #[test]
