@@ -316,50 +316,54 @@ where
         eip7702_refund: i64,
     ) {
         exec_result.gas_mut().record_refund(eip7702_refund);
+        let ctx = evm.ctx();
+        let tx = ctx.tx();
+        let is_deposit = tx.tx_type() == DEPOSIT_TRANSACTION_TYPE;
+        let is_system = tx.is_system_transaction();
+        let gas = exec_result.gas_mut();
 
-        let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let is_system = evm.ctx().tx().is_system_transaction();
-
-        let is_eth_mint = evm.ctx().tx().eth_value().is_some();
+        let is_eth_mint = tx.eth_value().is_some();
         if is_eth_mint {
-            let gas = exec_result.gas_mut();
             gas.set_remaining(gas.remaining().saturating_sub(4500));
         }
 
-        let gas = exec_result.gas_mut();
         let limit = gas.limit();
+        let token_ratio_u64: u64 = ctx.chain().get_token_ratio().try_into().unwrap();
+
+        assert!(
+            token_ratio_u64 <= i64::MAX as u64,
+            "token_ratio {} exceeds i64::MAX",
+            token_ratio_u64
+        );
+
         if !is_system && !is_deposit {
-            let token_ratio = evm.ctx().chain().get_token_ratio();
-            let new_limit = gas.limit().saturating_div(token_ratio.try_into().unwrap());
-            gas.set_limit(new_limit);
+            // limit = limit / token_ratio
+            if token_ratio_u64 > 0 {
+                gas.set_limit(gas.limit().saturating_div(token_ratio_u64));
+            }
         } else {
             gas.set_refund(0);
         }
 
-        let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
+        let is_regolith = ctx.cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
         // Prior to Regolith, deposit transactions did not receive gas refunds.
         let is_gas_refund_disabled = is_deposit && !is_regolith;
         if !is_gas_refund_disabled {
-            exec_result.gas_mut().set_final_refund(
-                evm.ctx()
-                    .cfg()
+            gas.set_final_refund(
+                ctx.cfg()
                     .spec()
                     .into_eth_spec()
                     .is_enabled_in(SpecId::LONDON),
             );
         }
 
-        let gas = exec_result.gas_mut();
         if !is_system && !is_deposit {
-            let token_ratio = evm.ctx().chain().get_token_ratio();
-            let refund = gas.refunded();
-            let new_refund = refund.saturating_mul(token_ratio.try_into().unwrap());
-            gas.set_refund(new_refund);
+            // refund = refund * token_ratio
+            // remaining = remaining * token_ratio
+            gas.set_refund(gas.refunded().saturating_mul(token_ratio_u64 as i64));
+            gas.set_remaining(gas.remaining().saturating_mul(token_ratio_u64));
 
-            let remaining = gas.remaining();
-            let new_remaining = remaining.saturating_mul(token_ratio.try_into().unwrap());
-            gas.set_remaining(new_remaining);
-
+            // restore the original gas limit
             gas.set_limit(limit);
         }
     }
@@ -534,7 +538,9 @@ where
             }
 
             gas_limit = gas_limit.wrapping_sub(tx_l1_cost.try_into().unwrap());
-            gas_limit = gas_limit.wrapping_div(token_ratio.try_into().unwrap());
+            if token_ratio > U256::ZERO {
+                gas_limit = gas_limit.wrapping_div(token_ratio.try_into().unwrap());
+            }
         }
 
         // Create first frame action
@@ -557,7 +563,6 @@ mod tests {
     use crate::{api::default_ctx::OpContext, DefaultOp, OpBuilder};
     use revm::{
         context::Context,
-        context_interface::result::InvalidTransaction,
         database::InMemoryDB,
         database_interface::EmptyDB,
         handler::EthFrame,
@@ -565,7 +570,6 @@ mod tests {
         primitives::{bytes, Address, Bytes, B256},
         state::AccountInfo,
     };
-    use std::boxed::Box;
 
     /// Creates frame result.
     fn call_last_frame_return(
