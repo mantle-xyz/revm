@@ -35,12 +35,12 @@ async fn main() -> anyhow::Result<()> {
     let client = ProviderBuilder::<_, _, Optimism>::default().on_http(rpc_url);
 
     // Params
-    let chain_id: u64 = 5000;
-    let start_block = 79262933;
-    let end_block = 79262933;
+    let chain_id: u64 = 561113;
+    let start_block = 	1538105;
+    let end_block = 1538105;
 
     for i in start_block..=end_block {
-        println!("Processing block number: {}", i);
+        println!("Processing block number: {i}");
         process_block(i, chain_id, client.clone()).await?;
     }
 
@@ -59,7 +59,7 @@ async fn process_block(
         .expect("Failed to get parent block")
         .expect("Block not found");
 
-    println!("Fetched block number: {}", block.header.number);
+    println!("Fetched block number: {block_number}");
     let previous_block_number = block_number - 1;
 
     // Use the previous block state as the db with caching
@@ -82,7 +82,7 @@ async fn process_block(
         })
         .modify_cfg_chained(|c| {
             c.chain_id = chain_id;
-            c.spec = OpSpecId::CANYON;
+            c.spec = OpSpecId::HOLOCENE;
         });
 
     let mut evm = ctx.build_op();
@@ -99,7 +99,7 @@ async fn process_block(
     };
 
     for tx_hash in transactions.iter() {
-        println!("tx_hash: {}", tx_hash);
+        println!("tx_hash: {tx_hash}");
         let raw_tx = client
             .clone()
             .client()
@@ -116,7 +116,7 @@ async fn process_block(
         let res = evm.replay_commit();
 
         if let Err(ref res) = res {
-            println!("Got error: {:?}", res);
+            println!("Got error: {res:?}");
         }
 
         let expected_gas_used = client
@@ -130,8 +130,7 @@ async fn process_block(
 
         let actual_gas_used = res.unwrap().gas_used();
         println!(
-            "Expected gas used: {}, Actual gas used: {}",
-            expected_gas_used, actual_gas_used
+            "Expected gas used: {expected_gas_used}, Actual gas used: {actual_gas_used}"
         );
         if expected_gas_used == actual_gas_used {
             println!("--- passed✅");
@@ -142,8 +141,7 @@ async fn process_block(
 
     let elapsed = start.elapsed();
     println!(
-        "Finished block {}. Total CPU time: {:.6}s",
-        block_number,
+        "Finished block {block_number}. Total CPU time: {:.6}s",
         elapsed.as_secs_f64()
     );
 
