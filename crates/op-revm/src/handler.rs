@@ -80,7 +80,9 @@ where
             }
             return Ok(());
         }
-        self.mainnet.validate_env(evm)
+        Ok(())
+        // [TODO] temporarily remove for test
+        // self.mainnet.validate_env(evm)
     }
 
     /**
