@@ -21,6 +21,7 @@ workspace = true
 # revm
 revm.workspace = true
 auto_impl.workspace = true
+alloy-sol-types.workspace = true
 
 # Optional
 serde = { workspace = true, features = ["derive", "rc"], optional = true }
@@ -28,6 +29,7 @@ serde = { workspace = true, features = ["derive", "rc"], optional = true }
 [dev-dependencies]
 rstest.workspace = true
 alloy-sol-types.workspace = true
+anyhow.workspace = true
 sha2.workspace = true
 serde_json = { workspace = true, features = ["alloc", "preserve_order"] }
 serde = { workspace = true, features = ["derive"] }
