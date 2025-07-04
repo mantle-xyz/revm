@@ -1,80 +1,75 @@
 //! Optimism-specific constants, types, and helpers.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use alloy_consensus::Transaction;
-use alloy_eips::{BlockId, BlockNumberOrTag};
+use alloy_consensus::{TxEip1559, TxEip2930, TxEip7702, TxLegacy};
+use alloy_eips::{BlockId, Decodable2718, Typed2718};
+use alloy_primitives::{Address, Bytes, B256};
 use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
-use indicatif::ProgressBar;
+use dotenv::dotenv;
+use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
+use op_alloy_network::Optimism;
+use op_revm::{
+    api::{builder::OpBuilder, default_ctx::DefaultOp},
+    spec::OpSpecId,
+    transaction::deposit::DepositTransactionParts,
+    OpTransaction,
+};
 use revm::{
+    context::tx::TxEnv,
+    context_interface::either::Either,
     database::{AlloyDB, CacheDB, StateBuilder},
     database_interface::WrapDatabaseAsync,
-    inspector::{inspectors::TracerEip3155, InspectEvm},
     primitives::TxKind,
-    Context, MainBuilder, MainContext,
+    Context, ExecuteCommitEvm,
 };
-use std::fs::create_dir_all;
-use std::fs::OpenOptions;
-use std::io::BufWriter;
-use std::io::Write;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Instant;
-
-struct FlushWriter {
-    writer: Arc<Mutex<BufWriter<std::fs::File>>>,
-}
-
-impl FlushWriter {
-    fn new(writer: Arc<Mutex<BufWriter<std::fs::File>>>) -> Self {
-        Self { writer }
-    }
-}
-
-impl Write for FlushWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.writer.lock().unwrap().write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.lock().unwrap().flush()
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    create_dir_all("traces")?;
-
     // Set up the HTTP transport which is consumed by the RPC client.
-    let rpc_url = "https://mainnet.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27".parse()?;
+    dotenv().ok();
+    let mantle_url = std::env::var("MANTLE_URL").unwrap();
+    let rpc_url = mantle_url.parse()?;
 
     // Create a provider
-    let client = ProviderBuilder::new().on_http(rpc_url);
+    let client = ProviderBuilder::<_, _, Optimism>::default().on_http(rpc_url);
 
     // Params
-    let chain_id: u64 = 1;
-    let block_number = 10889447;
+    let chain_id: u64 = 561113;
+    let start_block = 	1538105;
+    let end_block = 1538105;
 
+    for i in start_block..=end_block {
+        println!("Processing block number: {i}");
+        process_block(i, chain_id, client.clone()).await?;
+    }
+
+    Ok(())
+}
+
+async fn process_block(
+    block_number: u64,
+    chain_id: u64,
+    client: impl Provider<Optimism> + Clone,
+) -> anyhow::Result<()> {
     // Fetch the transaction-rich block
-    let block = match client
-        .get_block_by_number(BlockNumberOrTag::Number(block_number))
-        .full()
+    let block = client
+        .get_block_by_number(block_number.into())
         .await
-    {
-        Ok(Some(block)) => block,
-        Ok(None) => anyhow::bail!("Block not found"),
-        Err(error) => anyhow::bail!("Error: {:?}", error),
-    };
-    println!("Fetched block number: {}", block.header.number);
+        .expect("Failed to get parent block")
+        .expect("Block not found");
+
+    println!("Fetched block number: {block_number}");
     let previous_block_number = block_number - 1;
 
     // Use the previous block state as the db with caching
     let prev_id: BlockId = previous_block_number.into();
     // SAFETY: This cannot fail since this is in the top-level tokio runtime
 
-    let state_db = WrapDatabaseAsync::new(AlloyDB::new(client, prev_id)).unwrap();
+    let state_db = WrapDatabaseAsync::new(AlloyDB::new(client.clone(), prev_id)).unwrap();
     let cache_db: CacheDB<_> = CacheDB::new(state_db);
     let mut state = StateBuilder::new_with_database(cache_db).build();
-    let ctx = Context::mainnet()
+    let ctx = Context::op()
         .with_db(&mut state)
         .modify_block_chained(|b| {
             b.number = block.header.number;
@@ -87,88 +82,200 @@ async fn main() -> anyhow::Result<()> {
         })
         .modify_cfg_chained(|c| {
             c.chain_id = chain_id;
+            c.spec = OpSpecId::HOLOCENE;
         });
 
-    let write = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open("traces/0.json");
-    let inner = Arc::new(Mutex::new(BufWriter::new(
-        write.expect("Failed to open file"),
-    )));
-    let writer = FlushWriter::new(Arc::clone(&inner));
-    let mut evm = ctx.build_mainnet_with_inspector(TracerEip3155::new(Box::new(writer)));
+    let mut evm = ctx.build_op();
 
     let txs = block.transactions.len();
     println!("Found {txs} transactions.");
 
-    let console_bar = Arc::new(ProgressBar::new(txs as u64));
+    // let console_bar = Arc::new(ProgressBar::new(txs as u64));
     let start = Instant::now();
 
-    // Create the traces directory if it doesn't exist
-    std::fs::create_dir_all("traces").expect("Failed to create traces directory");
-
     // Fill in CfgEnv
-    let BlockTransactions::Full(transactions) = block.transactions else {
+    let BlockTransactions::Hashes(transactions) = block.transactions else {
         panic!("Wrong transaction type")
     };
 
-    for tx in transactions {
-        evm.modify_tx(|etx| {
-            etx.caller = tx.inner.signer();
-            etx.gas_limit = tx.gas_limit();
-            etx.gas_price = tx.gas_price().unwrap_or(tx.inner.max_fee_per_gas());
-            etx.value = tx.value();
-            etx.data = tx.input().to_owned();
-            etx.gas_priority_fee = tx.max_priority_fee_per_gas();
-            etx.chain_id = Some(chain_id);
-            etx.nonce = tx.nonce();
-            if let Some(access_list) = tx.access_list() {
-                etx.access_list = access_list.clone()
-            } else {
-                etx.access_list = Default::default();
-            }
+    for tx_hash in transactions.iter() {
+        println!("tx_hash: {tx_hash}");
+        let raw_tx = client
+            .clone()
+            .client()
+            .request::<&[B256; 1], Bytes>("debug_getRawTransaction", &[*tx_hash])
+            .await
+            .expect("Block not found");
+        let tx = OpTxEnvelope::decode_2718(&mut raw_tx.as_ref()).unwrap();
 
-            etx.kind = match tx.to() {
-                Some(to_address) => TxKind::Call(to_address),
-                None => TxKind::Create,
-            };
+        let optx = prepare_tx_env(&tx, tx.recover_signer().unwrap(), raw_tx);
+        evm.0.modify_tx(|etx| {
+            *etx = optx;
         });
 
-        // Construct the file writer to write the trace to
-        let tx_number = tx.transaction_index.unwrap_or_default();
-        let file_name = format!("traces/{}.json", tx_number);
-        let write = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(file_name);
-        let inner = Arc::new(Mutex::new(BufWriter::new(
-            write.expect("Failed to open file"),
-        )));
-        let writer = FlushWriter::new(Arc::clone(&inner));
+        let res = evm.replay_commit();
 
-        // Inspect and commit the transaction to the EVM
-        let res = evm.inspect_replay_with_inspector(TracerEip3155::new(Box::new(writer)));
-
-        if let Err(error) = res {
-            println!("Got error: {:?}", error);
+        if let Err(ref res) = res {
+            println!("Got error: {res:?}");
         }
 
-        // Flush the file writer
-        inner.lock().unwrap().flush().expect("Failed to flush file");
+        let expected_gas_used = client
+            .clone()
+            .get_transaction_receipt(*tx_hash)
+            .await
+            .unwrap()
+            .unwrap()
+            .inner
+            .gas_used;
 
-        console_bar.inc(1);
+        let actual_gas_used = res.unwrap().gas_used();
+        println!(
+            "Expected gas used: {expected_gas_used}, Actual gas used: {actual_gas_used}"
+        );
+        if expected_gas_used == actual_gas_used {
+            println!("--- passed✅");
+        } else {
+            println!("--- failed❌");
+        }
     }
-
-    console_bar.finish_with_message("Finished all transactions.");
 
     let elapsed = start.elapsed();
     println!(
-        "Finished execution. Total CPU time: {:.6}s",
+        "Finished block {block_number}. Total CPU time: {:.6}s",
         elapsed.as_secs_f64()
     );
 
     Ok(())
+}
+
+pub fn prepare_tx_env(tx: &OpTxEnvelope, caller: Address, encoded: Bytes) -> OpTransaction<TxEnv> {
+    let base = match tx {
+        OpTxEnvelope::Legacy(tx) => tx.tx().to_tx_env(caller),
+        OpTxEnvelope::Eip1559(tx) => tx.tx().to_tx_env(caller),
+        OpTxEnvelope::Eip2930(tx) => tx.tx().to_tx_env(caller),
+        OpTxEnvelope::Eip7702(tx) => tx.tx().to_tx_env(caller),
+        OpTxEnvelope::Deposit(tx) => {
+            let TxDeposit {
+                to,
+                value,
+                gas_limit,
+                input,
+                source_hash: _,
+                from: _,
+                mint: _,
+                is_system_transaction: _,
+                eth_value: _,
+                eth_tx_value: _,
+            } = tx.inner();
+            TxEnv {
+                tx_type: tx.ty(),
+                caller,
+                gas_limit: *gas_limit,
+                kind: *to,
+                value: *value,
+                data: input.clone(),
+                ..Default::default()
+            }
+        }
+    };
+
+    let deposit = if let OpTxEnvelope::Deposit(tx) = tx {
+        DepositTransactionParts {
+            source_hash: tx.source_hash,
+            mint: tx.mint,
+            is_system_transaction: tx.is_system_transaction,
+            eth_value: tx.eth_value,
+            eth_tx_value: tx.eth_tx_value,
+        }
+    } else {
+        Default::default()
+    };
+
+    OpTransaction {
+        base,
+        enveloped_tx: Some(encoded),
+        deposit,
+    }
+}
+
+trait ToTxEnv {
+    fn to_tx_env(&self, caller: Address) -> TxEnv;
+}
+
+impl ToTxEnv for TxLegacy {
+    fn to_tx_env(&self, caller: Address) -> TxEnv {
+        TxEnv {
+            tx_type: self.ty(),
+            caller,
+            gas_limit: self.gas_limit,
+            gas_price: self.gas_price,
+            kind: self.to,
+            value: self.value,
+            data: self.input.clone(),
+            nonce: self.nonce,
+            chain_id: self.chain_id,
+            ..Default::default()
+        }
+    }
+}
+
+impl ToTxEnv for TxEip1559 {
+    fn to_tx_env(&self, caller: Address) -> TxEnv {
+        TxEnv {
+            tx_type: self.ty(),
+            caller,
+            gas_limit: self.gas_limit,
+            gas_price: self.max_fee_per_gas,
+            kind: self.to,
+            value: self.value,
+            data: self.input.clone(),
+            nonce: self.nonce,
+            chain_id: Some(self.chain_id),
+            gas_priority_fee: Some(self.max_priority_fee_per_gas),
+            access_list: self.access_list.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+impl ToTxEnv for TxEip2930 {
+    fn to_tx_env(&self, caller: Address) -> TxEnv {
+        TxEnv {
+            tx_type: self.ty(),
+            caller,
+            gas_limit: self.gas_limit,
+            gas_price: self.gas_price,
+            kind: self.to,
+            value: self.value,
+            data: self.input.clone(),
+            chain_id: Some(self.chain_id),
+            nonce: self.nonce,
+            access_list: self.access_list.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+impl ToTxEnv for TxEip7702 {
+    fn to_tx_env(&self, caller: Address) -> TxEnv {
+        TxEnv {
+            tx_type: self.ty(),
+            caller,
+            gas_limit: self.gas_limit,
+            gas_price: self.max_fee_per_gas,
+            kind: TxKind::Call(self.to),
+            value: self.value,
+            data: self.input.clone(),
+            nonce: self.nonce,
+            chain_id: Some(self.chain_id),
+            gas_priority_fee: Some(self.max_priority_fee_per_gas),
+            access_list: self.access_list.clone(),
+            authorization_list: self
+                .authorization_list
+                .iter()
+                .map(|auth| Either::Left(auth.clone()))
+                .collect(),
+            ..Default::default()
+        }
+    }
 }
