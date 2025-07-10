@@ -7,6 +7,8 @@ use crate::{
 };
 use core::ops::Mul;
 use revm::{database_interface::Database, primitives::hardfork::SpecId, primitives::U256};
+use revm::interpreter::Gas;
+use crate::constants::{OPERATOR_FEE_CONSTANTS_SLOT, OPERATOR_FEE_SCALAR_DECIMAL, OPERATOR_FEE_SCALAR_SLOT};
 
 /// L1 block info
 ///
@@ -30,6 +32,10 @@ pub struct L1BlockInfo {
     pub l1_fee_overhead: Option<U256>,
     /// The current L1 fee scalar.
     pub l1_base_fee_scalar: U256,
+    /// The current L1 blob base fee. None if Isthmus is not activated, except if `empty_ecotone_scalars` is `true`.
+    pub operator_fee_scalar: Option<U256>,
+    /// The current L1 blob base fee scalar. None if Isthmus is not activated.
+    pub operator_fee_constant: Option<U256>,
     /// The current token ratio.
     pub token_ratio: Option<U256>,
     /// Last calculated l1 fee cost. Uses as a cache between validation and pre execution stages.
@@ -55,17 +61,89 @@ impl L1BlockInfo {
 
         let l1_fee_overhead = db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?;
         let l1_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
+        if spec_id.is_enabled_in(OpSpecId::LIMB) {
+            let operator_fee_scalar = db
+                .storage(GAS_ORACLE_CONTRACT, OPERATOR_FEE_SCALAR_SLOT)?;
+            let operator_fee_constant = db
+            .storage(GAS_ORACLE_CONTRACT, OPERATOR_FEE_CONSTANTS_SLOT)?;
+            Ok(L1BlockInfo {
+                l2_block,
+                l1_base_fee,
+                l1_fee_overhead: Some(l1_fee_overhead),
+                l1_base_fee_scalar: l1_fee_scalar,
+                operator_fee_scalar: Some(operator_fee_scalar),
+                operator_fee_constant: Some(operator_fee_constant),
+                token_ratio: Some(token_ratio),
+                tx_l1_cost: None,
+            })
+        }else {
+            Ok(L1BlockInfo {
+                l2_block,
+                l1_base_fee,
+                l1_fee_overhead: Some(l1_fee_overhead),
+                l1_base_fee_scalar: l1_fee_scalar,
+                token_ratio: Some(token_ratio),
+                ..Default::default()
+            })
+        }
 
-        Ok(L1BlockInfo {
-            l2_block,
-            l1_base_fee,
-            l1_fee_overhead: Some(l1_fee_overhead),
-            l1_base_fee_scalar: l1_fee_scalar,
-            token_ratio: Some(token_ratio),
-            ..Default::default()
-        })
+    }
+    
+    /// Calculate the operator fee for executing this transaction.
+    ///
+    /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
+    pub fn operator_fee_charge(&self, input: &[u8], gas_limit: U256) -> U256 {
+        // If the input is a deposit transaction or empty, the default value is zero.
+        if input.first() == Some(&0x7E) {
+            return U256::ZERO;
+        }
+
+        self.operator_fee_charge_inner(gas_limit)
     }
 
+    /// Calculate the operator fee for the given `gas`.
+    fn operator_fee_charge_inner(&self, gas: U256) -> U256 {
+        let operator_fee_scalar = self
+            .operator_fee_scalar
+            .expect("Missing operator fee scalar for isthmus L1 Block");
+        let operator_fee_constant = self
+            .operator_fee_constant
+            .expect("Missing operator fee constant for isthmus L1 Block");
+        let token_ratio = self
+            .token_ratio
+            .expect("Missing token ratio for isthmus L1 Block");
+
+        // Calculate: operator_gas_used * operator_fee_scalar
+        let mut operator_scalar = gas.saturating_mul(operator_fee_scalar);
+        // Calculate: operator_cost * token_ratio
+        operator_scalar = operator_scalar.saturating_mul(token_ratio);
+        // Calculate: operator_cost / DECIMALS
+        operator_scalar = operator_scalar / (U256::from(OPERATOR_FEE_SCALAR_DECIMAL));
+        // Calculate: operator_fee_constant * token_ratio
+        let constant_component = operator_fee_constant.saturating_mul(token_ratio);
+        // Calculate: operator_cost + constant_component
+        let final_cost = operator_scalar.saturating_add(constant_component);
+        // Check for overflow (this should never happen based on the comment in the original Go code)
+        if final_cost > U256::MAX {
+            panic!("overflow in operator cost calculation");
+        }
+
+        final_cost
+    }
+
+    /// Calculate the operator fee for executing this transaction.
+    ///
+    /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
+    /// 
+    pub fn operator_fee_refund(&self, gas_limit: u64,l2_gas_used: u64, spec_id: OpSpecId) -> U256 {
+        if !spec_id.is_enabled_in(OpSpecId::LIMB) {
+            return U256::ZERO;
+        }
+        let operator_cost_gas_limit = self.operator_fee_charge_inner(U256::from(gas_limit));
+        let operator_cost_gas_used = self.operator_fee_charge_inner(U256::from(l2_gas_used));
+        operator_cost_gas_limit.saturating_sub(operator_cost_gas_used)
+    }
+    
     /// Calculate the data gas for posting the transaction on L1. Calldata costs 16 gas per byte
     /// after compression.
     ///
@@ -310,5 +388,21 @@ mod tests {
         };
         l1_block_info.reset_l2_block();
         assert_eq!(l1_block_info.l2_block, u64::MAX);
+    }
+
+    #[test]
+    fn test_operator_cost_basic() {
+        let mut l1_block_info = L1BlockInfo {
+            token_ratio: Some(U256::from(1_000_000u64)),
+            operator_fee_constant: Some(U256::from(100u64)),
+            operator_fee_scalar: Some( U256::from(2u64)),
+            ..Default::default()
+        };
+        let gas_used = U256::from(1000u64);
+
+        let result = l1_block_info.operator_fee_charge_inner(gas_used);
+
+        // Expected: (1000 * 2 * 1e6 / 1e6) + (100 * 1e6) = 2000 + 100000000 = 100002000
+        assert_eq!(result, U256::from(100_002_000u64));
     }
 }

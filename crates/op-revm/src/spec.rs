@@ -17,6 +17,7 @@ pub enum OpSpecId {
     ISTHMUS,
     INTEROP,
     OSAKA,
+    LIMB,
 }
 
 impl OpSpecId {
@@ -27,7 +28,7 @@ impl OpSpecId {
             Self::CANYON => SpecId::SHANGHAI,
             Self::ECOTONE | Self::FJORD | Self::GRANITE | Self::HOLOCENE => SpecId::CANCUN,
             Self::ISTHMUS | Self::INTEROP => SpecId::PRAGUE,
-            Self::OSAKA => SpecId::OSAKA,
+            Self::OSAKA | Self::LIMB => SpecId::OSAKA,
         }
     }
 
@@ -57,6 +58,9 @@ impl FromStr for OpSpecId {
             name::ISTHMUS => Ok(OpSpecId::ISTHMUS),
             name::INTEROP => Ok(OpSpecId::INTEROP),
             eth_name::OSAKA => Ok(OpSpecId::OSAKA),
+            name::LIMB => Ok(OpSpecId::LIMB),
+            
+            
             _ => Err(UnknownHardfork),
         }
     }
@@ -75,6 +79,7 @@ impl From<OpSpecId> for &'static str {
             OpSpecId::ISTHMUS => name::ISTHMUS,
             OpSpecId::INTEROP => name::INTEROP,
             OpSpecId::OSAKA => eth_name::OSAKA,
+            OpSpecId::LIMB => name::LIMB,
         }
     }
 }
@@ -90,6 +95,7 @@ pub mod name {
     pub const HOLOCENE: &str = "Holocene";
     pub const ISTHMUS: &str = "Isthmus";
     pub const INTEROP: &str = "Interop";
+    pub const LIMB: &str = "Limb";
 }
 
 #[cfg(test)]

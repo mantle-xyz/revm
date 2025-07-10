@@ -2,11 +2,17 @@ use revm::primitives::{address, Address, U256};
 
 pub const ZERO_BYTE_COST: u64 = 4;
 pub const NON_ZERO_BYTE_COST: u64 = 16;
-
+/// The fixed point decimal scaling factor associated with the operator fee scalar.
+///
+/// Allows users to use 6 decimal points of precision when specifying the operator_fee_scalar.
+pub const OPERATOR_FEE_SCALAR_DECIMAL: u64 = 1_000_000;
 pub const L1_BASE_FEE_SLOT: U256 = U256::from_limbs([1u64, 0, 0, 0]);
 pub const L1_OVERHEAD_SLOT: U256 = U256::from_limbs([5u64, 0, 0, 0]);
 pub const L1_SCALAR_SLOT: U256 = U256::from_limbs([6u64, 0, 0, 0]);
 pub const TOKEN_RATIO_SLOT: U256 = U256::from_limbs([0u64, 0, 0, 0]);
+pub const OPERATOR_FEE_CONSTANTS_SLOT: U256 = U256::from_limbs([3u64, 0, 0, 0]);
+pub const OPERATOR_FEE_SCALAR_SLOT: U256 = U256::from_limbs([4u64, 0, 0, 0]);
+
 
 // /// The address of L1 fee recipient.
 // pub const L1_FEE_RECIPIENT: Address = address!("0x420000000000000000000000000000000000001A");

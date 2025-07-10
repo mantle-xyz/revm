@@ -14,6 +14,7 @@ pub mod precompiles;
 pub mod result;
 pub mod spec;
 pub mod transaction;
+mod fee;
 
 pub use api::{
     builder::OpBuilder,
