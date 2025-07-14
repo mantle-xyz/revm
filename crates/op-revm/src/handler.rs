@@ -342,10 +342,8 @@ where
     ) -> Result<FrameResult, Self::Error> {
         self.fee_model = Default::default();
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        //TODO initial does not mul token_ratio, right?
-        // let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
         let gas_limit = evm.ctx().tx().gas_limit();
-        let mut gas_remaining = gas_limit;
+        let mut gas_remaining = gas_limit - init_and_floor_gas.initial_gas;
         // l1cost = l1cost / effective_gas_price
         // gas_limit = gas_limit - l1cost
         // gas_limit = gas_limit / token_ratio
@@ -354,11 +352,6 @@ where
             let spec = ctx.cfg().spec();
 
             let token_ratio = ctx.chain().get_token_ratio();
-            gas_remaining =  gas_remaining.saturating_sub(
-                U256::from(init_and_floor_gas.initial_gas)
-                    .saturating_mul(token_ratio)
-                    .saturating_to()
-            );
 
             let enveloped_tx = ctx
                 .tx()
@@ -611,8 +604,10 @@ where
         evm: &mut Self::Evm,
         init_and_floor_gas: &InitialAndFloorGas,
     ) -> Result<FrameResult, Self::Error> {
+        self.fee_model = Default::default();
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+        let gas_limit = evm.ctx().tx().gas_limit();
+        let mut gas_remaining = gas_limit - init_and_floor_gas.initial_gas;
         // l1cost = l1cost / effective_gas_price
         // gas_limit = gas_limit - l1cost
         // gas_limit = gas_limit / token_ratio
@@ -644,8 +639,27 @@ where
                 )));
             }
 
-            gas_limit = gas_limit.wrapping_sub(tx_l1_cost.try_into().unwrap());
-            gas_limit = gas_limit.wrapping_div(token_ratio.try_into().unwrap());
+            gas_remaining = gas_remaining.wrapping_sub(tx_l1_cost.try_into().unwrap());
+            self.fee_model.rollup_cost = tx_l1_cost.try_into().unwrap();
+            //compute operator fee
+            if spec.is_enabled_in(OpSpecId::LIMB) {
+                let tx_gas_limit = U256::from(ctx.tx().gas_limit());
+                let mut operator_fee_charge = ctx.chain().operator_fee_charge(&enveloped_tx,tx_gas_limit);
+                if effective_gas_price > 0 {
+                    operator_fee_charge = operator_fee_charge.wrapping_div(U256::from(effective_gas_price));
+                }
+                if operator_fee_charge.gt(&U256::from(gas_remaining)) {
+                    return Err(ERROR::from(OpTransactionError::Base(
+                        InvalidTransaction::CallGasCostMoreThanGasLimit {
+                            initial_gas: init_and_floor_gas.initial_gas,
+                            gas_limit,
+                        },
+                    )));
+                }
+                gas_remaining = gas_remaining.wrapping_sub(operator_fee_charge.try_into().unwrap());
+                self.fee_model.operator_cost = operator_fee_charge.try_into().unwrap();
+            }
+            gas_remaining = gas_remaining.wrapping_div(token_ratio.try_into().unwrap());
         }
 
         // Create first frame action
