@@ -35,6 +35,7 @@ impl<EVM, ERROR, FRAME> OpHandler<EVM, ERROR, FRAME> {
         Self {
             mainnet: MainnetHandler::default(),
             _phantom: core::marker::PhantomData,
+            fee_model: FeeModel::default(),
         }
     }
 }
