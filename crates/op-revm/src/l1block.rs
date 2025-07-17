@@ -62,15 +62,12 @@ impl L1BlockInfo {
 
         let l1_fee_overhead = db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?;
         let l1_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
-        println!("l1 block try fetch {:?}", spec_id);
         
         if spec_id.is_enabled_in(OpSpecId::LIMB) {
             let operator_fee_scalar = db
                 .storage(GAS_ORACLE_CONTRACT, OPERATOR_FEE_SCALAR_SLOT)?;
             let operator_fee_constant = db
             .storage(GAS_ORACLE_CONTRACT, OPERATOR_FEE_CONSTANTS_SLOT)?;
-            println!("l1 block try fetch constants {:?}", operator_fee_constant);
-            println!("l1 block try fetch scalar {:?}", operator_fee_scalar);
 
             Ok(L1BlockInfo {
                 l2_block,
@@ -141,13 +138,20 @@ impl L1BlockInfo {
     ///
     /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
     /// 
-    pub fn operator_fee_refund(&self, gas_limit: u64,l2_gas_used: u64, spec_id: OpSpecId) -> U256 {
+    pub fn operator_fee_refund(&self, gas_limit: u64, l2_gas_used: u64, gas_price: u128, spec_id: OpSpecId) -> U256 {
         if !spec_id.is_enabled_in(OpSpecId::LIMB) {
             return U256::ZERO;
         }
         let operator_cost_gas_limit = self.operator_fee_charge_inner(U256::from(gas_limit));
         let operator_cost_gas_used = self.operator_fee_charge_inner(U256::from(l2_gas_used));
-        operator_cost_gas_limit.saturating_sub(operator_cost_gas_used)
+        if gas_price <= 0 {
+            return U256::ZERO;
+        }
+        let operator_gas_limit = operator_cost_gas_limit.wrapping_div(U256::from(gas_price));
+        let operator_gas_l2_used = operator_cost_gas_used.wrapping_div(U256::from(gas_price));
+        println!("refund operator gas {}",operator_gas_limit);
+        println!("refund operator gas {}", operator_gas_l2_used);
+        operator_gas_limit.saturating_sub(operator_gas_l2_used)
     }
     
     /// Calculate the data gas for posting the transaction on L1. Calldata costs 16 gas per byte

@@ -120,7 +120,6 @@ where
                 TxKind::Call(to) => to,
                 TxKind::Create => Address::ZERO,
             };
-            println!("l1 block try fetch l2 block {}, number {}",context.chain().l2_block, block_number);
             // The L1-cost fee is only computed for Optimism non-deposit transactions.
             if context.chain().l2_block != block_number {
                 // L1 block info is stored in the context for later use.
@@ -257,8 +256,8 @@ where
 
         let instruction_result = frame_result.interpreter_result().result;
         let gas = frame_result.gas_mut();
-        let remaining = gas.remaining();
-        let mut refunded = gas.refunded();
+        let mut remaining = gas.remaining();
+        let refunded = gas.refunded();
         println!("before, gas limit {}", tx_gas_limit);
         println!("before, gas remaining {}", remaining);
         println!("before, refunded {}", refunded);
@@ -271,16 +270,13 @@ where
             println!("before, fee {}", self.fee_model.operator_cost);
             println!("before, total cost {}", self.fee_model.total_cost());
             let l2_gas_used = gas_used - self.fee_model.total_cost();
+            println!("before, l2 cost {}", l2_gas_used);
             let spec = ctx.cfg().spec();
-            let mut operator_fee_refunded = ctx.chain().operator_fee_refund(tx_gas_limit,l2_gas_used, spec);
             let basefee = ctx.block().basefee() as u128;
-
             let effective_gas_price = ctx.tx().effective_gas_price(basefee);
+            let operator_fee_refunded = ctx.chain().operator_fee_refund(tx_gas_limit,l2_gas_used,effective_gas_price, spec);
+            remaining = U256::from(remaining).saturating_add(operator_fee_refunded).saturating_to();
 
-            if effective_gas_price > 0 {
-                operator_fee_refunded = operator_fee_refunded.wrapping_div(U256::from(effective_gas_price));
-                refunded = U256::from(refunded).saturating_add(operator_fee_refunded).saturating_to();
-            }
         }
         
         
