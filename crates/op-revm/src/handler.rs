@@ -253,17 +253,20 @@ where
         let tx_gas_limit = tx.gas_limit();
         let is_regolith = ctx.cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
         let is_limb = ctx.cfg().spec().is_enabled_in(OpSpecId::LIMB);
-
+        let token_ratio = ctx.chain().get_token_ratio();
         let instruction_result = frame_result.interpreter_result().result;
         let gas = frame_result.gas_mut();
         let mut remaining = gas.remaining();
-        let refunded = gas.refunded();
+        let mut refunded = gas.refunded();
         println!("before, gas limit {}", tx_gas_limit);
         println!("before, gas remaining {}", remaining);
         println!("before, refunded {}", refunded);
 
 
         if !is_deposit && is_limb {
+            remaining = U256::from(remaining).saturating_mul(token_ratio).saturating_to();
+            refunded = U256::from(refunded).saturating_mul(token_ratio).saturating_to();
+            remaining = remaining + refunded as u64;
             let gas_used = tx_gas_limit - remaining;
             println!("before, gas used {}", gas_used);
             println!("before, l1cost {}", self.fee_model.rollup_cost);
@@ -276,7 +279,8 @@ where
             let effective_gas_price = ctx.tx().effective_gas_price(basefee);
             let operator_fee_refunded = ctx.chain().operator_fee_refund(tx_gas_limit,l2_gas_used,effective_gas_price, spec);
             remaining = U256::from(remaining).saturating_add(operator_fee_refunded).saturating_to();
-
+            remaining = U256::from(remaining).wrapping_div(token_ratio).saturating_to();
+            refunded = U256::from(refunded).wrapping_div(token_ratio).saturating_to();
         }
         
         
