@@ -7,6 +7,7 @@ use crate::{
 };
 use core::ops::Mul;
 use revm::{database_interface::Database, primitives::hardfork::SpecId, primitives::U256};
+use revm::bytecode::eof::printer::print;
 use revm::interpreter::Gas;
 use crate::constants::{OPERATOR_FEE_CONSTANTS_SLOT, OPERATOR_FEE_SCALAR_DECIMAL, OPERATOR_FEE_SCALAR_SLOT};
 
@@ -61,11 +62,16 @@ impl L1BlockInfo {
 
         let l1_fee_overhead = db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?;
         let l1_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
+        println!("l1 block try fetch {:?}", spec_id);
+        
         if spec_id.is_enabled_in(OpSpecId::LIMB) {
             let operator_fee_scalar = db
                 .storage(GAS_ORACLE_CONTRACT, OPERATOR_FEE_SCALAR_SLOT)?;
             let operator_fee_constant = db
             .storage(GAS_ORACLE_CONTRACT, OPERATOR_FEE_CONSTANTS_SLOT)?;
+            println!("l1 block try fetch constants {:?}", operator_fee_constant);
+            println!("l1 block try fetch scalar {:?}", operator_fee_scalar);
+
             Ok(L1BlockInfo {
                 l2_block,
                 l1_base_fee,
