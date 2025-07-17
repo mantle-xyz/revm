@@ -256,9 +256,17 @@ where
         let gas = frame_result.gas_mut();
         let remaining = gas.remaining();
         let mut refunded = gas.refunded();
-
+        println!("before, gas limit {}", tx_gas_limit);
+        println!("before, gas remaining {}", remaining);
+        println!("before, refunded {}", refunded);
+        
+        
         if is_limb {
             let gas_used = tx_gas_limit - remaining;
+            println!("before, gas used {}", gas_used);
+            println!("before, l1cost {}", self.fee_model.rollup_cost);
+            println!("before, fee {}", self.fee_model.operator_cost);
+            println!("before, total cost {}", self.fee_model.total_cost());
             let l2_gas_used = gas_used - self.fee_model.total_cost();
             let spec = ctx.cfg().spec();
             let mut operator_fee_refunded = ctx.chain().operator_fee_refund(tx_gas_limit,l2_gas_used, spec);
