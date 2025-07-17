@@ -264,7 +264,7 @@ where
         println!("before, refunded {}", refunded);
 
 
-        if is_limb {
+        if !is_deposit && is_limb {
             let gas_used = tx_gas_limit - remaining;
             println!("before, gas used {}", gas_used);
             println!("before, l1cost {}", self.fee_model.rollup_cost);
