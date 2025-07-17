@@ -278,7 +278,7 @@ where
             let basefee = ctx.block().basefee() as u128;
             let effective_gas_price = ctx.tx().effective_gas_price(basefee);
             let operator_fee_refunded = ctx.chain().operator_fee_refund(tx_gas_limit,l2_gas_used,effective_gas_price, spec);
-            remaining = U256::from(remaining).saturating_add(operator_fee_refunded).saturating_to();
+            refunded = U256::from(refunded).saturating_add(operator_fee_refunded).saturating_to();
             remaining = U256::from(remaining).wrapping_div(token_ratio).saturating_to();
             refunded = U256::from(refunded).wrapping_div(token_ratio).saturating_to();
         }
