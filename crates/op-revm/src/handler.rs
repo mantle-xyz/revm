@@ -120,6 +120,7 @@ where
                 TxKind::Call(to) => to,
                 TxKind::Create => Address::ZERO,
             };
+            println!("l1 block try fetch l2 block {}, number {}",context.chain().l2_block, block_number);
             // The L1-cost fee is only computed for Optimism non-deposit transactions.
             if context.chain().l2_block != block_number {
                 // L1 block info is stored in the context for later use.
