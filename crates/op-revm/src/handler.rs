@@ -258,7 +258,8 @@ where
         if is_limb {
             let gas_used = tx_gas_limit - remaining;
             let l2_gas_used = gas_used - self.fee_model.total_cost();
-            let mut operator_fee_refunded = ctx.chain().operator_fee_refund(tx_gas_limit,l2_gas_used,ctx.cfg().spec());
+            let spec = ctx.cfg().spec();
+            let mut operator_fee_refunded = ctx.chain().operator_fee_refund(tx_gas_limit,l2_gas_used, spec);
             let basefee = ctx.block().basefee() as u128;
 
             let effective_gas_price = ctx.tx().effective_gas_price(basefee);
