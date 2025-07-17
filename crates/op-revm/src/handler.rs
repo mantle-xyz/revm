@@ -1,4 +1,6 @@
 //!Handler related to Optimism chain
+
+use core::fmt::Debug;
 use crate::{
     api::exec::OpContextTr,
     constants::{BASE_FEE_RECIPIENT, GAS_ORACLE_CONTRACT},
@@ -259,8 +261,8 @@ where
         println!("before, gas limit {}", tx_gas_limit);
         println!("before, gas remaining {}", remaining);
         println!("before, refunded {}", refunded);
-        
-        
+
+
         if is_limb {
             let gas_used = tx_gas_limit - remaining;
             println!("before, gas used {}", gas_used);
@@ -355,6 +357,7 @@ where
         self.fee_model = Default::default();
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let gas_limit = evm.ctx().tx().gas_limit();
+        println!("execution 1 gas_limit: {}", gas_limit);
         let mut gas_remaining = gas_limit - init_and_floor_gas.initial_gas;
         // l1cost = l1cost / effective_gas_price
         // gas_limit = gas_limit - l1cost
@@ -390,6 +393,8 @@ where
             gas_remaining = gas_remaining.wrapping_sub(tx_l1_cost.try_into().unwrap());
             self.fee_model.rollup_cost = tx_l1_cost.try_into().unwrap();
             // compute operator fee
+            println!("execution 2 spec  time: {:?}", spec);
+            println!("execution 3 spec limb time: {:?}", OpSpecId::LIMB);
             if spec.is_enabled_in(OpSpecId::LIMB) {
                 let tx_gas_limit = U256::from(ctx.tx().gas_limit());
                 let mut operator_fee_charge = ctx.chain().operator_fee_charge(&enveloped_tx,tx_gas_limit);
