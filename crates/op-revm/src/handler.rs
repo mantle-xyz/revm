@@ -254,8 +254,8 @@ where
 
         let instruction_result = frame_result.interpreter_result().result;
         let gas = frame_result.gas_mut();
-        let mut remaining = gas.remaining();
-        let refunded = gas.refunded();
+        let remaining = gas.remaining();
+        let mut refunded = gas.refunded();
 
         if is_limb {
             let gas_used = tx_gas_limit - remaining;
@@ -268,7 +268,7 @@ where
 
             if effective_gas_price > 0 {
                 operator_fee_refunded = operator_fee_refunded.wrapping_div(U256::from(effective_gas_price));
-                remaining = U256::from(remaining).saturating_add(operator_fee_refunded).saturating_to();
+                refunded = U256::from(refunded).saturating_add(operator_fee_refunded).saturating_to();
             }
         }
         
