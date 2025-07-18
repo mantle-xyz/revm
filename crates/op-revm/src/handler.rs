@@ -278,9 +278,9 @@ where
             let basefee = ctx.block().basefee() as u128;
             let effective_gas_price = ctx.tx().effective_gas_price(basefee);
             let operator_fee_refunded = ctx.chain().operator_fee_refund(tx_gas_limit,l2_gas_used,effective_gas_price, spec);
-            // refunded = U256::from(refunded).saturating_add(operator_fee_refunded).saturating_to();
-            // remaining = U256::from(remaining).wrapping_div(token_ratio).saturating_to();
-            // refunded = U256::from(refunded).wrapping_div(token_ratio).saturating_to();
+            remaining = U256::from(remaining).saturating_add(operator_fee_refunded).saturating_to();
+            remaining = U256::from(remaining).wrapping_div(token_ratio).saturating_to();
+            refunded = U256::from(refunded).wrapping_div(token_ratio).saturating_to();
         }
         
         
@@ -348,6 +348,26 @@ where
         }
 
         Ok(())
+    }
+
+    fn post_execution(
+        &self,
+        evm: &mut Self::Evm,
+        mut exec_result: FrameResult,
+        init_and_floor_gas: InitialAndFloorGas,
+        eip7702_gas_refund: i64,
+    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        // Calculate final refund and add EIP-7702 refund to gas.
+        self.refund(evm, &mut exec_result, eip7702_gas_refund);
+        println!("implement post execution");
+        // Ensure gas floor is met and minimum floor gas is spent.
+        self.eip7623_check_gas_floor(evm, &mut exec_result, init_and_floor_gas);
+        // Return unused gas to caller
+        self.reimburse_caller(evm, &mut exec_result)?;
+        // Pay transaction fees to beneficiary
+        self.reward_beneficiary(evm, &mut exec_result)?;
+        // Prepare transaction output
+        self.output(evm, exec_result)
     }
 
     fn execution(
