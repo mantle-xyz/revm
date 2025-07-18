@@ -464,6 +464,7 @@ where
 
         if !is_deposit && !is_system && is_limb {
             let mut remaining = gas.remaining();
+            let mut refund = gas.refunded();
             let gas_used =  limit.saturating_sub( remaining + gas.refunded() as u64);
             println!("before, gas used {}", gas_used);
             println!("before, l1cost {}", self.fee_model.rollup_cost);
@@ -475,9 +476,9 @@ where
             let basefee = ctx.block().basefee() as u128;
             let effective_gas_price = ctx.tx().effective_gas_price(basefee);
             let operator_fee_refunded = ctx.chain().operator_fee_refund(limit, l2_gas_used, effective_gas_price, spec);
-            remaining = U256::from(remaining).saturating_add(operator_fee_refunded).saturating_to();
-            gas.set_remaining(remaining);
-            println!("after, remaining {}", remaining);
+            refund = U256::from(refund).saturating_add(operator_fee_refunded).saturating_to();
+            gas.set_refund(refund);
+            println!("after, remaining {},refund {}", remaining, refund);
         }
         
     }
