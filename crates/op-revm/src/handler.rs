@@ -477,7 +477,9 @@ where
             let operator_fee_refunded = ctx.chain().operator_fee_refund(limit, l2_gas_used, effective_gas_price, spec);
             remaining = U256::from(remaining).saturating_add(operator_fee_refunded).saturating_to();
             gas.set_remaining(remaining);
+            println!("after, remaining {}", remaining);
         }
+        
     }
 
     fn reward_beneficiary(
