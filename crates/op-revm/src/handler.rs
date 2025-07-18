@@ -332,6 +332,7 @@ where
         let gas_limit = evm.ctx().tx().gas_limit();
         println!("execution 1 gas_limit: {}", gas_limit);
         let mut gas_remaining = gas_limit - init_and_floor_gas.initial_gas;
+        println!("execution 2 gas_remaining: {}", gas_remaining);
         // l1cost = l1cost / effective_gas_price
         // gas_limit = gas_limit - l1cost
         // gas_limit = gas_limit / token_ratio
@@ -366,8 +367,6 @@ where
             gas_remaining = gas_remaining.wrapping_sub(tx_l1_cost.try_into().unwrap());
             self.fee_model.rollup_cost = tx_l1_cost.try_into().unwrap();
             // compute operator fee
-            println!("execution 2 spec  time: {:?}", spec);
-            println!("execution 3 spec limb time: {:?}", OpSpecId::LIMB);
             if spec.is_enabled_in(OpSpecId::LIMB) {
                 let tx_gas_limit = U256::from(ctx.tx().gas_limit());
                 let mut operator_fee_charge = ctx.chain().operator_fee_charge(&enveloped_tx,tx_gas_limit);
@@ -382,9 +381,11 @@ where
                         },
                     )));
                 }
+                println!("execution 3 operator_fee_charge: {:?}", operator_fee_charge);
                 gas_remaining = gas_remaining.wrapping_sub(operator_fee_charge.try_into().unwrap());
                 self.fee_model.operator_cost = operator_fee_charge.try_into().unwrap();
             }
+            println!("execution 4 gas_remaining: {}", gas_remaining);
             gas_remaining = gas_remaining.wrapping_div(token_ratio.try_into().unwrap());
         }
 
