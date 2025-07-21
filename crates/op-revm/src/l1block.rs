@@ -115,17 +115,14 @@ impl L1BlockInfo {
         let token_ratio = self
             .token_ratio
             .expect("Missing token ratio for isthmus L1 Block");
-        println!("operator_fee_charge_inner {} {} {} {}", gas, operator_fee_scalar, operator_fee_constant, token_ratio);
         // Calculate: operator_gas_used * operator_fee_scalar
         let mut operator_scalar = gas.saturating_mul(operator_fee_scalar);
         // Calculate: operator_cost * token_ratio
         operator_scalar = operator_scalar.saturating_mul(token_ratio);
         // Calculate: operator_cost / DECIMALS
         operator_scalar = operator_scalar / (U256::from(OPERATOR_FEE_SCALAR_DECIMAL));
-        println!("operator_fee_charge_inner operator_scalar {}",operator_scalar);
         // Calculate: operator_fee_constant * token_ratio
         let constant_component = operator_fee_constant.saturating_mul(token_ratio);
-        println!("operator_fee_charge_inner constant_component {}",constant_component);
 
         // Calculate: operator_cost + constant_component
         let final_cost = operator_scalar.saturating_add(constant_component);
@@ -152,8 +149,6 @@ impl L1BlockInfo {
         }
         let operator_gas_limit = operator_cost_gas_limit.wrapping_div(U256::from(gas_price));
         let operator_gas_l2_used = operator_cost_gas_used.wrapping_div(U256::from(gas_price));
-        println!("refund operator gas {}",operator_gas_limit);
-        println!("refund operator gas {}", operator_gas_l2_used);
         operator_gas_limit.saturating_sub(operator_gas_l2_used)
     }
     

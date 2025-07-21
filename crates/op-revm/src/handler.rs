@@ -330,9 +330,7 @@ where
         self.fee_model = Default::default();
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let gas_limit = evm.ctx().tx().gas_limit();
-        println!("execution 1 gas_limit: {}", gas_limit);
         let mut gas_remaining = gas_limit - init_and_floor_gas.initial_gas;
-        println!("execution 2 gas_remaining: {}", gas_remaining);
         // l1cost = l1cost / effective_gas_price
         // gas_limit = gas_limit - l1cost
         // gas_limit = gas_limit / token_ratio
@@ -381,11 +379,9 @@ where
                         },
                     )));
                 }
-                println!("execution 3 operator_fee_charge: {:?}", operator_fee_charge);
                 gas_remaining = gas_remaining.wrapping_sub(operator_fee_charge.try_into().unwrap());
                 self.fee_model.operator_cost = operator_fee_charge.try_into().unwrap();
             }
-            println!("execution 4 gas_remaining: {}", gas_remaining);
             gas_remaining = gas_remaining.wrapping_div(token_ratio.try_into().unwrap());
         }
 
@@ -458,27 +454,17 @@ where
             gas.set_limit(limit);
         }
 
-        println!("before, gas limit {}", limit);
-        println!("before, gas remaining {}", gas.remaining());
-        println!("before, refunded {}", gas.refunded());
-
         if !is_deposit && !is_system && is_limb {
             let mut remaining = gas.remaining();
             let mut refund = gas.refunded();
             let gas_used =  limit.saturating_sub( remaining + gas.refunded() as u64);
-            println!("before, gas used {}", gas_used);
-            println!("before, l1cost {}", self.fee_model.rollup_cost);
-            println!("before, fee {}", self.fee_model.operator_cost);
-            println!("before, total cost {}", self.fee_model.total_cost());
             let l2_gas_used = gas_used - self.fee_model.total_cost();
-            println!("before, l2 cost {}", l2_gas_used);
             let spec = ctx.cfg().spec();
             let basefee = ctx.block().basefee() as u128;
             let effective_gas_price = ctx.tx().effective_gas_price(basefee);
             let operator_fee_refunded = ctx.chain().operator_fee_refund(limit, l2_gas_used, effective_gas_price, spec);
             refund = U256::from(refund).saturating_add(operator_fee_refunded).saturating_to();
             gas.set_refund(refund);
-            println!("after, remaining {},refund {}", remaining, refund);
         }
         
     }
