@@ -483,6 +483,7 @@ where
             let mint = tx.mint();
             let is_system_tx = tx.is_system_transaction();
             let gas_limit = tx.gas_limit();
+            let eth_value = tx.eth_value();
             // If the transaction is a deposit transaction and it failed
             // for any reason, the caller nonce must be bumped, and the
             // gas reported must be altered depending on the Hardfork. This is
@@ -494,7 +495,7 @@ where
             // always persist the mint amount, even if the transaction fails.
             let account = {
                 let mut acc = Account::from(
-                    evm.ctx()
+                    ctx
                         .db()
                         .basic(caller)
                         .unwrap_or_default()
@@ -508,7 +509,19 @@ where
                 acc.mark_touch();
                 acc
             };
-            let state = HashMap::from_iter([(caller, account)]);
+
+             // Persist BVM_ETH mint for failed deposit like op-geth (pre-snapshot effect).
+             if let Some(eth_value) = eth_value {
+                BvmEth::mint(ctx, U256::from(eth_value)).map_err(ERROR::from)?;
+            }
+            let bvm_acc = Account::from(
+                ctx.db()
+                    .basic(BvmEth::ADDRESS)
+                    .unwrap_or_default()
+                    .unwrap_or_default(),
+            );
+
+            let state = HashMap::from_iter([(caller, account), (BvmEth::ADDRESS, bvm_acc)]);
 
             // The gas used of a failed deposit post-regolith is the gas
             // limit of the transaction. pre-regolith, it is the gas limit
