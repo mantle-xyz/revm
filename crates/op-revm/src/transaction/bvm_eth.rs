@@ -187,16 +187,14 @@ impl BvmEth {
         let to = match context.tx().kind() {
             TxKind::Call(address) => address,
             TxKind::Create => {
-                // Increase nonce of caller and check if it overflows
-                let Some(nonce) = context
+                let nonce = context
                     .journal()
-                    .inc_account_nonce(from)
+                    .load_account(from)
                     .map_err(db_error)?
-                else {
-                    return Err(OpTransactionError::BvmEth(BvmEthError::NonceOverflow));
-                };
-                let old_nonce = nonce - 1;
-                from.create(old_nonce)
+                    .data
+                    .info
+                    .nonce;
+                from.create(nonce)
             }
         };
 
