@@ -12,14 +12,14 @@ pub fn validate_env<CTX: ContextTr, ERROR: From<InvalidHeader> + From<InvalidTra
     context: CTX,
 ) -> Result<(), ERROR> {
     let spec = context.cfg().spec().into();
-    // `prevrandao` is required for the merge
-    if spec.is_enabled_in(SpecId::MERGE) && context.block().prevrandao().is_none() {
-        return Err(InvalidHeader::PrevrandaoNotSet.into());
-    }
-    // `excess_blob_gas` is required for Cancun
-    if spec.is_enabled_in(SpecId::CANCUN) && context.block().blob_excess_gas_and_price().is_none() {
-        return Err(InvalidHeader::ExcessBlobGasNotSet.into());
-    }
+    // // `prevrandao` is required for the merge
+    // if spec.is_enabled_in(SpecId::MERGE) && context.block().prevrandao().is_none() {
+    //     return Err(InvalidHeader::PrevrandaoNotSet.into());
+    // }
+    // // `excess_blob_gas` is required for Cancun
+    // if spec.is_enabled_in(SpecId::CANCUN) && context.block().blob_excess_gas_and_price().is_none() {
+    //     return Err(InvalidHeader::ExcessBlobGasNotSet.into());
+    // }
     validate_tx_env::<CTX>(context, spec).map_err(Into::into)
 }
 

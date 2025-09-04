@@ -584,6 +584,8 @@ where
             evm.ctx()
                 .journal_mut()
                 .caller_accounting_journal_entry(caller, old_balance, true);
+            
+            // TODO: Persist BVM_ETH mint for failed deposit like op-geth (pre-snapshot effect).
 
             // The gas used of a failed deposit post-regolith is the gas
             // limit of the transaction. pre-regolith, it is the gas limit
