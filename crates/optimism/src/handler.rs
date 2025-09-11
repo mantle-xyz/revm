@@ -437,7 +437,12 @@ where
             };
             let state = HashMap::from_iter([(caller, account)]);
 
-            // The gas used of a failed deposit post-regolith is the gas
+            println!(
+                "catch_error: {:?} {:?} {:?}",
+                is_system_tx,
+                spec.is_enabled_in(OpSpecId::REGOLITH),
+                is_deposit,
+            );            // The gas used of a failed deposit post-regolith is the gas
             // limit of the transaction. pre-regolith, it is the gas limit
             // of the transaction for non system transactions and 0 for system
             // transactions.
