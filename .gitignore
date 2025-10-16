@@ -26,3 +26,7 @@ rustc-ice-*
 
 # Fixtures
 /test-fixtures
+
+.env
+/utils
+examples.md

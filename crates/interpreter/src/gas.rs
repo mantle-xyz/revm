@@ -163,6 +163,18 @@ impl Gas {
         self.remaining = self.remaining.wrapping_sub(cost);
         oog
     }
+
+    /// Set the remaining gas.
+    #[inline]
+    pub fn set_remaining(&mut self, remaining: u64) {
+        self.remaining = remaining;
+    }
+
+    /// Set the limit.
+    #[inline]
+    pub fn set_limit(&mut self, limit: u64) {
+        self.limit = limit;
+    }
 }
 
 /// Result of attempting to extend memory during execution.
