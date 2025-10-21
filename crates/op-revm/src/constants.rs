@@ -3,12 +3,13 @@ use revm::primitives::{address, Address, U256};
 
 /// The cost of a non-zero byte in the EVM.
 pub const NON_ZERO_BYTE_COST: u64 = 16;
-
+/// The L1 base fee slot.
 pub const L1_BASE_FEE_SLOT: U256 = U256::from_limbs([1u64, 0, 0, 0]);
 /// The L1 overhead slot.
 pub const L1_OVERHEAD_SLOT: U256 = U256::from_limbs([5u64, 0, 0, 0]);
 /// The L1 scalar slot.
 pub const L1_SCALAR_SLOT: U256 = U256::from_limbs([6u64, 0, 0, 0]);
+/// The token ratio slot.
 pub const TOKEN_RATIO_SLOT: U256 = U256::from_limbs([0u64, 0, 0, 0]);
 
 // /// The address of L1 fee recipient.

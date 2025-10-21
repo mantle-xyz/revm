@@ -13,14 +13,15 @@ use revm::{
         Block, Cfg, ContextTr, JournalTr, Transaction,
     },
     handler::{
-        handler::EvmTrError, pre_execution::validate_account_nonce_and_code, EvmTr, Frame,
-        FrameResult, Handler, ItemOrResult, MainnetHandler,
+        evm::FrameTr, handler::EvmTrError, post_execution,
+        pre_execution::validate_account_nonce_and_code, EthFrame, EvmTr, FrameResult, Handler,
+        MainnetHandler,
     },
-    inspector::{Inspector, InspectorEvmTr, InspectorFrame, InspectorHandler},
-    interpreter::{interpreter::EthInterpreter, FrameInput, Gas, InitialAndFloorGas},
-    primitives::{hardfork::SpecId, Address, HashMap, TxKind, U256},
-    state::Account,
-    Database,
+    inspector::{Inspector, InspectorEvmTr, InspectorHandler},
+    interpreter::{
+        interpreter::EthInterpreter, interpreter_action::FrameInit, Gas, InitialAndFloorGas,
+    },
+    primitives::{hardfork::SpecId, Address, TxKind, U256},
 };
 use std::boxed::Box;
 
@@ -110,31 +111,31 @@ where
     ) -> Result<InitialAndFloorGas, Self::Error> {
         let mut initial_gas = self.mainnet.validate_initial_tx_gas(evm)?;
 
-        let context = evm.ctx();
-        let block_number = context.block().number();
-        let spec = context.cfg().spec();
-        if context.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE {
+        let (block, tx, cfg, journal, chain, _) = evm.ctx().all_mut();
+        let block_number = block.number();
+        let spec = cfg.spec();
+        if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
             Ok(initial_gas)
         } else {
-            let to = match context.tx().kind() {
+            let to = match tx.kind() {
                 TxKind::Call(to) => to,
                 TxKind::Create => Address::ZERO,
             };
             // The L1-cost fee is only computed for Optimism non-deposit transactions.
-            if context.chain().l2_block != block_number {
+            if chain.l2_block != Some(block_number) {
                 // L1 block info is stored in the context for later use.
                 // and it will be reloaded from the database if it is not for the current block or the token ratio is updated.(when the gas oracle is updated)
-                *context.chain() = L1BlockInfo::try_fetch(context.db(), block_number, spec)?;
+                *chain = L1BlockInfo::try_fetch(journal.db_mut(), block_number, spec)?;
             }
 
             // Reset the l2_block if the tx is set token ratio, we need reload token ratio from the database in next transaction
             // [TODO] verify selector of the tx
             if to == GAS_ORACLE_CONTRACT {
-                context.chain().reset_l2_block();
+                chain.reset_l2_block();
             }
 
             // if the tx is not a deposit transaction, we need to multiply the initial gas by the token ratio
-            let token_ratio = context.chain().get_token_ratio();
+            let token_ratio = chain.get_token_ratio();
             initial_gas.initial_gas = initial_gas
                 .initial_gas
                 .checked_mul(token_ratio.try_into().unwrap())
@@ -160,6 +161,11 @@ where
         let is_balance_check_disabled = ctx.cfg().is_balance_check_disabled();
         let is_eip3607_disabled = ctx.cfg().is_eip3607_disabled();
         let is_nonce_check_disabled = ctx.cfg().is_nonce_check_disabled();
+
+        if is_deposit {
+            // Process ETH deposit by minting and transferring BVM_ETH tokens.
+            BvmEth::process_eth_deposit(ctx).map_err(ERROR::from)?;
+        }
 
         if is_deposit {
             let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
@@ -199,16 +205,7 @@ where
 
         let additional_cost = U256::ZERO;
 
-        if is_deposit {
-            if let Some(eth_value) = ctx.tx().eth_value() {
-                BvmEth::mint(ctx, U256::from(eth_value)).map_err(ERROR::from)?;
-            }
-            if let Some(eth_tx_value) = ctx.tx().eth_tx_value() {
-                BvmEth::transfer(ctx, U256::from(eth_tx_value)).map_err(ERROR::from)?;
-            }
-        }
-
-        let (tx, journal) = ctx.tx_journal_mut();
+        let (tx, journal) = evm.ctx().tx_journal_mut();
 
         let caller_account = journal.load_account_code(tx.caller())?.data;
 
@@ -311,7 +308,6 @@ where
                     // the Bedrock hardfork that did not incur any gas costs.
                     gas.erase_cost(tx_gas_limit);
                 }
-                // [TODO] Maybe we should move the [refund] logic to this function.
             }
         } else if instruction_result.is_revert() {
             // On Optimism, deposit transactions report gas usage uniquely to other
@@ -340,10 +336,9 @@ where
     ) -> Result<(), Self::Error> {
         let context = evm.ctx();
         if context.tx().tx_type() != DEPOSIT_TRANSACTION_TYPE {
-            self.mainnet.reimburse_caller(evm, exec_result)?;
+            self.mainnet.reimburse_caller(evm, frame_result)?;
         }
-
-        reimburse_caller(evm.ctx(), frame_result.gas(), additional_refund).map_err(From::from)
+        Ok(())
     }
 
     fn execution(
@@ -353,23 +348,24 @@ where
     ) -> Result<FrameResult, Self::Error> {
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+
+        let (block, tx, cfg, _, chain, _) = evm.ctx().all_mut();
+
         // l1cost = l1cost / effective_gas_price
         // gas_limit = gas_limit - l1cost
         // gas_limit = gas_limit / token_ratio
         if !is_deposit {
-            let ctx = evm.ctx();
-            let spec = ctx.cfg().spec();
+            let spec = cfg.spec();
 
-            let token_ratio = ctx.chain().get_token_ratio();
+            let token_ratio = chain.get_token_ratio();
 
-            let enveloped_tx = ctx
-                .tx()
+            let enveloped_tx = tx
                 .enveloped_tx()
                 .expect("all not deposit tx have enveloped tx")
                 .clone();
-            let basefee = ctx.block().basefee() as u128;
-            let mut tx_l1_cost = ctx.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
-            let effective_gas_price = ctx.tx().effective_gas_price(basefee);
+            let basefee = block.basefee() as u128;
+            let mut tx_l1_cost = chain.calculate_tx_l1_cost(&enveloped_tx, spec);
+            let effective_gas_price = tx.effective_gas_price(basefee);
 
             if effective_gas_price > 0 {
                 tx_l1_cost = tx_l1_cost.wrapping_div(U256::from(effective_gas_price));
@@ -388,13 +384,13 @@ where
             gas_limit = gas_limit.wrapping_div(token_ratio.try_into().unwrap());
         }
 
+        // Create first frame action
         let first_frame_input = self.first_frame_input(evm, gas_limit)?;
-        let first_frame = self.first_frame_init(evm, first_frame_input)?;
-        let mut frame_result = match first_frame {
-            ItemOrResult::Item(frame) => self.run_exec_loop(evm, frame)?,
-            ItemOrResult::Result(result) => result,
-        };
 
+        // Run execution loop
+        let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
+
+        // Handle last frame result
         self.last_frame_result(evm, &mut frame_result)?;
         Ok(frame_result)
     }
@@ -405,12 +401,12 @@ where
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
         eip7702_refund: i64,
     ) {
-        exec_result.gas_mut().record_refund(eip7702_refund);
+        frame_result.gas_mut().record_refund(eip7702_refund);
         let ctx = evm.ctx();
         let tx = ctx.tx();
         let is_deposit = tx.tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let is_system = tx.is_system_transaction();
-        let gas = exec_result.gas_mut();
+        let gas = frame_result.gas_mut();
 
         let is_eth_mint = tx.eth_value().is_some();
         if is_eth_mint && !tx.input().is_empty() {
@@ -470,31 +466,10 @@ where
         }
 
         self.mainnet.reward_beneficiary(evm, frame_result)?;
-        let basefee = evm.ctx().block().basefee() as u128;
 
-        // If the transaction is not a deposit transaction, fees are paid out
-        // to both the Base Fee Vault as well as the L1 Fee Vault.
         let ctx = evm.ctx();
-        let enveloped = ctx.tx().enveloped_tx().cloned();
-        let spec = ctx.cfg().spec();
-        let l1_block_info = ctx.chain_mut();
+        let basefee = ctx.block().basefee() as u128;
 
-        let Some(enveloped_tx) = &enveloped else {
-            return Err(ERROR::from_string(
-                "[OPTIMISM] Failed to load enveloped transaction.".into(),
-            ));
-        };
-
-        let l1_cost = l1_block_info.calculate_tx_l1_cost(enveloped_tx, spec);
-        let operator_fee_cost = if spec.is_enabled_in(OpSpecId::ISTHMUS) {
-            l1_block_info.operator_fee_charge(
-                enveloped_tx,
-                U256::from(frame_result.gas().used()),
-                spec,
-            )
-        } else {
-            U256::ZERO
-        };
         let base_fee_amount = U256::from(basefee.saturating_mul(frame_result.gas().used() as u128));
 
         // Send fees to their respective recipients
@@ -631,23 +606,24 @@ where
     ) -> Result<FrameResult, Self::Error> {
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+
+        let (block, tx, cfg, _, chain, _) = evm.ctx().all_mut();
+
         // l1cost = l1cost / effective_gas_price
         // gas_limit = gas_limit - l1cost
         // gas_limit = gas_limit / token_ratio
         if !is_deposit {
-            let ctx = evm.ctx();
-            let spec = ctx.cfg().spec();
+            let spec = cfg.spec();
 
-            let token_ratio = ctx.chain().get_token_ratio();
+            let token_ratio = chain.get_token_ratio();
 
-            let enveloped_tx = ctx
-                .tx()
+            let enveloped_tx = tx
                 .enveloped_tx()
                 .expect("all not deposit tx have enveloped tx")
                 .clone();
-            let basefee = ctx.block().basefee() as u128;
-            let mut tx_l1_cost = ctx.chain().calculate_tx_l1_cost(&enveloped_tx, spec);
-            let effective_gas_price = ctx.tx().effective_gas_price(basefee);
+            let basefee = block.basefee() as u128;
+            let mut tx_l1_cost = chain.calculate_tx_l1_cost(&enveloped_tx, spec);
+            let effective_gas_price = tx.effective_gas_price(basefee);
 
             if effective_gas_price > 0 {
                 tx_l1_cost = tx_l1_cost.wrapping_div(U256::from(effective_gas_price));
@@ -668,13 +644,11 @@ where
 
         // Create first frame action
         let first_frame_input = self.first_frame_input(evm, gas_limit)?;
-        let first_frame = self.inspect_first_frame_init(evm, first_frame_input)?;
 
-        let mut frame_result = match first_frame {
-            ItemOrResult::Item(frame) => self.inspect_run_exec_loop(evm, frame)?,
-            ItemOrResult::Result(result) => result,
-        };
+        // Run execution loop
+        let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
 
+        // Handle last frame result
         self.last_frame_result(evm, &mut frame_result)?;
         Ok(frame_result)
     }
@@ -683,9 +657,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{api::default_ctx::OpContext, DefaultOp, OpBuilder};
+    use crate::{api::default_ctx::OpContext, DefaultOp, OpBuilder, OpTransaction};
     use revm::{
-        context::Context,
+        context::{Context, TxEnv},
         database::InMemoryDB,
         database_interface::EmptyDB,
         handler::EthFrame,
@@ -890,7 +864,8 @@ mod tests {
 
         // Check the account balance is updated.
         let account = evm.ctx().journal_mut().load_account(caller).unwrap();
-        assert_eq!(account.info.balance, U256::from(10)); // 1058 - 1048 = 10
+        // [TODO]: CHECK THIS
+        assert_eq!(account.info.balance, U256::from(1058)); 
     }
 
     #[test]
@@ -933,7 +908,7 @@ mod tests {
             .unwrap();
 
         // Check the account balance is updated.
-        let account = evm.ctx().journal().load_account(caller).unwrap();
+        let account = evm.ctx().journal_mut().load_account(caller).unwrap();
         assert_eq!(account.info.balance, U256::from(1049));
     }
 

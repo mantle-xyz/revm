@@ -2,13 +2,17 @@
 use crate::{
     constants::{
         GAS_ORACLE_CONTRACT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT, L1_SCALAR_SLOT,
-        NON_ZERO_BYTE_COST, TOKEN_RATIO_SLOT, ZERO_BYTE_COST,
+        TOKEN_RATIO_SLOT,
     },
     OpSpecId,
 };
-use core::ops::Mul;
-use revm::{database_interface::Database, primitives::hardfork::SpecId, primitives::U256};
-
+use revm::{
+    database_interface::Database,
+    interpreter::{
+        gas::{get_tokens_in_calldata, NON_ZERO_BYTE_MULTIPLIER_ISTANBUL, STANDARD_TOKEN_COST},
+    },
+    primitives::{hardfork::SpecId, U256},
+};
 /// L1 block info
 ///
 /// We can extract L1 epoch data from each L2 block, by looking at the `setL1BlockValues`
@@ -38,75 +42,6 @@ pub struct L1BlockInfo {
 }
 
 impl L1BlockInfo {
-    /// Try to fetch the L1 block info from the database, post-Jovian.
-    fn try_fetch_jovian<DB: Database>(&mut self, db: &mut DB) -> Result<(), DB::Error> {
-        let da_footprint_gas_scalar_slot = db
-            .storage(L1_BLOCK_CONTRACT, DA_FOOTPRINT_GAS_SCALAR_SLOT)?
-            .to_be_bytes::<32>();
-
-        // Extract the first 2 bytes directly as a u16 in big-endian format
-        let bytes = [
-            da_footprint_gas_scalar_slot[DA_FOOTPRINT_GAS_SCALAR_OFFSET],
-            da_footprint_gas_scalar_slot[DA_FOOTPRINT_GAS_SCALAR_OFFSET + 1],
-        ];
-        self.da_footprint_gas_scalar = Some(u16::from_be_bytes(bytes));
-
-        Ok(())
-    }
-
-    /// Try to fetch the L1 block info from the database, post-Isthmus.
-    fn try_fetch_isthmus<DB: Database>(&mut self, db: &mut DB) -> Result<(), DB::Error> {
-        // Post-isthmus L1 block info
-        let operator_fee_scalars = db
-            .storage(L1_BLOCK_CONTRACT, OPERATOR_FEE_SCALARS_SLOT)?
-            .to_be_bytes::<32>();
-
-        // The `operator_fee_scalar` is stored as a big endian u32 at
-        // OPERATOR_FEE_SCALAR_OFFSET.
-        self.operator_fee_scalar = Some(U256::from_be_slice(
-            operator_fee_scalars[OPERATOR_FEE_SCALAR_OFFSET..OPERATOR_FEE_SCALAR_OFFSET + 4]
-                .as_ref(),
-        ));
-        // The `operator_fee_constant` is stored as a big endian u64 at
-        // OPERATOR_FEE_CONSTANT_OFFSET.
-        self.operator_fee_constant = Some(U256::from_be_slice(
-            operator_fee_scalars[OPERATOR_FEE_CONSTANT_OFFSET..OPERATOR_FEE_CONSTANT_OFFSET + 8]
-                .as_ref(),
-        ));
-
-        Ok(())
-    }
-
-    /// Try to fetch the L1 block info from the database, post-Ecotone.
-    fn try_fetch_ecotone<DB: Database>(&mut self, db: &mut DB) -> Result<(), DB::Error> {
-        self.l1_blob_base_fee = Some(db.storage(L1_BLOCK_CONTRACT, ECOTONE_L1_BLOB_BASE_FEE_SLOT)?);
-
-        let l1_fee_scalars = db
-            .storage(L1_BLOCK_CONTRACT, ECOTONE_L1_FEE_SCALARS_SLOT)?
-            .to_be_bytes::<32>();
-
-        self.l1_base_fee_scalar = U256::from_be_slice(
-            l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BASE_FEE_SCALAR_OFFSET + 4].as_ref(),
-        );
-
-        let l1_blob_base_fee = U256::from_be_slice(
-            l1_fee_scalars[BLOB_BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4].as_ref(),
-        );
-        self.l1_blob_base_fee_scalar = Some(l1_blob_base_fee);
-
-        // Check if the L1 fee scalars are empty. If so, we use the Bedrock cost function.
-        // The L1 fee overhead is only necessary if `empty_ecotone_scalars` is true, as it was deprecated in Ecotone.
-        self.empty_ecotone_scalars = l1_blob_base_fee.is_zero()
-            && l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4]
-                == EMPTY_SCALARS;
-        self.l1_fee_overhead = self
-            .empty_ecotone_scalars
-            .then(|| db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT))
-            .transpose()?;
-
-        Ok(())
-    }
-
     /// Try to fetch the L1 block info from the database.
     pub fn try_fetch<DB: Database>(
         db: &mut DB,
@@ -127,7 +62,7 @@ impl L1BlockInfo {
         let l1_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
 
         Ok(L1BlockInfo {
-            l2_block,
+            l2_block:Some(l2_block),
             l1_base_fee,
             l1_fee_overhead: Some(l1_fee_overhead),
             l1_base_fee_scalar: l1_fee_scalar,
@@ -144,13 +79,8 @@ impl L1BlockInfo {
     /// Prior to regolith, an extra 68 non-zero bytes were included in the rollup data costs to
     /// account for the empty signature.
     pub fn data_gas(&self, input: &[u8], spec_id: OpSpecId) -> U256 {
-        let mut rollup_data_gas_cost = U256::from(input.iter().fold(0, |acc, byte| {
-            acc + if *byte == 0x00 {
-                ZERO_BYTE_COST
-            } else {
-                NON_ZERO_BYTE_COST
-            }
-        }));
+        // tokens in calldata where non-zero bytes are priced 4 times higher than zero bytes (Same as in Istanbul).
+        let mut tokens_in_transaction_data = get_tokens_in_calldata(input, true);
 
         // Prior to regolith, an extra 68 non zero bytes were included in the rollup data costs.
         if !spec_id.is_enabled_in(OpSpecId::REGOLITH) {
@@ -194,12 +124,15 @@ impl L1BlockInfo {
 
     /// Get the token ratio. If the token ratio is not set, return 1.
     pub fn get_token_ratio(&self) -> U256 {
-        self.token_ratio.unwrap_or(U256::from(1))
+        match self.token_ratio {
+            Some(ratio) if ratio > U256::from(0) => ratio,
+            _ => U256::from(1),
+        }
     }
 
     /// Reset the l2_block to u64::MAX.
     pub fn reset_l2_block(&mut self) {
-        self.l2_block = u64::MAX;
+        self.l2_block = None
     }
 }
 
@@ -375,10 +308,10 @@ mod tests {
     #[test]
     fn test_reset_l2_block() {
         let mut l1_block_info = L1BlockInfo {
-            l2_block: 1,
+            l2_block: Some(U256::from(1)),
             ..Default::default()
         };
         l1_block_info.reset_l2_block();
-        assert_eq!(l1_block_info.l2_block, u64::MAX);
+        assert_eq!(l1_block_info.l2_block, None);
     }
 }

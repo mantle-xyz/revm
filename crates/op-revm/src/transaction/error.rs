@@ -84,10 +84,15 @@ impl<DBError> From<OpTransactionError> for EVMError<DBError, OpTransactionError>
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+/// BVM ETH operation errors
 pub enum BvmEthError {
+    /// EthTxValueTooLarge means that the eth tx value is too large.
     EthTxValueTooLarge,
+    /// NonceOverflow means that the nonce overflow.
     NonceOverflow,
+    /// DBError means that the database error.
     DBError(String),
+    /// InsufficientFunds means that the insufficient BVM ETH funds.
     InsufficientFunds,
 }
 
@@ -118,6 +123,7 @@ impl<DBError> From<BvmEthError> for EVMError<DBError, OpTransactionError> {
     }
 }
 
+/// Convert a database error to a BVM ETH operation error
 pub fn db_error<E: Display>(error: E) -> OpTransactionError {
     OpTransactionError::BvmEth(BvmEthError::DBError(error.to_string()))
 }

@@ -14,9 +14,9 @@ pub struct DepositTransactionParts {
     pub mint: Option<u128>,
     /// Whether the transaction is a system transaction.
     pub is_system_transaction: bool,
-    // EthValue means L2 BVM_ETH mint tag, nil means that there is no need to mint BVM_ETH.
+    /// EthValue means L2 BVM_ETH mint tag, nil means that there is no need to mint BVM_ETH.
     pub eth_value: Option<u128>,
-    // EthTxValue means L2 BVM_ETH tx tag, nil means that there is no need to transfer BVM_ETH to msg.To.
+    /// EthTxValue means L2 BVM_ETH tx tag, nil means that there is no need to transfer BVM_ETH to msg.To.
     pub eth_tx_value: Option<u128>,
 }
 
