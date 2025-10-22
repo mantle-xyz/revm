@@ -84,7 +84,7 @@ async fn process_block(
         })
         .modify_cfg_chained(|c| {
             c.chain_id = chain_id;
-            c.spec = OpSpecId::HOLOCENE;
+            c.spec = OpSpecId::ISTHMUS;
         });
 
     let mut evm = ctx.build_op();
