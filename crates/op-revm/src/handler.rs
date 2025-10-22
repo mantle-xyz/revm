@@ -865,7 +865,7 @@ mod tests {
         // Check the account balance is updated.
         let account = evm.ctx().journal_mut().load_account(caller).unwrap();
         // [TODO]: CHECK THIS
-        assert_eq!(account.info.balance, U256::from(1058)); 
+        assert_eq!(account.info.balance, U256::from(1058));
     }
 
     #[test]

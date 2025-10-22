@@ -3,9 +3,9 @@
 //! The EIP3155 trace of each transaction is saved into file `traces/{tx_number}.json`.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use alloy_consensus::{TxEip1559, TxEip2930, TxEip7702, TxLegacy};
+use alloy_consensus::{transaction::SignerRecoverable, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
 use alloy_eips::{BlockId, Decodable2718, Typed2718};
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
 use dotenv::dotenv;
 use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
@@ -34,11 +34,11 @@ async fn main() -> anyhow::Result<()> {
     let rpc_url = mantle_url.parse()?;
 
     // Create a provider
-    let client = ProviderBuilder::<_, _, Optimism>::default().on_http(rpc_url);
+    let client = ProviderBuilder::<_, _, Optimism>::default().connect_http(rpc_url);
 
     // Params
     let chain_id: u64 = 561113;
-    let start_block = 	1538105;
+    let start_block = 1538105;
     let end_block = 1538105;
 
     for i in start_block..=end_block {
@@ -109,7 +109,7 @@ async fn process_block(
             .await
             .expect("Block not found");
         let tx = OpTxEnvelope::decode_2718(&mut raw_tx.as_ref()).unwrap();
-
+        
         let optx = prepare_tx_env(&tx, tx.recover_signer().unwrap(), raw_tx);
         evm.0.modify_tx(|etx| {
             *etx = optx;
@@ -131,9 +131,7 @@ async fn process_block(
             .gas_used;
 
         let actual_gas_used = res.unwrap().gas_used();
-        println!(
-            "Expected gas used: {expected_gas_used}, Actual gas used: {actual_gas_used}"
-        );
+        println!("Expected gas used: {expected_gas_used}, Actual gas used: {actual_gas_used}");
         if expected_gas_used == actual_gas_used {
             println!("--- passed✅");
         } else {
@@ -150,6 +148,7 @@ async fn process_block(
     Ok(())
 }
 
+/// Prepare the transaction environment for the given transaction.
 pub fn prepare_tx_env(tx: &OpTxEnvelope, caller: Address, encoded: Bytes) -> OpTransaction<TxEnv> {
     let base = match tx {
         OpTxEnvelope::Legacy(tx) => tx.tx().to_tx_env(caller),
@@ -184,9 +183,9 @@ pub fn prepare_tx_env(tx: &OpTxEnvelope, caller: Address, encoded: Bytes) -> OpT
     let deposit = if let OpTxEnvelope::Deposit(tx) = tx {
         DepositTransactionParts {
             source_hash: tx.source_hash,
-            mint: tx.mint,
+            mint: Some(tx.mint),
             is_system_transaction: tx.is_system_transaction,
-            eth_value: tx.eth_value,
+            eth_value: Some(tx.eth_value),
             eth_tx_value: tx.eth_tx_value,
         }
     } else {

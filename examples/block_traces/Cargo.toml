@@ -31,10 +31,10 @@ alloy-provider = { workspace = true, default-features = true }
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 
-op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v141", default-features = false, features = [
+op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v210", default-features = false, features = [
     "k256",
 ] }
-op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v141", default-features = false }
+op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v210", default-features = false }
 
 
 # misc
