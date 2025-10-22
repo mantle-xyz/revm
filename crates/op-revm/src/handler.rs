@@ -203,6 +203,8 @@ where
             return Ok(());
         }
 
+        // [MANTLE] Different from optimism, there is no need to calculate L1COST here. 
+        // L1 cost requires introducing token_ratio and should be calculated in execute().
         let additional_cost = U256::ZERO;
 
         let (tx, journal) = evm.ctx().tx_journal_mut();

@@ -289,7 +289,7 @@ impl<SPEC: Into<SpecId> + Copy> Cfg for CfgEnv<SPEC> {
 
     #[inline]
     fn tx_gas_limit_cap(&self) -> u64 {
-        // [mantle] disable tx gas limit cap for EIP-7825
+        // [MANTLE] disable tx gas limit cap for EIP-7825
         self.tx_gas_limit_cap.unwrap_or(u64::MAX)
     }
 
