@@ -407,10 +407,11 @@ where
         let is_deposit = tx.tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let is_system = tx.is_system_transaction();
         let gas = frame_result.gas_mut();
-
-        let is_eth_mint = tx.eth_value().is_some();
-        if is_eth_mint && !tx.input().is_empty() {
-            gas.set_remaining(gas.remaining().saturating_sub(4500));
+        
+        if let Some(eth_value) = tx.eth_value() {
+            if eth_value != 0 && !tx.input().is_empty() {
+                gas.set_remaining(gas.remaining().saturating_sub(4500));
+            }
         }
 
         let limit = gas.limit();
@@ -560,7 +561,7 @@ where
                 .journal_mut()
                 .caller_accounting_journal_entry(caller, old_balance, true);
 
-            // TODO: Persist BVM_ETH mint for failed deposit like op-geth (pre-snapshot effect).
+            // [TODO]: Persist BVM_ETH mint for failed deposit like op-geth (pre-snapshot effect).
 
             // The gas used of a failed deposit post-regolith is the gas
             // limit of the transaction. pre-regolith, it is the gas limit
@@ -646,7 +647,7 @@ where
         let first_frame_input = self.first_frame_input(evm, gas_limit)?;
 
         // Run execution loop
-        let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
+        let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
 
         // Handle last frame result
         self.last_frame_result(evm, &mut frame_result)?;

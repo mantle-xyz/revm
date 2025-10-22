@@ -31,15 +31,15 @@ async fn main() -> anyhow::Result<()> {
     // Set up the HTTP transport which is consumed by the RPC client.
     dotenv().ok();
     let mantle_url = std::env::var("MANTLE_URL").unwrap();
+    let chain_id = std::env::var("CHAIN_ID").unwrap().parse()?;
     let rpc_url = mantle_url.parse()?;
 
     // Create a provider
     let client = ProviderBuilder::<_, _, Optimism>::default().connect_http(rpc_url);
 
     // Params
-    let chain_id: u64 = 561113;
-    let start_block = 1538105;
-    let end_block = 1538105;
+    let start_block = 86486915;
+    let end_block = 86486917;
 
     for i in start_block..=end_block {
         println!("Processing block number: {i}");
@@ -115,6 +115,9 @@ async fn process_block(
             *etx = optx;
         });
 
+        let is_deposit = tx.is_deposit();
+        println!("is_deposit: {is_deposit}");
+        
         let res = evm.replay_commit();
 
         if let Err(ref res) = res {
