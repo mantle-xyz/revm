@@ -1,9 +1,12 @@
 //! Contains the `[BvmEth]` type and its implementation.
-//! 
+//!
 //! BVM_ETH is an ERC20 token that represents ETH on the Mantle network.
 //! Since MNT is the native token of Mantle, ETH needs to be wrapped as an ERC20 token (BVM_ETH) for proper handling.
 use crate::api::exec::OpContextTr;
-use crate::transaction::{error::{db_error, BvmEthError, OpTransactionError}, OpTxTr};
+use crate::transaction::{
+    error::{db_error, BvmEthError, OpTransactionError},
+    OpTxTr,
+};
 use alloy_sol_types::SolValue;
 use revm::{
     context::{JournalTr, Transaction},
@@ -14,7 +17,7 @@ use revm::{
 use std::vec;
 
 /// BVM_ETH ERC20 token implementation.
-/// 
+///
 /// BVM_ETH is an ERC20 token that represents ETH on the Mantle network.
 /// It allows users to hold and transfer ETH as an ERC20 token, since MNT is the native token of Mantle.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -47,18 +50,13 @@ impl BvmEth {
 
     /// Mint BVM_ETH ERC20 tokens for a given context and amount.
     /// This is called when ETH is deposited and needs to be represented as BVM_ETH tokens.
-    pub fn mint<CTX>(
-        context: &mut CTX,
-        eth_value: U256,
-    ) -> Result<(), OpTransactionError>
+    pub fn mint<CTX>(context: &mut CTX, eth_value: U256) -> Result<(), OpTransactionError>
     where
         CTX: OpContextTr,
     {
         let (_, tx, _, journal, _, _) = context.all_mut();
-        
-        journal
-            .load_account(Self::ADDRESS)
-            .map_err(db_error)?;
+
+        journal.load_account(Self::ADDRESS).map_err(db_error)?;
 
         let from = tx.caller();
         Self::mint_inner(journal, tx, from, eth_value)?;
@@ -69,18 +67,13 @@ impl BvmEth {
 
     /// Transfer BVM_ETH ERC20 tokens for a given context and amount.
     /// This is called when ETH needs to be transferred between accounts as BVM_ETH tokens.
-    pub fn transfer<CTX>(
-        context: &mut CTX,
-        eth_value: U256,
-    ) -> Result<(), OpTransactionError>
+    pub fn transfer<CTX>(context: &mut CTX, eth_value: U256) -> Result<(), OpTransactionError>
     where
         CTX: OpContextTr,
     {
         let (_, tx, _, journal, _, _) = context.all_mut();
-        
-        journal
-            .load_account(Self::ADDRESS)
-            .map_err(db_error)?;
+
+        journal.load_account(Self::ADDRESS).map_err(db_error)?;
 
         Self::transfer_inner(journal, tx, eth_value)?;
 
@@ -90,17 +83,13 @@ impl BvmEth {
 
     /// Process ETH deposit by minting and transferring BVM_ETH tokens.
     /// This handles the conversion of ETH deposits into BVM_ETH ERC20 tokens.
-    pub fn process_eth_deposit<CTX>(
-        context: &mut CTX,
-    ) -> Result<(), OpTransactionError>
+    pub fn process_eth_deposit<CTX>(context: &mut CTX) -> Result<(), OpTransactionError>
     where
         CTX: OpContextTr,
     {
         let (_, tx, _, journal, _, _) = context.all_mut();
-        
-        journal
-            .load_account(Self::ADDRESS)
-            .map_err(db_error)?;
+
+        journal.load_account(Self::ADDRESS).map_err(db_error)?;
 
         // Handle mint if eth_value is present in the transaction
         if let Some(eth_value) = tx.eth_value() {
@@ -185,10 +174,7 @@ impl BvmEth {
         J: JournalTr,
     {
         let slot = Self::get_balance_slot(account);
-        let balance = journal
-            .sload(Self::ADDRESS, slot)
-            .map_err(db_error)?
-            .data;
+        let balance = journal.sload(Self::ADDRESS, slot).map_err(db_error)?.data;
 
         Ok(balance)
     }

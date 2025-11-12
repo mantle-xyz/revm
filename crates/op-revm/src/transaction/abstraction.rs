@@ -216,7 +216,7 @@ impl<T: Transaction> OpTxTr for OpTransaction<T> {
     }
 
     fn eth_value(&self) -> Option<u128> {
-        self.deposit.eth_value
+        self.deposit.eth_value.filter(|&v| v != 0)
     }
 
     fn eth_tx_value(&self) -> Option<u128> {

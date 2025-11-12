@@ -410,10 +410,8 @@ where
         let is_system = tx.is_system_transaction();
         let gas = frame_result.gas_mut();
         
-        if let Some(eth_value) = tx.eth_value() {
-            if eth_value != 0 && !tx.input().is_empty() {
-                gas.set_remaining(gas.remaining().saturating_sub(4500));
-            }
+        if tx.eth_value().is_some() && !tx.input().is_empty() {
+            gas.set_remaining(gas.remaining().saturating_sub(4500));
         }
 
         let limit = gas.limit();
