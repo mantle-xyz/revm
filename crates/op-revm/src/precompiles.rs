@@ -28,15 +28,16 @@ impl OpPrecompiles {
     #[inline]
     pub fn new_with_spec(spec: OpSpecId) -> Self {
         let precompiles = match spec {
+            // [mantle] add osaka to the list of specs that use the osaka precompiles
             spec @ (OpSpecId::BEDROCK
             | OpSpecId::REGOLITH
             | OpSpecId::CANYON
-            | OpSpecId::ECOTONE) => Precompiles::new(spec.into_eth_spec().into()),
+            | OpSpecId::ECOTONE
+            | OpSpecId::OSAKA) => Precompiles::new(spec.into_eth_spec().into()),
             OpSpecId::FJORD => fjord(),
             OpSpecId::GRANITE | OpSpecId::HOLOCENE => granite(),
-            OpSpecId::ISTHMUS | OpSpecId::INTEROP | OpSpecId::OSAKA | OpSpecId::JOVIAN => isthmus(),
+            OpSpecId::ISTHMUS | OpSpecId::INTEROP | OpSpecId::JOVIAN => isthmus(),
         };
-
         Self {
             inner: EthPrecompiles {
                 precompiles,
