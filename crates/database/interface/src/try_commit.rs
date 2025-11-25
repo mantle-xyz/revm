@@ -1,3 +1,4 @@
+//! Try database commit interface.
 use crate::DatabaseCommit;
 use core::{convert::Infallible, error::Error, fmt};
 use primitives::{Address, HashMap};
@@ -45,7 +46,7 @@ impl Error for ArcUpgradeError {}
 
 impl<Db> TryDatabaseCommit for Arc<Db>
 where
-    Db: DatabaseCommit + Send + Sync,
+    Db: DatabaseCommit,
 {
     type Error = ArcUpgradeError;
 

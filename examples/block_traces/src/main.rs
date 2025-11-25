@@ -1,9 +1,11 @@
-//! Optimism-specific constants, types, and helpers.
+//! Example that show how to replay a block and trace the execution of each transaction.
+//!
+//! The EIP3155 trace of each transaction is saved into file `traces/{tx_number}.json`.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use alloy_consensus::{TxEip1559, TxEip2930, TxEip7702, TxLegacy};
+use alloy_consensus::{transaction::SignerRecoverable, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
 use alloy_eips::{BlockId, Decodable2718, Typed2718};
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
 use dotenv::dotenv;
 use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
@@ -29,15 +31,15 @@ async fn main() -> anyhow::Result<()> {
     // Set up the HTTP transport which is consumed by the RPC client.
     dotenv().ok();
     let mantle_url = std::env::var("MANTLE_URL").unwrap();
+    let chain_id = std::env::var("CHAIN_ID").unwrap().parse()?;
     let rpc_url = mantle_url.parse()?;
 
     // Create a provider
-    let client = ProviderBuilder::<_, _, Optimism>::default().on_http(rpc_url);
+    let client = ProviderBuilder::<_, _, Optimism>::default().connect_http(rpc_url);
 
     // Params
-    let chain_id: u64 = 561113;
-    let start_block = 	1538105;
-    let end_block = 1538105;
+    let start_block = 86486915;
+    let end_block = 86486917;
 
     for i in start_block..=end_block {
         println!("Processing block number: {i}");
@@ -72,9 +74,9 @@ async fn process_block(
     let ctx = Context::op()
         .with_db(&mut state)
         .modify_block_chained(|b| {
-            b.number = block.header.number;
+            b.number = U256::from(block.header.number);
             b.beneficiary = block.header.beneficiary;
-            b.timestamp = block.header.timestamp;
+            b.timestamp = U256::from(block.header.timestamp);
 
             b.difficulty = block.header.difficulty;
             b.gas_limit = block.header.gas_limit;
@@ -82,7 +84,7 @@ async fn process_block(
         })
         .modify_cfg_chained(|c| {
             c.chain_id = chain_id;
-            c.spec = OpSpecId::HOLOCENE;
+            c.spec = OpSpecId::ISTHMUS;
         });
 
     let mut evm = ctx.build_op();
@@ -107,12 +109,15 @@ async fn process_block(
             .await
             .expect("Block not found");
         let tx = OpTxEnvelope::decode_2718(&mut raw_tx.as_ref()).unwrap();
-
+        
         let optx = prepare_tx_env(&tx, tx.recover_signer().unwrap(), raw_tx);
         evm.0.modify_tx(|etx| {
             *etx = optx;
         });
 
+        let is_deposit = tx.is_deposit();
+        println!("is_deposit: {is_deposit}");
+        
         let res = evm.replay_commit();
 
         if let Err(ref res) = res {
@@ -129,9 +134,7 @@ async fn process_block(
             .gas_used;
 
         let actual_gas_used = res.unwrap().gas_used();
-        println!(
-            "Expected gas used: {expected_gas_used}, Actual gas used: {actual_gas_used}"
-        );
+        println!("Expected gas used: {expected_gas_used}, Actual gas used: {actual_gas_used}");
         if expected_gas_used == actual_gas_used {
             println!("--- passed✅");
         } else {
@@ -148,6 +151,7 @@ async fn process_block(
     Ok(())
 }
 
+/// Prepare the transaction environment for the given transaction.
 pub fn prepare_tx_env(tx: &OpTxEnvelope, caller: Address, encoded: Bytes) -> OpTransaction<TxEnv> {
     let base = match tx {
         OpTxEnvelope::Legacy(tx) => tx.tx().to_tx_env(caller),
@@ -182,9 +186,9 @@ pub fn prepare_tx_env(tx: &OpTxEnvelope, caller: Address, encoded: Bytes) -> OpT
     let deposit = if let OpTxEnvelope::Deposit(tx) = tx {
         DepositTransactionParts {
             source_hash: tx.source_hash,
-            mint: tx.mint,
+            mint: Some(tx.mint),
             is_system_transaction: tx.is_system_transaction,
-            eth_value: tx.eth_value,
+            eth_value: Some(tx.eth_value),
             eth_tx_value: tx.eth_tx_value,
         }
     } else {

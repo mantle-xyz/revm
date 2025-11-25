@@ -1,4 +1,4 @@
-//! Optimism-specific constants, types, and helpers.
+//! Database interface.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -9,12 +9,28 @@ use core::convert::Infallible;
 
 use auto_impl::auto_impl;
 use core::error::Error;
-use primitives::{Address, HashMap, B256, U256};
+use primitives::{address, Address, HashMap, StorageKey, StorageValue, B256, U256};
 use state::{Account, AccountInfo, Bytecode};
 use std::string::String;
 
+/// Address with all `0xff..ff` in it. Used for testing.
+pub const FFADDRESS: Address = address!("0xffffffffffffffffffffffffffffffffffffffff");
+/// BENCH_TARGET address
+pub const BENCH_TARGET: Address = FFADDRESS;
+/// Common test balance used for benchmark addresses
+pub const TEST_BALANCE: U256 = U256::from_limbs([10_000_000_000_000_000, 0, 0, 0]);
+/// BENCH_TARGET_BALANCE balance
+pub const BENCH_TARGET_BALANCE: U256 = TEST_BALANCE;
+/// Address with all `0xee..ee` in it. Used for testing.
+pub const EEADDRESS: Address = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+/// BENCH_CALLER address
+pub const BENCH_CALLER: Address = EEADDRESS;
+/// BENCH_CALLER_BALANCE balance
+pub const BENCH_CALLER_BALANCE: U256 = TEST_BALANCE;
+
 #[cfg(feature = "asyncdb")]
 pub mod async_db;
+pub mod either;
 pub mod empty_db;
 pub mod try_commit;
 
@@ -44,7 +60,8 @@ pub trait Database {
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error>;
 
     /// Gets storage value of address at index.
-    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error>;
+    fn storage(&mut self, address: Address, index: StorageKey)
+        -> Result<StorageValue, Self::Error>;
 
     /// Gets block hash by block number.
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error>;
@@ -75,7 +92,8 @@ pub trait DatabaseRef {
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error>;
 
     /// Gets storage value of address at index.
-    fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error>;
+    fn storage_ref(&self, address: Address, index: StorageKey)
+        -> Result<StorageValue, Self::Error>;
 
     /// Gets block hash by block number.
     fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error>;
@@ -106,7 +124,11 @@ impl<T: DatabaseRef> Database for WrapDatabaseRef<T> {
     }
 
     #[inline]
-    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+    fn storage(
+        &mut self,
+        address: Address,
+        index: StorageKey,
+    ) -> Result<StorageValue, Self::Error> {
         self.0.storage_ref(address, index)
     }
 
@@ -120,5 +142,33 @@ impl<T: DatabaseRef + DatabaseCommit> DatabaseCommit for WrapDatabaseRef<T> {
     #[inline]
     fn commit(&mut self, changes: HashMap<Address, Account>) {
         self.0.commit(changes)
+    }
+}
+
+impl<T: DatabaseRef> DatabaseRef for WrapDatabaseRef<T> {
+    type Error = T::Error;
+
+    #[inline]
+    fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        self.0.basic_ref(address)
+    }
+
+    #[inline]
+    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        self.0.code_by_hash_ref(code_hash)
+    }
+
+    #[inline]
+    fn storage_ref(
+        &self,
+        address: Address,
+        index: StorageKey,
+    ) -> Result<StorageValue, Self::Error> {
+        self.0.storage_ref(address, index)
+    }
+
+    #[inline]
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        self.0.block_hash_ref(number)
     }
 }

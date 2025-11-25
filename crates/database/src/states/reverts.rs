@@ -6,7 +6,7 @@ use core::{
     cmp::Ordering,
     ops::{Deref, DerefMut},
 };
-use primitives::{Address, HashMap, U256};
+use primitives::{Address, HashMap, StorageKey, StorageValue};
 use state::AccountInfo;
 use std::vec::Vec;
 
@@ -142,9 +142,13 @@ impl PartialEq for Reverts {
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AccountRevert {
+    /// Account information revert.
     pub account: AccountInfoRevert,
-    pub storage: HashMap<U256, RevertToSlot>,
+    /// Storage slots to revert.
+    pub storage: HashMap<StorageKey, RevertToSlot>,
+    /// Previous account status before the change.
     pub previous_status: AccountStatus,
+    /// Whether to wipe the storage.
     pub wipe_storage: bool,
 }
 
@@ -166,7 +170,7 @@ impl AccountRevert {
     ) -> Self {
         // Take present storage values as the storages that we are going to revert to.
         // As those values got destroyed.
-        let mut previous_storage: HashMap<U256, RevertToSlot> = previous_storage
+        let mut previous_storage: HashMap<StorageKey, RevertToSlot> = previous_storage
             .drain()
             .map(|(key, value)| (key, RevertToSlot::Some(value.present_value)))
             .collect();
@@ -313,15 +317,18 @@ pub enum AccountInfoRevert {
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RevertToSlot {
-    Some(U256),
+    /// Revert to this value.
+    Some(StorageValue),
+    /// Storage was destroyed.
     Destroyed,
 }
 
 impl RevertToSlot {
-    pub fn to_previous_value(self) -> U256 {
+    /// Returns the previous value to set on revert.
+    pub fn to_previous_value(self) -> StorageValue {
         match self {
             RevertToSlot::Some(value) => value,
-            RevertToSlot::Destroyed => U256::ZERO,
+            RevertToSlot::Destroyed => StorageValue::ZERO,
         }
     }
 }

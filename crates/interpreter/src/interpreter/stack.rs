@@ -38,9 +38,9 @@ impl Default for Stack {
 
 impl Clone for Stack {
     fn clone(&self) -> Self {
-        // Use `Self::new()` to ensure the cloned Stack maintains the STACK_LIMIT capacity,
-        // and then copy the data. This preserves the invariant that Stack always has
-        // STACK_LIMIT capacity, which is crucial for the safety and correctness of other methods.
+        // Use `Self::new()` to ensure the cloned Stack is constructed with at least
+        // STACK_LIMIT capacity, and then copy the data. This preserves the invariant
+        // that Stack has sufficient capacity for operations that rely on it.
         let mut new_stack = Self::new();
         new_stack.data.extend_from_slice(&self.data);
         new_stack
@@ -48,8 +48,19 @@ impl Clone for Stack {
 }
 
 impl StackTr for Stack {
+    #[inline]
     fn len(&self) -> usize {
         self.len()
+    }
+
+    #[inline]
+    fn data(&self) -> &[U256] {
+        &self.data
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.data.clear();
     }
 
     #[inline]
@@ -70,16 +81,24 @@ impl StackTr for Stack {
         Some(unsafe { self.popn_top::<POPN>() })
     }
 
+    #[inline]
     fn exchange(&mut self, n: usize, m: usize) -> bool {
         self.exchange(n, m)
     }
 
+    #[inline]
     fn dup(&mut self, n: usize) -> bool {
         self.dup(n)
     }
 
+    #[inline]
     fn push(&mut self, value: U256) -> bool {
         self.push(value)
+    }
+
+    #[inline]
+    fn push_slice(&mut self, slice: &[u8]) -> bool {
+        self.push_slice_(slice)
     }
 }
 
@@ -91,6 +110,12 @@ impl Stack {
             // SAFETY: Expansion functions assume that capacity is `STACK_LIMIT`.
             data: Vec::with_capacity(STACK_LIMIT),
         }
+    }
+
+    /// Instantiate a new invalid Stack.
+    #[inline]
+    pub fn invalid() -> Self {
+        Self { data: Vec::new() }
     }
 
     /// Returns the length of the stack in words.
@@ -139,6 +164,7 @@ impl Stack {
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub unsafe fn pop_unsafe(&mut self) -> U256 {
+        assume!(!self.data.is_empty());
         self.data.pop().unwrap_unchecked()
     }
 
@@ -150,8 +176,8 @@ impl Stack {
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub unsafe fn top_unsafe(&mut self) -> &mut U256 {
-        let len = self.data.len();
-        self.data.get_unchecked_mut(len - 1)
+        assume!(!self.data.is_empty());
+        self.data.last_mut().unwrap_unchecked()
     }
 
     /// Pops `N` values from the stack.
@@ -162,14 +188,8 @@ impl Stack {
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub unsafe fn popn<const N: usize>(&mut self) -> [U256; N] {
-        if N == 0 {
-            return [U256::ZERO; N];
-        }
-        let mut result = [U256::ZERO; N];
-        for v in &mut result {
-            *v = self.data.pop().unwrap_unchecked();
-        }
-        result
+        assume!(self.data.len() >= N);
+        core::array::from_fn(|_| unsafe { self.pop_unsafe() })
     }
 
     /// Pops `N` values from the stack and returns the top of the stack.
@@ -193,8 +213,8 @@ impl Stack {
     #[must_use]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn push(&mut self, value: U256) -> bool {
-        // Allows the compiler to optimize out the `Vec::push` capacity check.
-        assume!(self.data.capacity() == STACK_LIMIT);
+        // In debug builds, verify we have sufficient capacity provisioned.
+        debug_assert!(self.data.capacity() >= STACK_LIMIT);
         if self.data.len() == STACK_LIMIT {
             return false;
         }
@@ -281,15 +301,29 @@ impl Stack {
     /// if necessary.
     #[inline]
     pub fn push_slice(&mut self, slice: &[u8]) -> Result<(), InstructionResult> {
+        if self.push_slice_(slice) {
+            Ok(())
+        } else {
+            Err(InstructionResult::StackOverflow)
+        }
+    }
+
+    /// Pushes an arbitrary length slice of bytes onto the stack, padding the last word with zeros
+    /// if necessary.
+    #[inline]
+    fn push_slice_(&mut self, slice: &[u8]) -> bool {
         if slice.is_empty() {
-            return Ok(());
+            return true;
         }
 
         let n_words = slice.len().div_ceil(32);
         let new_len = self.data.len() + n_words;
         if new_len > STACK_LIMIT {
-            return Err(InstructionResult::StackOverflow);
+            return false;
         }
+
+        // In debug builds, ensure underlying capacity is sufficient for the write.
+        debug_assert!(self.data.capacity() >= new_len);
 
         // SAFETY: Length checked above.
         unsafe {
@@ -311,7 +345,7 @@ impl Stack {
             }
 
             if partial_last_word.is_empty() {
-                return Ok(());
+                return true;
             }
 
             // Write limbs of partial last word
@@ -339,7 +373,7 @@ impl Stack {
             }
         }
 
-        Ok(())
+        true
     }
 
     /// Set a value at given index for the stack, where the top of the
@@ -363,16 +397,21 @@ impl<'de> serde::Deserialize<'de> for Stack {
     where
         D: serde::Deserializer<'de>,
     {
-        let mut data = Vec::<U256>::deserialize(deserializer)?;
-        if data.len() > STACK_LIMIT {
+        #[derive(serde::Deserialize)]
+        struct StackSerde {
+            data: Vec<U256>,
+        }
+
+        let mut stack = StackSerde::deserialize(deserializer)?;
+        if stack.data.len() > STACK_LIMIT {
             return Err(serde::de::Error::custom(std::format!(
                 "stack size exceeds limit: {} > {}",
-                data.len(),
+                stack.data.len(),
                 STACK_LIMIT
             )));
         }
-        data.reserve(STACK_LIMIT - data.len());
-        Ok(Self { data })
+        stack.data.reserve(STACK_LIMIT - stack.data.len());
+        Ok(Self { data: stack.data })
     }
 }
 
@@ -396,7 +435,7 @@ mod tests {
         // No-op
         run(|stack| {
             stack.push_slice(b"").unwrap();
-            assert_eq!(stack.data, []);
+            assert!(stack.data.is_empty());
         });
 
         // One word

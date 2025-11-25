@@ -1,13 +1,18 @@
+//! Contains the `[L1BlockInfo]` type and its implementation.
 use crate::{
     constants::{
         GAS_ORACLE_CONTRACT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT, L1_SCALAR_SLOT,
-        NON_ZERO_BYTE_COST, TOKEN_RATIO_SLOT, ZERO_BYTE_COST,
+        TOKEN_RATIO_SLOT,
     },
     OpSpecId,
 };
-use core::ops::Mul;
-use revm::{database_interface::Database, primitives::hardfork::SpecId, primitives::U256};
-
+use revm::{
+    database_interface::Database,
+    interpreter::{
+        gas::{get_tokens_in_calldata, NON_ZERO_BYTE_MULTIPLIER_ISTANBUL, STANDARD_TOKEN_COST},
+    },
+    primitives::{hardfork::SpecId, U256},
+};
 /// L1 block info
 ///
 /// We can extract L1 epoch data from each L2 block, by looking at the `setL1BlockValues`
@@ -23,7 +28,7 @@ use revm::{database_interface::Database, primitives::hardfork::SpecId, primitive
 pub struct L1BlockInfo {
     /// The L2 block number. If not same as the one in the context,
     /// L1BlockInfo is not valid and will be reloaded from the database.
-    pub l2_block: u64,
+    pub l2_block: Option<U256>,
     /// The base fee of the L1 origin block.
     pub l1_base_fee: U256,
     /// The current L1 fee overhead. None if Ecotone is activated.
@@ -40,7 +45,7 @@ impl L1BlockInfo {
     /// Try to fetch the L1 block info from the database.
     pub fn try_fetch<DB: Database>(
         db: &mut DB,
-        l2_block: u64,
+        l2_block: U256,
         spec_id: OpSpecId,
     ) -> Result<L1BlockInfo, DB::Error> {
         // Ensure the L1 Block account is loaded into the cache after Ecotone. With EIP-4788, it is no longer the case
@@ -57,7 +62,7 @@ impl L1BlockInfo {
         let l1_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
 
         Ok(L1BlockInfo {
-            l2_block,
+            l2_block:Some(l2_block),
             l1_base_fee,
             l1_fee_overhead: Some(l1_fee_overhead),
             l1_base_fee_scalar: l1_fee_scalar,
@@ -74,20 +79,15 @@ impl L1BlockInfo {
     /// Prior to regolith, an extra 68 non-zero bytes were included in the rollup data costs to
     /// account for the empty signature.
     pub fn data_gas(&self, input: &[u8], spec_id: OpSpecId) -> U256 {
-        let mut rollup_data_gas_cost = U256::from(input.iter().fold(0, |acc, byte| {
-            acc + if *byte == 0x00 {
-                ZERO_BYTE_COST
-            } else {
-                NON_ZERO_BYTE_COST
-            }
-        }));
+        // tokens in calldata where non-zero bytes are priced 4 times higher than zero bytes (Same as in Istanbul).
+        let mut tokens_in_transaction_data = get_tokens_in_calldata(input, true);
 
         // Prior to regolith, an extra 68 non zero bytes were included in the rollup data costs.
         if !spec_id.is_enabled_in(OpSpecId::REGOLITH) {
-            rollup_data_gas_cost += U256::from(NON_ZERO_BYTE_COST).mul(U256::from(68));
+            tokens_in_transaction_data += 68 * NON_ZERO_BYTE_MULTIPLIER_ISTANBUL;
         }
 
-        rollup_data_gas_cost
+        U256::from(tokens_in_transaction_data.saturating_mul(STANDARD_TOKEN_COST))
     }
 
     /// Clears the cached L1 cost of the transaction.
@@ -124,12 +124,15 @@ impl L1BlockInfo {
 
     /// Get the token ratio. If the token ratio is not set, return 1.
     pub fn get_token_ratio(&self) -> U256 {
-        self.token_ratio.unwrap_or(U256::from(1))
+        match self.token_ratio {
+            Some(ratio) if ratio > U256::from(0) => ratio,
+            _ => U256::from(1),
+        }
     }
 
     /// Reset the l2_block to u64::MAX.
     pub fn reset_l2_block(&mut self) {
-        self.l2_block = u64::MAX;
+        self.l2_block = None
     }
 }
 
@@ -305,10 +308,10 @@ mod tests {
     #[test]
     fn test_reset_l2_block() {
         let mut l1_block_info = L1BlockInfo {
-            l2_block: 1,
+            l2_block: Some(U256::from(1)),
             ..Default::default()
         };
         l1_block_info.reset_l2_block();
-        assert_eq!(l1_block_info.l2_block, u64::MAX);
+        assert_eq!(l1_block_info.l2_block, None);
     }
 }

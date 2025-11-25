@@ -2,19 +2,27 @@ use super::{
     plain_account::PlainStorage, AccountStatus, BundleAccount, PlainAccount,
     StorageWithOriginalValues, TransitionAccount,
 };
-use primitives::{HashMap, U256};
+use primitives::{HashMap, StorageKey, StorageValue, U256};
 use state::AccountInfo;
 
 /// Cache account contains plain state that gets updated
 /// at every transaction when evm output is applied to CacheState.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheAccount {
+    /// Account information and storage, if account exists.
     pub account: Option<PlainAccount>,
+    /// Account status flags.
     pub status: AccountStatus,
 }
 
 impl From<BundleAccount> for CacheAccount {
     fn from(account: BundleAccount) -> Self {
+        CacheAccount::from(&account)
+    }
+}
+
+impl From<&BundleAccount> for CacheAccount {
+    fn from(account: &BundleAccount) -> Self {
         let storage = account
             .storage
             .iter()
@@ -92,7 +100,7 @@ impl CacheAccount {
     }
 
     /// Returns storage slot if it exists.
-    pub fn storage_slot(&self, slot: U256) -> Option<U256> {
+    pub fn storage_slot(&self, slot: StorageKey) -> Option<StorageValue> {
         self.account
             .as_ref()
             .and_then(|a| a.storage.get(&slot).cloned())
@@ -276,9 +284,9 @@ impl CacheAccount {
         })
     }
 
-    // Updates the account with new information and storage changes.
-    //
-    // Merges the provided storage values with the existing storage and updates the account status.
+    /// Updates the account with new information and storage changes.
+    ///
+    /// Merges the provided storage values with the existing storage and updates the account status.
     pub fn change(
         &mut self,
         new: AccountInfo,

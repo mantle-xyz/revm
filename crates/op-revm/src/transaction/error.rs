@@ -1,3 +1,4 @@
+//! Contains the `[OpTransactionError]` type.
 use core::fmt::Display;
 use revm::context_interface::{
     result::{EVMError, InvalidTransaction},
@@ -9,6 +10,7 @@ use std::string::{String, ToString};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OpTransactionError {
+    /// Base transaction error.
     Base(InvalidTransaction),
     /// System transactions are not supported post-regolith hardfork.
     ///
@@ -17,7 +19,7 @@ pub enum OpTransactionError {
     /// was deprecated in the Regolith hardfork, and this error is thrown if a `Deposit` transaction
     /// is found with this field set to `true` after the hardfork activation.
     ///
-    /// In addition, this error is internal, and bubbles up into a [OpHaltReason::FailedDeposit][crate::OpHaltReason::FailedDeposit] error
+    /// In addition, this error is internal, and bubbles up into an [OpHaltReason::FailedDeposit][crate::OpHaltReason::FailedDeposit] error
     /// in the `revm` handler for the consumer to easily handle. This is due to a state transition
     /// rule on OP Stack chains where, if for any reason a deposit transaction fails, the transaction
     /// must still be included in the block, the sender nonce is bumped, the `mint` value persists, and
@@ -25,14 +27,14 @@ pub enum OpTransactionError {
     /// are cause for non-inclusion, so a special [OpHaltReason][crate::OpHaltReason] variant was introduced to handle this
     /// case for failed deposit transactions.
     DepositSystemTxPostRegolith,
-    /// Deposit transaction haults bubble up to the global main return handler, wiping state and
+    /// Deposit transaction halts bubble up to the global main return handler, wiping state and
     /// only increasing the nonce + persisting the mint value.
     ///
-    /// This is a catch-all error for any deposit transaction that is results in a [OpHaltReason][crate::OpHaltReason] error
+    /// This is a catch-all error for any deposit transaction that results in an [OpHaltReason][crate::OpHaltReason] error
     /// post-regolith hardfork. This allows for a consumer to easily handle special cases where
     /// a deposit transaction fails during validation, but must still be included in the block.
     ///
-    /// In addition, this error is internal, and bubbles up into a [OpHaltReason::FailedDeposit][crate::OpHaltReason::FailedDeposit] error
+    /// In addition, this error is internal, and bubbles up into an [OpHaltReason::FailedDeposit][crate::OpHaltReason::FailedDeposit] error
     /// in the `revm` handler for the consumer to easily handle. This is due to a state transition
     /// rule on OP Stack chains where, if for any reason a deposit transaction fails, the transaction
     /// must still be included in the block, the sender nonce is bumped, the `mint` value persists, and
@@ -82,10 +84,15 @@ impl<DBError> From<OpTransactionError> for EVMError<DBError, OpTransactionError>
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+/// BVM ETH operation errors
 pub enum BvmEthError {
+    /// EthTxValueTooLarge means that the eth tx value is too large.
     EthTxValueTooLarge,
+    /// NonceOverflow means that the nonce overflow.
     NonceOverflow,
+    /// DBError means that the database error.
     DBError(String),
+    /// InsufficientFunds means that the insufficient BVM ETH funds.
     InsufficientFunds,
 }
 
@@ -116,6 +123,7 @@ impl<DBError> From<BvmEthError> for EVMError<DBError, OpTransactionError> {
     }
 }
 
+/// Convert a database error to a BVM ETH operation error
 pub fn db_error<E: Display>(error: E) -> OpTransactionError {
     OpTransactionError::BvmEth(BvmEthError::DBError(error.to_string()))
 }
@@ -128,6 +136,11 @@ mod test {
 
     #[test]
     fn test_display_op_errors() {
+        assert_eq!(
+            OpTransactionError::Base(InvalidTransaction::NonceTooHigh { tx: 2, state: 1 })
+                .to_string(),
+            "nonce 2 too high, expected 1"
+        );
         assert_eq!(
             OpTransactionError::DepositSystemTxPostRegolith.to_string(),
             "deposit system transactions post regolith hardfork are not supported"

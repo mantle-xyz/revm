@@ -1,3 +1,5 @@
+//! Alloy provider database implementation.
+
 pub use alloy_eips::BlockId;
 use alloy_provider::{
     network::{primitives::HeaderResponse, BlockResponse},
@@ -6,10 +8,11 @@ use alloy_provider::{
 use alloy_transport::TransportError;
 use core::error::Error;
 use database_interface::{async_db::DatabaseAsyncRef, DBErrorMarker};
-use primitives::{Address, B256, U256};
+use primitives::{Address, StorageKey, StorageValue, B256};
 use state::{AccountInfo, Bytecode};
 use std::fmt::Display;
 
+/// Error type for transport-related database operations.
 #[derive(Debug)]
 pub struct DBTransportError(pub TransportError);
 
@@ -99,7 +102,11 @@ impl<N: Network, P: Provider<N>> DatabaseAsyncRef for AlloyDB<N, P> {
         // This is not needed, as the code is already loaded with basic_ref
     }
 
-    async fn storage_async_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
+    async fn storage_async_ref(
+        &self,
+        address: Address,
+        index: StorageKey,
+    ) -> Result<StorageValue, Self::Error> {
         Ok(self
             .provider
             .get_storage_at(address, index)
@@ -114,14 +121,14 @@ mod tests {
     use alloy_provider::ProviderBuilder;
     use database_interface::{DatabaseRef, WrapDatabaseAsync};
 
-    #[test]
+    #[tokio::test]
     #[ignore = "flaky RPC"]
-    fn can_get_basic() {
-        let client = ProviderBuilder::new().on_http(
-            "https://mainnet.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27"
-                .parse()
-                .unwrap(),
-        );
+    async fn can_get_basic() {
+        let client = ProviderBuilder::new()
+            .connect("https://mainnet.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27")
+            .await
+            .unwrap()
+            .erased();
         let alloydb = AlloyDB::new(client, BlockId::from(16148323));
         let wrapped_alloydb = WrapDatabaseAsync::new(alloydb).unwrap();
 

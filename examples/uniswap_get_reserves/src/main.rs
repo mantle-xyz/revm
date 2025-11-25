@@ -5,10 +5,11 @@ use alloy_eips::BlockId;
 use alloy_provider::ProviderBuilder;
 use alloy_sol_types::{sol, SolCall};
 use revm::{
+    context::TxEnv,
     context_interface::result::{ExecutionResult, Output},
     database::{AlloyDB, CacheDB},
     database_interface::{DatabaseRef, EmptyDB, WrapDatabaseAsync},
-    primitives::{address, TxKind, U256},
+    primitives::{address, StorageKey, TxKind, U256},
     Context, ExecuteEvm, MainBuilder, MainContext,
 };
 
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
     // =========================================================== //
 
     // Choose slot of storage that you would like to transact with
-    let slot = U256::from(8);
+    let slot = StorageKey::from(8);
 
     // ETH/USDT pair on Uniswap V2
     let pool_address = address!("0d4a11d5EEaaC28EC3F61d100daF4d40471f1852");
@@ -65,25 +66,25 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
 
     // Initialise an empty (default) EVM
-    let mut evm = Context::mainnet()
-        .with_db(cache_db)
-        .modify_tx_chained(|tx| {
-            // fill in missing bits of env struct
-            // change that to whatever caller you want to be
-            tx.caller = address!("0000000000000000000000000000000000000000");
-            // account you want to transact with
-            tx.kind = TxKind::Call(pool_address);
-            // calldata formed via abigen
-            tx.data = encoded.into();
-            // transaction value in wei
-            tx.value = U256::from(0);
-        })
-        .build_mainnet();
+    let mut evm = Context::mainnet().with_db(cache_db).build_mainnet();
 
     // Execute transaction without writing to the DB
-    let ref_tx = evm.replay().unwrap();
-    // Select ExecutionResult struct
-    let result = ref_tx.result;
+    let result = evm
+        .transact_one(
+            TxEnv::builder()
+                // fill in missing bits of env struct
+                // change that to whatever caller you want to be
+                .caller(address!("0000000000000000000000000000000000000000"))
+                // account you want to transact with
+                .kind(TxKind::Call(pool_address))
+                // calldata formed via abigen
+                .data(encoded.into())
+                // transaction value in wei
+                .value(U256::from(0))
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
 
     // Unpack output call enum into raw bytes
     let value = match result {

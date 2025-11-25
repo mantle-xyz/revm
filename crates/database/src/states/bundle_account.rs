@@ -2,7 +2,7 @@ use super::{
     reverts::AccountInfoRevert, AccountRevert, AccountStatus, RevertToSlot, StorageSlot,
     StorageWithOriginalValues, TransitionAccount,
 };
-use primitives::{HashMap, U256};
+use primitives::{HashMap, StorageKey, StorageValue};
 use state::AccountInfo;
 
 /// Account information focused on creating of database changesets
@@ -18,13 +18,15 @@ use state::AccountInfo;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BundleAccount {
+    /// Current account information.
     pub info: Option<AccountInfo>,
+    /// Original account information before modifications.
     pub original_info: Option<AccountInfo>,
     /// Contains both original and present state.
     /// When extracting changeset we compare if original value is different from present value.
     /// If it is different we add it to changeset.
     ///
-    /// If Account was destroyed we ignore original value and compare present state with U256::ZERO.
+    /// If Account was destroyed we ignore original value and compare present state with StorageValue::ZERO.
     pub storage: StorageWithOriginalValues,
     /// Account status.
     pub status: AccountStatus,
@@ -55,13 +57,13 @@ impl BundleAccount {
 
     /// Return storage slot if it exists.
     ///
-    /// In case we know that account is newly created or destroyed, return `Some(U256::ZERO)`
-    pub fn storage_slot(&self, slot: U256) -> Option<U256> {
+    /// In case we know that account is newly created or destroyed, return `Some(StorageValue::ZERO)`
+    pub fn storage_slot(&self, slot: StorageKey) -> Option<StorageValue> {
         let slot = self.storage.get(&slot).map(|s| s.present_value);
         if slot.is_some() {
             slot
         } else if self.status.is_storage_known() {
-            Some(U256::ZERO)
+            Some(StorageValue::ZERO)
         } else {
             None
         }
@@ -101,7 +103,7 @@ impl BundleAccount {
                 } else {
                     // Set all storage to zero but preserve original values.
                     self.storage.iter_mut().for_each(|(_, v)| {
-                        v.present_value = U256::ZERO;
+                        v.present_value = StorageValue::ZERO;
                     });
                     return false;
                 }
@@ -116,7 +118,7 @@ impl BundleAccount {
                     // if storage is not present set original value as current value.
                     self.storage
                         .entry(key)
-                        .or_insert(StorageSlot::new(value))
+                        .or_insert_with(|| StorageSlot::new(value))
                         .present_value = value;
                 }
                 RevertToSlot::Destroyed => {
@@ -150,7 +152,7 @@ impl BundleAccount {
             };
 
         let previous_storage_from_update =
-            |updated_storage: &StorageWithOriginalValues| -> HashMap<U256, RevertToSlot> {
+            |updated_storage: &StorageWithOriginalValues| -> HashMap<StorageKey, RevertToSlot> {
                 updated_storage
                     .iter()
                     .filter(|s| s.1.is_changed())
@@ -230,7 +232,7 @@ impl BundleAccount {
             }
             AccountStatus::Destroyed => {
                 // Clear this storage and move it to the Revert.
-                let this_storage = self.storage.drain().collect();
+                let this_storage = core::mem::take(&mut self.storage);
                 let ret = match self.status {
                     AccountStatus::InMemoryChange | AccountStatus::Changed | AccountStatus::Loaded | AccountStatus::LoadedEmptyEIP161 => {
                         Some(AccountRevert::new_selfdestructed(self.status, info_revert, this_storage))
@@ -354,7 +356,7 @@ impl BundleAccount {
                                 // Destroyed again will set empty account.
                                 AccountStatus::DestroyedChanged,
                                 AccountInfoRevert::RevertTo(self.info.clone().unwrap_or_default()),
-                                self.storage.drain().collect(),
+                                core::mem::take(&mut self.storage),
                                 HashMap::default(),
                             ))
                         }

@@ -1,4 +1,80 @@
 
+# v91 tag ( revm v30.1.1)
+
+No breaking changes
+
+# v90 tag ( revm v30.1.0)
+
+* Removal of some deprecated functions. `into_plain_state`, `regenerate_hash` were deprecated few releases ago.
+
+# v89 tag ( op-revm)
+
+No breaking changes
+
+# v88 tag (revm v30.0.0)
+
+* `ContextTr`, `EvmTr` gained `all_mut()` and `all()` functions.
+  * `InspectorEvmTr` got `all_inspector` and `all_mut_inspector` functions.
+  * For custom Evm, you only need to implement `all_*` functions.
+* `InspectorFrame` got changed to allow CustomFrame to be added.
+  * If there is no need for inspection `fn eth_frame` can return None.
+* `kzg-rs` feature and library removed. Default KZG implementation is now c-kzg.
+  * for no-std variant, arkworks lib is used.
+* Opcodes that load account/storage will not load item if there is not enough gas for cold load.
+  * This is in preparation for BAL.
+  * Journal functions for loading now have skip_cold_load bool.
+* `libsecp256k1` parity library is deprecated and removed.
+* `JumpTable` internal representation changed from `BitVec` to `Bytes`. No changes in API.
+* `SpecId` enum gained new `Amsterdam` variant and `OpSpecId` gained `Jovian` variant.
+* `SELFDESTRUCT` constant renamed to `SELFDESTRUCT_REFUND`.
+* `FrameStack::push` and `FrameStack::end_init` marked as `unsafe` as it can cause UB.
+* First precompile error is now bubble up with detailed error messages. New `PrecompileError` variants added.
+* Batch execution errors now include transaction index.
+* `CallInput` now contains bytecode that is going to be executed (Previously it had address).
+  * This allows skipping double bytecode fetching.
+* `InvalidTransaction` enum gained `Str(Cow<'static, str>)` variant for custom error messages.
+* `calc_excess_blob_gas` and `calc_excess_blob_gas` removes as they are unused and not accurate for Prague.
+
+# v86 tag (revm v29.0.0)
+
+* `PrecompileWithAddress` is renamed to `Precompile` and it became a struct.
+  * `Precompile` contains`PrecompileId`, `Address` and function.
+  * The reason is adding `PrecompileId` as it is needed for fusaka hardfork
+
+# v85 tag (revm v28.0.1) from v84 tag (revm v28.0.0)
+
+Forward compatible version.
+
+# v84 tag (revm v28.0.0) from v83 tag (revm v27.1.0)
+
+* `SystemCallEvm` functions got renamed and old ones are deprecated. Renaming is done to align it with other API calls.
+   * `transact_system_call_finalize` is now `system_call`.
+   * `transact_system_call` is now `system_call_one`.
+* `ExtBytecode::regenerate_hash` got deprecated in support for `get_or_calculate_hash` or `calculate_hash`.
+* Precompiles:
+  * Bn128 renamed to Bn254. https://github.com/ethereum/EIPs/pull/10029#issue-3240867404
+* `InstructionResult` now starts from 1 (previous 0) for perf purposes.
+* In `JournalInner` previous `precompiles`, `warm_coinbase_address` and `warm_preloaded_addresses` pub fields are now moved to `warm_addresses` to encapsulate addresses that are warm by default. All access list account are all loaded from database.
+
+
+# v83 tag (revm v27.1.0) from v82 tag (revm v27.0.3)
+
+* `ContextTr` gained `Host` supertrait.
+  * Previously Host was implemented for any T that has ContextTr, this restricts specializations.
+  https://github.com/bluealloy/revm/issues/2732
+  * `Host` is moved to `revm-context-interface`
+  * If you custom struct that implement `ContextTr` you would need to manually implement `Host` trait, in most cases no action needed.
+* In `revm-interpreter`, fn `cast_slice_to_u256` was removed and `push_slice` fn is added to `StackTrait`.
+* `PrecompileOutput` now contains revert flag.
+  * It is safe to put to false.
+* In `kzg` and `blake2` modules few internal functions were made private or removed.
+
+# v80 tag (revm v27.0.0) -> v81 tag ( revm v27.0.1)
+
+* Inspector fn `step_end` is now called even if Inspector `step` sets the action. Previously this was not the  case.
+    * https://github.com/bluealloy/revm/pull/2687
+    * this additionally fixes panic bug where `bytecode.opcode()` would panic in `step_end`
+
 # v70 tag (revm v22.0.2) -> v71 tag ( revm v23.0.0)
 
 * Removal of `EvmData`.
@@ -9,7 +85,7 @@
 * Breaking changed for EOF to support eof-devnet1. 
 * `SharedMemory` is not longer Rc<RefCell<>> and internally uses Rc<RefCell<Vec<u8>>> buffer.
     * No action if you dont use it inside Interpreter.
-* In `JournalExt` fn `last_journal()` is renamed to `journal()`
+* In `JournalExt` fn `last_journal_mut()` is renamed to `journal_mut()`
 * EOF is disabled from Osaka and not accessible.
 
 # v68 tag (revm v21.0.0) -> v70 tag ( revm v22.0.2)

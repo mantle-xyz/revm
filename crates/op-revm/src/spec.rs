@@ -1,21 +1,35 @@
+//! Contains the `[OpSpecId]` type and its implementation.
 use core::str::FromStr;
 use revm::primitives::hardfork::{name as eth_name, SpecId, UnknownHardfork};
 
+/// Optimism spec id.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[allow(non_camel_case_types)]
 pub enum OpSpecId {
+    /// Bedrock spec id.
     BEDROCK = 100,
+    /// Regolith spec id.
     REGOLITH,
+    /// Canyon spec id.
     CANYON,
+    /// Ecotone spec id.
     ECOTONE,
+    /// Fjord spec id.
     FJORD,
+    /// Granite spec id.
     GRANITE,
+    /// Holocene spec id.
     HOLOCENE,
+    /// Isthmus spec id.
     #[default]
     ISTHMUS,
+    /// Jovian spec id.
+    JOVIAN,
+    /// Interop spec id.
     INTEROP,
+    /// Osaka spec id.
     OSAKA,
 }
 
@@ -27,10 +41,11 @@ impl OpSpecId {
             Self::CANYON => SpecId::SHANGHAI,
             Self::ECOTONE | Self::FJORD | Self::GRANITE | Self::HOLOCENE => SpecId::CANCUN,
             Self::ISTHMUS | Self::INTEROP => SpecId::PRAGUE,
-            Self::OSAKA => SpecId::OSAKA,
+            Self::JOVIAN | Self::OSAKA => SpecId::OSAKA,
         }
     }
 
+    /// Checks if the [`OpSpecId`] is enabled in the other [`OpSpecId`].
     pub const fn is_enabled_in(self, other: OpSpecId) -> bool {
         other as u8 <= self as u8
     }
@@ -55,6 +70,7 @@ impl FromStr for OpSpecId {
             name::GRANITE => Ok(OpSpecId::GRANITE),
             name::HOLOCENE => Ok(OpSpecId::HOLOCENE),
             name::ISTHMUS => Ok(OpSpecId::ISTHMUS),
+            name::JOVIAN => Ok(OpSpecId::JOVIAN),
             name::INTEROP => Ok(OpSpecId::INTEROP),
             eth_name::OSAKA => Ok(OpSpecId::OSAKA),
             _ => Err(UnknownHardfork),
@@ -73,6 +89,7 @@ impl From<OpSpecId> for &'static str {
             OpSpecId::GRANITE => name::GRANITE,
             OpSpecId::HOLOCENE => name::HOLOCENE,
             OpSpecId::ISTHMUS => name::ISTHMUS,
+            OpSpecId::JOVIAN => name::JOVIAN,
             OpSpecId::INTEROP => name::INTEROP,
             OpSpecId::OSAKA => eth_name::OSAKA,
         }
@@ -81,14 +98,25 @@ impl From<OpSpecId> for &'static str {
 
 /// String identifiers for Optimism hardforks
 pub mod name {
+    /// Bedrock spec name.
     pub const BEDROCK: &str = "Bedrock";
+    /// Regolith spec name.
     pub const REGOLITH: &str = "Regolith";
+    /// Canyon spec name.
     pub const CANYON: &str = "Canyon";
+    /// Ecotone spec name.
     pub const ECOTONE: &str = "Ecotone";
+    /// Fjord spec name.
     pub const FJORD: &str = "Fjord";
+    /// Granite spec name.
     pub const GRANITE: &str = "Granite";
+    /// Holocene spec name.
     pub const HOLOCENE: &str = "Holocene";
+    /// Isthmus spec name.
     pub const ISTHMUS: &str = "Isthmus";
+    /// Jovian spec name.
+    pub const JOVIAN: &str = "Jovian";
+    /// Interop spec name.
     pub const INTEROP: &str = "Interop";
 }
 
@@ -164,6 +192,25 @@ mod tests {
                     (OpSpecId::CANYON, true),
                     (OpSpecId::ECOTONE, true),
                     (OpSpecId::FJORD, true),
+                ],
+            ),
+            (
+                OpSpecId::JOVIAN,
+                vec![
+                    (SpecId::PRAGUE, true),
+                    (SpecId::SHANGHAI, true),
+                    (SpecId::CANCUN, true),
+                    (SpecId::MERGE, true),
+                    (SpecId::OSAKA, true),
+                ],
+                vec![
+                    (OpSpecId::BEDROCK, true),
+                    (OpSpecId::REGOLITH, true),
+                    (OpSpecId::CANYON, true),
+                    (OpSpecId::ECOTONE, true),
+                    (OpSpecId::FJORD, true),
+                    (OpSpecId::HOLOCENE, true),
+                    (OpSpecId::ISTHMUS, true),
                 ],
             ),
         ];

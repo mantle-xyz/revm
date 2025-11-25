@@ -8,18 +8,14 @@ keywords.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
+rust-version.workspace = true
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
-[lints.rust]
-unreachable_pub = "warn"
-unused_must_use = "deny"
-rust_2018_idioms = "deny"
-
-[lints.rustdoc]
-all = "warn"
+[lints]
+workspace = true
 
 [dependencies]
 # revm
@@ -35,10 +31,10 @@ alloy-provider = { workspace = true, default-features = true }
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 
-op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v141", default-features = false, features = [
+op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v210", default-features = false, features = [
     "k256",
 ] }
-op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v141", default-features = false }
+op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v210", default-features = false }
 
 
 # misc
