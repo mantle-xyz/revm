@@ -562,8 +562,7 @@ where
                 .journal_mut()
                 .caller_accounting_journal_entry(caller, old_balance, true);
 
-            // BVM_ETH mint and nonce bump
-            // If the transaction failed, we only mint the BVM_ETH tokens and bump the nonce.
+            // If the transaction failed, we only mint the BVM_ETH tokens.
             // We do not transfer the BVM_ETH tokens.
             let _ = BvmEth::process_eth_deposit(evm.ctx(), true);
 
