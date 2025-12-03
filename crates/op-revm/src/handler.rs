@@ -566,8 +566,6 @@ where
             // If the transaction failed, we only mint the BVM_ETH tokens and bump the nonce.
             // We do not transfer the BVM_ETH tokens.
             let _ = BvmEth::process_eth_deposit(evm.ctx(), true);
-            evm.ctx().journal_mut().touch_account(BvmEth::ADDRESS);
-            evm.ctx().journal_mut().nonce_bump_journal_entry(BvmEth::ADDRESS);
 
             // The gas used of a failed deposit post-regolith is the gas
             // limit of the transaction. pre-regolith, it is the gas limit
