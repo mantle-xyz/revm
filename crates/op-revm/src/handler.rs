@@ -164,7 +164,7 @@ where
 
         if is_deposit {
             // Process ETH deposit by minting and transferring BVM_ETH tokens.
-            BvmEth::process_eth_deposit(ctx).map_err(ERROR::from)?;
+            BvmEth::process_eth_deposit(ctx, false).map_err(ERROR::from)?;
         }
 
         if is_deposit {
@@ -474,6 +474,7 @@ where
         let base_fee_amount = U256::from(basefee.saturating_mul(frame_result.gas().used() as u128));
 
         // Send fees to their respective recipients
+        #[allow(clippy::single_element_loop)]
         for (recipient, amount) in [
             // (L1_FEE_RECIPIENT, l1_cost),
             (BASE_FEE_RECIPIENT, base_fee_amount),
@@ -561,7 +562,11 @@ where
                 .journal_mut()
                 .caller_accounting_journal_entry(caller, old_balance, true);
 
-            // [TODO]: Persist BVM_ETH mint for failed deposit like op-geth (pre-snapshot effect).
+            // BVM_ETH mint and nonce bump
+            // If the transaction failed, we only mint the BVM_ETH tokens and bump the nonce.
+            // We do not transfer the BVM_ETH tokens.
+            let _ = BvmEth::process_eth_deposit(evm.ctx(), true);
+            evm.ctx().journal_mut().nonce_bump_journal_entry(BvmEth::ADDRESS);
 
             // The gas used of a failed deposit post-regolith is the gas
             // limit of the transaction. pre-regolith, it is the gas limit

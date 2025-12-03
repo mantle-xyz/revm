@@ -83,7 +83,10 @@ impl BvmEth {
 
     /// Process ETH deposit by minting and transferring BVM_ETH tokens.
     /// This handles the conversion of ETH deposits into BVM_ETH ERC20 tokens.
-    pub fn process_eth_deposit<CTX>(context: &mut CTX) -> Result<(), OpTransactionError>
+    pub fn process_eth_deposit<CTX>(
+        context: &mut CTX,
+        mint_only: bool,
+    ) -> Result<(), OpTransactionError>
     where
         CTX: OpContextTr,
     {
@@ -97,9 +100,11 @@ impl BvmEth {
             Self::mint_inner(journal, tx, from, U256::from(eth_value))?;
         }
 
-        // Handle transfer if eth_tx_value is present in the transaction
-        if let Some(eth_tx_value) = tx.eth_tx_value() {
-            Self::transfer_inner(journal, tx, U256::from(eth_tx_value))?;
+        if !mint_only {
+            // Handle transfer if eth_tx_value is present in the transaction
+            if let Some(eth_tx_value) = tx.eth_tx_value() {
+                Self::transfer_inner(journal, tx, U256::from(eth_tx_value))?;
+            }
         }
 
         journal.touch_account(Self::ADDRESS);
