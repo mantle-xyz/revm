@@ -44,8 +44,10 @@ mod tests {
             b256!("0xe927a1448525fb5d32cb50ee1408461a945ba6c39bd5cf5621407d500ecc8de9"),
             Some(0x34),
             false,
+            Some(100),
+            Some(100),
         );
-        let response = r#"{"source_hash":"0xe927a1448525fb5d32cb50ee1408461a945ba6c39bd5cf5621407d500ecc8de9","mint":52,"is_system_transaction":false}"#;
+        let response = r#"{"source_hash":"0xe927a1448525fb5d32cb50ee1408461a945ba6c39bd5cf5621407d500ecc8de9","mint":52,"is_system_transaction":false,"eth_value":100,"eth_tx_value":100}"#;
 
         // serialize
         let json = serde_json::to_string(&parts).unwrap();
@@ -59,8 +61,8 @@ mod tests {
                 b256!("0xe927a1448525fb5d32cb50ee1408461a945ba6c39bd5cf5621407d500ecc8de9"),
                 Some(0x34),
                 false,
-                None,
-                None,
+                Some(100),
+                Some(100),
             )
         );
     }
