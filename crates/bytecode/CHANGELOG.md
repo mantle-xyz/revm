@@ -7,6 +7,173 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.1.0](https://github.com/mantle-xyz/revm/compare/revm-bytecode-v7.0.1...revm-bytecode-v7.1.0) - 2025-12-08
+
+### Added
+
+- in JumpTable use Bytes instead of BitVec ([#3014](https://github.com/mantle-xyz/revm/pull/3014))
+- removed padding in case last opcode is terminating or unknown ([#2816](https://github.com/mantle-xyz/revm/pull/2816))
+- *(bytecode)* add version getter + make versoin dynamic ([#2751](https://github.com/mantle-xyz/revm/pull/2751))
+- remove EOF ([#2644](https://github.com/mantle-xyz/revm/pull/2644))
+- configurable contract size limit ([#2611](https://github.com/mantle-xyz/revm/pull/2611)) ([#2642](https://github.com/mantle-xyz/revm/pull/2642))
+- *(precompile)* rug/gmp-based modexp ([#2596](https://github.com/mantle-xyz/revm/pull/2596))
+- add clz opcode ([#2598](https://github.com/mantle-xyz/revm/pull/2598))
+- transact multi tx ([#2517](https://github.com/mantle-xyz/revm/pull/2517))
+- *(EOF)* Changes needed for devnet-1 ([#2377](https://github.com/mantle-xyz/revm/pull/2377))
+- *(bytecode)* improve legacy bytecode padding ([#2423](https://github.com/mantle-xyz/revm/pull/2423))
+- Iteration of bytecode opcodes ([#2349](https://github.com/mantle-xyz/revm/pull/2349))
+- *(docs)* MyEvm example and book cleanup ([#2218](https://github.com/mantle-xyz/revm/pull/2218))
+- remove specification crate ([#2165](https://github.com/mantle-xyz/revm/pull/2165))
+- book structure ([#2082](https://github.com/mantle-xyz/revm/pull/2082))
+- Add essential EIP-7756 tracing fields ([#2023](https://github.com/mantle-xyz/revm/pull/2023))
+- EthHandler trait ([#2001](https://github.com/mantle-xyz/revm/pull/2001))
+- *(eip7702)* apply latest EIP-7702 changes, backport from v52 ([#1969](https://github.com/mantle-xyz/revm/pull/1969))
+- *(database)* implement order-independent equality for Reverts ([#1827](https://github.com/mantle-xyz/revm/pull/1827))
+- Restucturing Part7 Handler and Context rework ([#1865](https://github.com/mantle-xyz/revm/pull/1865))
+- restructuring Part6 transaction crate ([#1814](https://github.com/mantle-xyz/revm/pull/1814))
+- Merge validation/analyzis with Bytecode ([#1793](https://github.com/mantle-xyz/revm/pull/1793))
+- restructure Part2 database crate ([#1784](https://github.com/mantle-xyz/revm/pull/1784))
+- project restructuring Part1 ([#1776](https://github.com/mantle-xyz/revm/pull/1776))
+- *(examples)* generate block traces ([#895](https://github.com/mantle-xyz/revm/pull/895))
+- implement EIP-4844 ([#668](https://github.com/mantle-xyz/revm/pull/668))
+- *(Shanghai)* All EIPs: push0, warm coinbase, limit/measure initcode ([#376](https://github.com/mantle-xyz/revm/pull/376))
+- Migrate `primitive_types::U256` to `ruint::Uint<256, 4>` ([#239](https://github.com/mantle-xyz/revm/pull/239))
+- Introduce ByteCode format, Update Readme ([#156](https://github.com/mantle-xyz/revm/pull/156))
+
+### Fixed
+
+- support legacy JumpTable serde format ([#3098](https://github.com/mantle-xyz/revm/pull/3098))
+- *(bytecode)* exclude MLOAD from modifies_memory and update test ([#3004](https://github.com/mantle-xyz/revm/pull/3004))
+- Apply spelling corrections from PRs #2926, #2915, #2908 ([#2978](https://github.com/mantle-xyz/revm/pull/2978))
+- correct various typos in documentation and comments ([#2855](https://github.com/mantle-xyz/revm/pull/2855))
+- fully deprecate serde-json ([#2767](https://github.com/mantle-xyz/revm/pull/2767))
+- implement `PartialEq` for `JumpTable` correctly ([#2654](https://github.com/mantle-xyz/revm/pull/2654))
+- fix typo and update links ([#2387](https://github.com/mantle-xyz/revm/pull/2387))
+- fix typo ([#2333](https://github.com/mantle-xyz/revm/pull/2333))
+- JumpMap from_slice requires len ([#2203](https://github.com/mantle-xyz/revm/pull/2203))
+- correct propagate features ([#2177](https://github.com/mantle-xyz/revm/pull/2177))
+- relax jumptable len check ([#2149](https://github.com/mantle-xyz/revm/pull/2149))
+- fix typos ([#620](https://github.com/mantle-xyz/revm/pull/620))
+
+### Other
+
+- release ([#3079](https://github.com/mantle-xyz/revm/pull/3079))
+- tag v88 revm v30.0.0 ([#3058](https://github.com/mantle-xyz/revm/pull/3058))
+- release ([#2958](https://github.com/mantle-xyz/revm/pull/2958))
+- add boundless ([#3043](https://github.com/mantle-xyz/revm/pull/3043))
+- use offset_from_unsigned ([#2999](https://github.com/mantle-xyz/revm/pull/2999))
+- add SECURITY.md ([#2956](https://github.com/mantle-xyz/revm/pull/2956))
+- release ([#2899](https://github.com/mantle-xyz/revm/pull/2899))
+- use core::fmt and remove unused Debug import ([#2887](https://github.com/mantle-xyz/revm/pull/2887))
+- release ([#2873](https://github.com/mantle-xyz/revm/pull/2873))
+- Revert "feat: removed padding in case last opcode is terminal ([#2816](https://github.com/mantle-xyz/revm/pull/2816))" ([#2883](https://github.com/mantle-xyz/revm/pull/2883))
+- *(bytecode)* remove unused Debug import ([#2879](https://github.com/mantle-xyz/revm/pull/2879))
+- update outdated opcode memory reference link ([#2859](https://github.com/mantle-xyz/revm/pull/2859))
+- release ([#2854](https://github.com/mantle-xyz/revm/pull/2854))
+- *(OpCode)* add is_valid ([#2847](https://github.com/mantle-xyz/revm/pull/2847))
+- update README.md ([#2842](https://github.com/mantle-xyz/revm/pull/2842))
+- *(benches)* clean up criterion callsites ([#2833](https://github.com/mantle-xyz/revm/pull/2833))
+- improve ExtBytecode hash handling ([#2826](https://github.com/mantle-xyz/revm/pull/2826))
+- add rust-version and note about MSRV ([#2789](https://github.com/mantle-xyz/revm/pull/2789))
+- add OnceLock re-export with no_std support ([#2787](https://github.com/mantle-xyz/revm/pull/2787))
+- release ([#2771](https://github.com/mantle-xyz/revm/pull/2771))
+- clean up jump map ([#2764](https://github.com/mantle-xyz/revm/pull/2764))
+- clean up bytecode analysis ([#2763](https://github.com/mantle-xyz/revm/pull/2763))
+- Fix typo in EIP-7702 bytecode format comment (magic byte) ([#2733](https://github.com/mantle-xyz/revm/pull/2733))
+- tag v81 revm v27.0.1 ([#2689](https://github.com/mantle-xyz/revm/pull/2689))
+- add PartialEq u8 ([#2688](https://github.com/mantle-xyz/revm/pull/2688))
+- release ([#2659](https://github.com/mantle-xyz/revm/pull/2659))
+- cargo clippy --fix --all ([#2671](https://github.com/mantle-xyz/revm/pull/2671))
+- release ([#2641](https://github.com/mantle-xyz/revm/pull/2641))
+- *(tests)* extend test for is_valid jumptable ([#2622](https://github.com/mantle-xyz/revm/pull/2622))
+- faster JumpTable bits lookup ([#2618](https://github.com/mantle-xyz/revm/pull/2618))
+- release ([#2577](https://github.com/mantle-xyz/revm/pull/2577))
+- release ([#2527](https://github.com/mantle-xyz/revm/pull/2527))
+- make crates.io version badge clickable ([#2526](https://github.com/mantle-xyz/revm/pull/2526))
+- release ([#2487](https://github.com/mantle-xyz/revm/pull/2487))
+- typos ([#2474](https://github.com/mantle-xyz/revm/pull/2474))
+- copy edit The Book ([#2463](https://github.com/mantle-xyz/revm/pull/2463))
+- simplify opcode iter ([#2458](https://github.com/mantle-xyz/revm/pull/2458))
+- make OPCODE_INFO a static ([#2459](https://github.com/mantle-xyz/revm/pull/2459))
+- simplify reading signed integers ([#2456](https://github.com/mantle-xyz/revm/pull/2456))
+- cache and use JumpTable::default ([#2439](https://github.com/mantle-xyz/revm/pull/2439))
+- bump dependency version ([#2431](https://github.com/mantle-xyz/revm/pull/2431))
+- fixed broken link ([#2421](https://github.com/mantle-xyz/revm/pull/2421))
+- *(lints)* revm-context lints ([#2404](https://github.com/mantle-xyz/revm/pull/2404))
+- bump v68 revm v22.0.0 ([#2396](https://github.com/mantle-xyz/revm/pull/2396))
+- add 0x prefix to b256! and address! calls ([#2345](https://github.com/mantle-xyz/revm/pull/2345))
+- release-plz ([#2340](https://github.com/mantle-xyz/revm/pull/2340))
+- move Eof::new to first place && add doc for some pub functions ([#2334](https://github.com/mantle-xyz/revm/pull/2334))
+- remove outdated TODO comments ([#2325](https://github.com/mantle-xyz/revm/pull/2325))
+- links to main readme ([#2298](https://github.com/mantle-xyz/revm/pull/2298))
+- add links to arch page ([#2297](https://github.com/mantle-xyz/revm/pull/2297))
+- revm v20.0.0 stable version, tag v66 ([#2294](https://github.com/mantle-xyz/revm/pull/2294))
+- v65 revm: v20.0.0-alpha.7 ([#2280](https://github.com/mantle-xyz/revm/pull/2280))
+- tag v63 revm v20.0.0-alpha.6 ([#2219](https://github.com/mantle-xyz/revm/pull/2219))
+- tag v61 revm v20.0.0-alpha.4 ([#2190](https://github.com/mantle-xyz/revm/pull/2190))
+- v59 release-plz update ([#2170](https://github.com/mantle-xyz/revm/pull/2170))
+- rename revm-optimism to op-revm ([#2141](https://github.com/mantle-xyz/revm/pull/2141))
+- fix README link ([#2139](https://github.com/mantle-xyz/revm/pull/2139))
+- Add docs to revm-bytecode crate ([#2108](https://github.com/mantle-xyz/revm/pull/2108))
+- move all dependencies to workspace ([#2092](https://github.com/mantle-xyz/revm/pull/2092))
+- tag v57 revm 20.0.0-alpha.1 ([#2086](https://github.com/mantle-xyz/revm/pull/2086))
+- Bump licence year to 2025 ([#2058](https://github.com/mantle-xyz/revm/pull/2058))
+- align crates versions ([#1983](https://github.com/mantle-xyz/revm/pull/1983))
+- fix comments and docs into more sensible ([#1920](https://github.com/mantle-xyz/revm/pull/1920))
+- *(readme)* add tycho-simulation to "Used by" ([#1926](https://github.com/mantle-xyz/revm/pull/1926))
+- Update README.md examples section ([#1853](https://github.com/mantle-xyz/revm/pull/1853))
+- *(crates/bytecode)* fix some comments ([#1851](https://github.com/mantle-xyz/revm/pull/1851))
+- some no_std cleanup ([#1834](https://github.com/mantle-xyz/revm/pull/1834))
+- fix `constants` module typo ([#1801](https://github.com/mantle-xyz/revm/pull/1801))
+- Bump new logo ([#1735](https://github.com/mantle-xyz/revm/pull/1735))
+- *(README)* add rbuilder to used-by ([#1585](https://github.com/mantle-xyz/revm/pull/1585))
+- added simular to used-by ([#1521](https://github.com/mantle-xyz/revm/pull/1521))
+- add Trin to used by list ([#1393](https://github.com/mantle-xyz/revm/pull/1393))
+- Fix typo in readme ([#1185](https://github.com/mantle-xyz/revm/pull/1185))
+- Add Hardhat to the "Used by" list ([#1164](https://github.com/mantle-xyz/revm/pull/1164))
+- Add VERBS to used by list ([#1141](https://github.com/mantle-xyz/revm/pull/1141))
+- license date and revm docs ([#1080](https://github.com/mantle-xyz/revm/pull/1080))
+- *(docs)* Update the benchmark docs to point to revm package ([#906](https://github.com/mantle-xyz/revm/pull/906))
+- *(docs)* Update top-level benchmark docs ([#894](https://github.com/mantle-xyz/revm/pull/894))
+- clang requirement ([#784](https://github.com/mantle-xyz/revm/pull/784))
+- Readme Updates ([#756](https://github.com/mantle-xyz/revm/pull/756))
+- Logo ([#743](https://github.com/mantle-xyz/revm/pull/743))
+- book workflow ([#537](https://github.com/mantle-xyz/revm/pull/537))
+- add example to revm crate ([#468](https://github.com/mantle-xyz/revm/pull/468))
+- Update README.md ([#424](https://github.com/mantle-xyz/revm/pull/424))
+- add no_std to primitives ([#366](https://github.com/mantle-xyz/revm/pull/366))
+- revm-precompiles to revm-precompile
+- Bump v20, changelog ([#350](https://github.com/mantle-xyz/revm/pull/350))
+- typos ([#232](https://github.com/mantle-xyz/revm/pull/232))
+- Add support for old forks. ([#191](https://github.com/mantle-xyz/revm/pull/191))
+- revm bump 1.8. update libs. snailtracer rename ([#159](https://github.com/mantle-xyz/revm/pull/159))
+- typo fixes
+- fix readme typo
+- Big Refactor. Machine to Interpreter. refactor instructions. call/create struct ([#52](https://github.com/mantle-xyz/revm/pull/52))
+- readme. debuger update
+- Bump revm v0.3.0. README updated
+- readme
+- Add time elapsed for tests
+- readme updated
+- Include Basefee into cost calc. readme change
+- Initialize precompile accounts
+- Status update. Taking a break
+- Merkle calc. Tweaks and debugging for eip158
+- Replace aurora bn lib with parity's. All Bn128Add/Mul/Pair tests passes
+- TEMP
+- one tab removed
+- readme
+- README Example simplified
+- Gas calculation for Call/Create. Example Added
+- readme usage
+- README changes
+- Static gas cost added
+- Subroutine changelogs and reverts
+- Readme postulates
+- Spelling
+- Restructure project
+- First iteration. Machine is looking okay
+
 ## [7.0.1](https://github.com/bluealloy/revm/compare/revm-bytecode-v7.0.0...revm-bytecode-v7.0.1) - 2025-10-15
 
 ### Fixed
