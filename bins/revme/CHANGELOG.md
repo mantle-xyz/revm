@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [9.0.2](https://github.com/bluealloy/revm/compare/revme-v9.0.1...revme-v9.0.2) - 2025-11-10
+
+### Other
+
+- updated the following local packages: revm, revm-statetest-types
+
+## [9.0.1](https://github.com/bluealloy/revm/compare/revme-v9.0.0...revme-v9.0.1) - 2025-11-07
+
+### Fixed
+
+- *(revme)* use primitive hashmap in statetest ([#3137](https://github.com/bluealloy/revm/pull/3137))
+
+## [9.0.0](https://github.com/bluealloy/revm/compare/revme-v8.3.0...revme-v9.0.0) - 2025-10-30
+
+### Other
+
+- consolidate revme imports ([#3088](https://github.com/bluealloy/revm/pull/3088))
+- Update blockchaintest.rs ([#3107](https://github.com/bluealloy/revm/pull/3107))
+- typo eip4788  ([#3111](https://github.com/bluealloy/revm/pull/3111))
+
+## [8.3.0](https://github.com/bluealloy/revm/compare/revme-v8.2.2...revme-v8.3.0) - 2025-10-17
+
+### Other
+
+- updated the following local packages: revm-inspector, revm, revm-statetest-types
+
+## [8.2.2](https://github.com/bluealloy/revm/compare/revme-v8.2.1...revme-v8.2.2) - 2025-10-15
+
+### Other
+
+- updated the following local packages: revm-bytecode, revm-state, revm-database-interface, revm-context-interface, revm-context, revm-database, revm-inspector, revm, revm-statetest-types
+
 ## [8.2.1](https://github.com/bluealloy/revm/compare/revme-v8.2.0...revme-v8.2.1) - 2025-10-15
 
 ### Other

@@ -201,8 +201,20 @@ impl EthFrame<EthInterpreter> {
             })));
         }
 
-        let bytecode = inputs.bytecode.clone();
-        let bytecode_hash = inputs.bytecode_hash;
+        // Get bytecode and hash - either from known_bytecode or load from account
+        let (bytecode, bytecode_hash) = if let Some((hash, code)) = inputs.known_bytecode.clone() {
+            // Use provided bytecode and hash
+            (code, hash)
+        } else {
+            // Load account and get its bytecode
+            let account = ctx
+                .journal_mut()
+                .load_account_with_code(inputs.bytecode_address)?;
+            (
+                account.info.code.clone().unwrap_or_default(),
+                account.info.code_hash,
+            )
+        };
 
         // Returns success if bytecode is empty.
         if bytecode.is_empty() {
@@ -258,22 +270,19 @@ impl EthFrame<EthInterpreter> {
         }
 
         // Fetch balance of caller.
-        let caller_info = &mut context.journal_mut().load_account(inputs.caller)?.data.info;
+        let mut caller_info = context.journal_mut().load_account_mut(inputs.caller)?;
 
         // Check if caller has enough balance to send to the created contract.
-        if caller_info.balance < inputs.value {
+        // decrement of balance is done in the create_account_checkpoint.
+        if *caller_info.balance() < inputs.value {
             return return_error(InstructionResult::OutOfFunds);
         }
 
         // Increase nonce of caller and check if it overflows
-        let old_nonce = caller_info.nonce;
-        let Some(new_nonce) = old_nonce.checked_add(1) else {
+        let old_nonce = caller_info.nonce();
+        if !caller_info.bump_nonce() {
             return return_error(InstructionResult::Return);
         };
-        caller_info.nonce = new_nonce;
-        context
-            .journal_mut()
-            .nonce_bump_journal_entry(inputs.caller);
 
         // Create address
         let mut init_code_hash = None;

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [31.0.2](https://github.com/bluealloy/revm/compare/revm-v31.0.1...revm-v31.0.2) - 2025-11-10
+
+### Other
+
+- updated the following local packages: revm-database, revm-context, revm-handler, revm-inspector
+
+## [31.0.1](https://github.com/bluealloy/revm/compare/revm-v31.0.0...revm-v31.0.1) - 2025-11-07
+
+### Other
+
+- updated the following local packages: revm-primitives, revm-context, revm-bytecode, revm-state, revm-database-interface, revm-context-interface, revm-database, revm-interpreter, revm-precompile, revm-handler, revm-inspector
+
+## [31.0.0](https://github.com/bluealloy/revm/compare/revm-v30.2.0...revm-v31.0.0) - 2025-10-30
+
+### Other
+
+- consolidate revme imports ([#3088](https://github.com/bluealloy/revm/pull/3088))
+
+## [30.2.0](https://github.com/bluealloy/revm/compare/revm-v30.1.2...revm-v30.2.0) - 2025-10-17
+
+### Other
+
+- updated the following local packages: revm-interpreter, revm-handler, revm-inspector
+
+## [30.1.2](https://github.com/bluealloy/revm/compare/revm-v30.1.1...revm-v30.1.2) - 2025-10-15
+
+### Other
+
+- updated the following local packages: revm-bytecode, revm-state, revm-database-interface, revm-context-interface, revm-context, revm-database, revm-interpreter, revm-handler, revm-inspector
+
 ## [30.1.1](https://github.com/bluealloy/revm/compare/revm-v30.1.0...revm-v30.1.1) - 2025-10-15
 
 ### Other
