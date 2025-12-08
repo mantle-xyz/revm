@@ -564,7 +564,7 @@ where
 
             // If the transaction failed, we only mint the BVM_ETH tokens.
             // We do not transfer the BVM_ETH tokens.
-            let _ = BvmEth::process_eth_deposit(evm.ctx(), true);
+            BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from)?;
 
             // The gas used of a failed deposit post-regolith is the gas
             // limit of the transaction. pre-regolith, it is the gas limit
@@ -1041,5 +1041,52 @@ mod tests {
                 OpTransactionError::HaltedDepositPostRegolith
             ))
         )
+    }
+
+    #[test]
+    fn test_halted_deposit_bvm_eth_mint_only() {
+        let caller = Address::from([0x01; 20]);
+        let mint_amount = 100u64;
+        let transfer_amount = 50u64;
+
+        let ctx = Context::op()
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.mint = Some(mint_amount.into());
+                tx.deposit.eth_value = Some(mint_amount.into());
+                tx.deposit.eth_tx_value = Some(transfer_amount.into());
+                tx.base.value = U256::from(transfer_amount);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        // Simulate the error that happens when a deposit transaction halts.
+        let error = EVMError::Transaction(OpTransactionError::HaltedDepositPostRegolith);
+
+        // catch_error handles the cleanup and BVM_ETH minting logic for failed deposits.
+        let result = handler.catch_error(&mut evm, error).unwrap();
+
+        match result {
+            ExecutionResult::Halt { reason, .. } => {
+                assert_eq!(reason, OpHaltReason::FailedDeposit);
+            }
+            _ => panic!("Expected Halt result"),
+        }
+
+        // Verify BVM_ETH was minted.
+        // We calculate the storage slot for the caller's balance in the BvmEth contract
+        let slot = BvmEth::get_balance_slot(caller);
+        let balance = evm
+            .ctx()
+            .journal_mut()
+            .sload(BvmEth::ADDRESS, slot)
+            .unwrap()
+            .data;
+
+        assert_eq!(balance, U256::from(mint_amount));
     }
 }
