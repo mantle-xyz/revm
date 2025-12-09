@@ -161,9 +161,7 @@ where
         &self,
         evm: &mut Self::Evm,
     ) -> Result<(), Self::Error> {
-        let (block, tx, cfg, journal, chain, _) = evm.ctx().all_mut();
-        let spec = cfg.spec();
-
+        let ctx = evm.ctx();
         let is_deposit = ctx.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
 
         if is_deposit {
@@ -171,8 +169,10 @@ where
             BvmEth::process_eth_deposit(ctx).map_err(ERROR::from)?;
         }
 
-        if is_deposit {
-            let (block, tx, cfg, journal, _, _) = evm.ctx().all_mut();
+        let (block, tx, cfg, journal, chain, _) = evm.ctx().all_mut();
+        let spec = cfg.spec();
+
+        if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
             let basefee = block.basefee() as u128;
             let blob_price = block.blob_gasprice().unwrap_or_default();
             // deposit skips max fee check and just deducts the effective balance spending.
@@ -204,12 +204,6 @@ where
 
             return Ok(());
         }
-
-        // [MANTLE] Different from optimism, there is no need to calculate L1COST here.
-        // L1 cost requires introducing token_ratio and should be calculated in execute().
-        let additional_cost = U256::ZERO;
-
-        let (tx, journal) = evm.ctx().tx_journal_mut();
 
         // L1 block info is stored in the context for later use.
         // and it will be reloaded from the database if it is not for the current block.
@@ -319,11 +313,19 @@ where
         evm: &mut Self::Evm,
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        let context = evm.ctx();
-        if context.tx().tx_type() != DEPOSIT_TRANSACTION_TYPE {
-            self.mainnet.reimburse_caller(evm, frame_result)?;
+        let mut additional_refund = U256::ZERO;
+
+        if evm.ctx().tx().tx_type() != DEPOSIT_TRANSACTION_TYPE
+            && !evm.ctx().cfg().is_fee_charge_disabled()
+        {
+            let spec = evm.ctx().cfg().spec();
+            additional_refund = evm
+                .ctx()
+                .chain()
+                .operator_fee_refund(frame_result.gas(), spec);
         }
-        Ok(())
+
+        reimburse_caller(evm.ctx(), frame_result.gas(), additional_refund).map_err(From::from)
     }
 
     fn execution(
@@ -642,7 +644,7 @@ mod tests {
     };
     use alloy_primitives::uint;
     use revm::{
-        context::{Context, TxEnv},
+        context::{BlockEnv, Context, TxEnv},
         database::InMemoryDB,
         database_interface::EmptyDB,
         handler::EthFrame,
@@ -650,6 +652,7 @@ mod tests {
         primitives::{bytes, Address, Bytes, B256},
         state::AccountInfo,
     };
+    use rstest::rstest;
 
     /// Creates frame result.
     fn call_last_frame_return(
@@ -925,7 +928,8 @@ mod tests {
                 operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
                 tx_l1_cost: Some(U256::ZERO),
-                da_footprint_gas_scalar: None
+                da_footprint_gas_scalar: None,
+                token_ratio: Some(U256::ZERO),
             }
         );
     }
@@ -1020,6 +1024,7 @@ mod tests {
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
                 tx_l1_cost: Some(U256::ZERO),
                 da_footprint_gas_scalar: Some(DA_FOOTPRINT_GAS_SCALAR as u16),
+                token_ratio: Some(U256::ZERO),
             }
         );
     }
@@ -1073,6 +1078,7 @@ mod tests {
                 l1_base_fee: L1_BASE_FEE,
                 l1_fee_overhead: Some(L1_FEE_OVERHEAD),
                 l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
+                token_ratio: Some(U256::ZERO),
                 tx_l1_cost: Some(U256::ZERO),
                 ..Default::default()
             }
@@ -1136,6 +1142,7 @@ mod tests {
                 l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
                 empty_ecotone_scalars: false,
                 l1_fee_overhead: None,
+                token_ratio: Some(U256::ZERO),
                 tx_l1_cost: Some(U256::ZERO),
                 ..Default::default()
             }
@@ -1212,6 +1219,7 @@ mod tests {
                 l1_fee_overhead: None,
                 operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
+                token_ratio: Some(U256::ZERO),
                 tx_l1_cost: Some(U256::ZERO),
                 ..Default::default()
             }
@@ -1259,7 +1267,7 @@ mod tests {
 
         // Check the account balance is updated.
         let account = evm.ctx().journal_mut().load_account(caller).unwrap();
-        assert_eq!(account.info.balance, U256::from(1049));
+        assert_eq!(account.info.balance, U256::from(1));
     }
 
     #[test]
@@ -1269,7 +1277,7 @@ mod tests {
         db.insert_account_info(
             caller,
             AccountInfo {
-                balance: U256::from(48),
+                balance: U256::from(1048),
                 ..Default::default()
             },
         );

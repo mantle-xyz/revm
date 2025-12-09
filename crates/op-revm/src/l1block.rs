@@ -1,16 +1,21 @@
 //! Contains the `[L1BlockInfo]` type and its implementation.
 use crate::{
     constants::{
-        GAS_ORACLE_CONTRACT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT, L1_SCALAR_SLOT,
+        BASE_FEE_SCALAR_OFFSET, BLOB_BASE_FEE_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_OFFSET,
+        DA_FOOTPRINT_GAS_SCALAR_SLOT, ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT,
+        EMPTY_SCALARS, GAS_ORACLE_CONTRACT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT,
+        L1_SCALAR_SLOT, OPERATOR_FEE_CONSTANT_OFFSET, OPERATOR_FEE_JOVIAN_MULTIPLIER,
+        OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE_SCALAR_DECIMAL, OPERATOR_FEE_SCALAR_OFFSET,
         TOKEN_RATIO_SLOT,
     },
-    transaction::{estimate_tx_compressed_size, OpTxTr},
+    transaction::OpTxTr,
     OpSpecId,
 };
 use revm::{
     database_interface::Database,
-    interpreter::gas::{
-        get_tokens_in_calldata, NON_ZERO_BYTE_MULTIPLIER_ISTANBUL, STANDARD_TOKEN_COST,
+    interpreter::{
+        gas::{get_tokens_in_calldata, NON_ZERO_BYTE_MULTIPLIER_ISTANBUL, STANDARD_TOKEN_COST},
+        Gas,
     },
     primitives::U256,
 };
@@ -40,6 +45,18 @@ pub struct L1BlockInfo {
     pub token_ratio: Option<U256>,
     /// Last calculated l1 fee cost. Uses as a cache between validation and pre execution stages.
     pub tx_l1_cost: Option<U256>,
+    /// The L1 blob base fee. Introduced in Ecotone.
+    pub l1_blob_base_fee: Option<U256>,
+    /// The L1 blob base fee scalar. Introduced in Ecotone.
+    pub l1_blob_base_fee_scalar: Option<U256>,
+    /// Whether the Ecotone scalars are empty (use Bedrock cost function). Introduced in Ecotone.
+    pub empty_ecotone_scalars: bool,
+    /// The operator fee scalar. Introduced in Isthmus.
+    pub operator_fee_scalar: Option<U256>,
+    /// The operator fee constant. Introduced in Isthmus.
+    pub operator_fee_constant: Option<U256>,
+    /// The DA footprint gas scalar. Introduced in Jovian.
+    pub da_footprint_gas_scalar: Option<u16>,
 }
 
 impl L1BlockInfo {
@@ -133,14 +150,85 @@ impl L1BlockInfo {
         let l1_fee_overhead = db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?;
         let l1_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
 
-        Ok(L1BlockInfo {
+        let mut out = L1BlockInfo {
             l2_block: Some(l2_block),
             l1_base_fee,
             l1_fee_overhead: Some(l1_fee_overhead),
             l1_base_fee_scalar: l1_fee_scalar,
             token_ratio: Some(token_ratio),
             ..Default::default()
-        })
+        };
+
+        // Post-Ecotone
+        if !spec_id.is_enabled_in(OpSpecId::ECOTONE) {
+            out.l1_base_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
+            out.l1_fee_overhead = Some(db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?);
+
+            return Ok(out);
+        }
+
+        out.try_fetch_ecotone(db)?;
+
+        // Post-Isthmus L1 block info
+        if spec_id.is_enabled_in(OpSpecId::ISTHMUS) {
+            out.try_fetch_isthmus(db)?;
+        }
+
+        // Pre-Jovian
+        if spec_id.is_enabled_in(OpSpecId::JOVIAN) {
+            out.try_fetch_jovian(db)?;
+        }
+
+        Ok(out)
+    }
+
+    /// Calculate the operator fee for executing this transaction.
+    ///
+    /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
+    pub fn operator_fee_charge(&self, input: &[u8], gas_limit: U256, spec_id: OpSpecId) -> U256 {
+        // If the input is a deposit transaction or empty, the default value is zero.
+        if input.is_empty() || input.first() == Some(&0x7E) {
+            return U256::ZERO;
+        }
+
+        self.operator_fee_charge_inner(gas_limit, spec_id)
+    }
+
+    /// Calculate the operator fee for the given `gas`.
+    fn operator_fee_charge_inner(&self, gas: U256, spec_id: OpSpecId) -> U256 {
+        let operator_fee_scalar = self
+            .operator_fee_scalar
+            .expect("Missing operator fee scalar for isthmus L1 Block");
+        let operator_fee_constant = self
+            .operator_fee_constant
+            .expect("Missing operator fee constant for isthmus L1 Block");
+
+        let product = if spec_id.is_enabled_in(OpSpecId::JOVIAN) {
+            gas.saturating_mul(operator_fee_scalar)
+                .saturating_mul(U256::from(OPERATOR_FEE_JOVIAN_MULTIPLIER))
+        } else {
+            gas.saturating_mul(operator_fee_scalar) / U256::from(OPERATOR_FEE_SCALAR_DECIMAL)
+        };
+
+        product.saturating_add(operator_fee_constant)
+    }
+
+    /// Calculate the operator fee for executing this transaction.
+    ///
+    /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
+    pub fn operator_fee_refund(&self, gas: &Gas, spec_id: OpSpecId) -> U256 {
+        if !spec_id.is_enabled_in(OpSpecId::ISTHMUS) {
+            return U256::ZERO;
+        }
+
+        let operator_cost_gas_limit =
+            self.operator_fee_charge_inner(U256::from(gas.limit()), spec_id);
+        let operator_cost_gas_used = self.operator_fee_charge_inner(
+            U256::from(gas.limit() - (gas.remaining() + gas.refunded() as u64)),
+            spec_id,
+        );
+
+        operator_cost_gas_limit.saturating_sub(operator_cost_gas_used)
     }
 
     /// Calculate the data gas for posting the transaction on L1. Calldata costs 16 gas per byte
