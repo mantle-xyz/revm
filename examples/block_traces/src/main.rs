@@ -44,10 +44,14 @@ async fn main() -> anyhow::Result<()> {
     let end_block = std::env::var("END_BLOCK")
         .expect("END_BLOCK must be set")
         .parse::<u64>()?;
+    let spec = std::env::var("OP_SPEC")
+        .unwrap_or_else(|_| "Isthmus".to_string())
+        .parse::<OpSpecId>()
+        .expect("Invalid OP_SPEC value. Valid values: Bedrock, Regolith, Canyon, Ecotone, Fjord, Granite, Holocene, Isthmus, Jovian, Interop, Osaka");
 
     for i in start_block..=end_block {
         println!("Processing block number: {i}");
-        process_block(i, chain_id, client.clone()).await?;
+        process_block(i, chain_id, spec, client.clone()).await?;
     }
 
     Ok(())
@@ -56,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
 async fn process_block(
     block_number: u64,
     chain_id: u64,
+    spec: OpSpecId,
     client: impl Provider<Optimism> + Clone,
 ) -> anyhow::Result<()> {
     // Fetch the transaction-rich block
@@ -88,7 +93,7 @@ async fn process_block(
         })
         .modify_cfg_chained(|c| {
             c.chain_id = chain_id;
-            c.spec = OpSpecId::ISTHMUS;
+            c.spec = spec;
         });
 
     let mut evm = ctx.build_op();
