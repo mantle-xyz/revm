@@ -38,8 +38,12 @@ async fn main() -> anyhow::Result<()> {
     let client = ProviderBuilder::<_, _, Optimism>::default().connect_http(rpc_url);
 
     // Params
-    let start_block = 86486915;
-    let end_block = 86486917;
+    let start_block = std::env::var("START_BLOCK")
+        .expect("START_BLOCK must be set")
+        .parse::<u64>()?;
+    let end_block = std::env::var("END_BLOCK")
+        .expect("END_BLOCK must be set")
+        .parse::<u64>()?;
 
     for i in start_block..=end_block {
         println!("Processing block number: {i}");
