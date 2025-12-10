@@ -159,15 +159,16 @@ impl L1BlockInfo {
             ..Default::default()
         };
 
-        // Post-Ecotone
-        if !spec_id.is_enabled_in(OpSpecId::ECOTONE) {
-            out.l1_base_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
-            out.l1_fee_overhead = Some(db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?);
+        // For Mantle, [!spec_id.is_enabled_in(OpSpecId::ECOTONE)] is always true. So we don't need to fetch Ecotone.
+        // // Post-Ecotone
+        // if !spec_id.is_enabled_in(OpSpecId::ECOTONE) {
+        //     out.l1_base_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
+        //     out.l1_fee_overhead = Some(db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?);
 
-            return Ok(out);
-        }
+        //     return Ok(out);
+        // }
 
-        out.try_fetch_ecotone(db)?;
+        // out.try_fetch_ecotone(db)?;
 
         // Post-Isthmus L1 block info
         if spec_id.is_enabled_in(OpSpecId::ISTHMUS) {
