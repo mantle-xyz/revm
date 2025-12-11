@@ -22,7 +22,7 @@ use revm::{
     context_interface::either::Either,
     database::{AlloyDB, CacheDB, StateBuilder},
     database_interface::WrapDatabaseAsync,
-    primitives::TxKind,
+    primitives::{TxKind, KECCAK_EMPTY},
     Context, ExecuteCommitEvm,
 };
 use std::time::Instant;
@@ -350,7 +350,13 @@ async fn verify_storage_with_proof<DB>(
                         println!("  ❌ Nonce mismatch for {}: remote={}, local={}", 
                             address, proof.nonce, account.info.nonce);
                     }
-                    if proof.code_hash != account.info.code_hash {
+                    
+                    // Compare code_hash with compatibility for empty code representations
+                    // Both KECCAK_EMPTY and zero hash represent "no code"
+                    let remote_is_empty = proof.code_hash == KECCAK_EMPTY || proof.code_hash == B256::ZERO;
+                    let local_is_empty = account.info.code_hash == KECCAK_EMPTY || account.info.code_hash == B256::ZERO;
+                    
+                    if !(remote_is_empty && local_is_empty) && proof.code_hash != account.info.code_hash {
                         code_hash_mismatches += 1;
                         println!("  ❌ Code hash mismatch for {}: remote={}, local={}", 
                             address, proof.code_hash, account.info.code_hash);
