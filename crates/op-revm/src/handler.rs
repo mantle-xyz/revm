@@ -25,7 +25,6 @@ use revm::{
     },
     primitives::{hardfork::SpecId, Address, TxKind, U256},
 };
-use std::boxed::Box;
 
 /// Optimism handler extends the [`Handler`] with Optimism specific logic.
 #[derive(Debug, Clone)]
@@ -217,19 +216,20 @@ where
         validate_account_nonce_and_code_with_components(&caller_account.info, tx, cfg)?;
 
         // check additional cost and deduct it from the caller's balances
-        let mut balance = caller_account.info.balance;
+        let balance = caller_account.info.balance;
 
-        if !cfg.is_fee_charge_disabled() {
-            let additional_cost = chain.tx_cost_with_tx(tx, spec);
-            let Some(new_balance) = balance.checked_sub(additional_cost) else {
-                return Err(InvalidTransaction::LackOfFundForMaxFee {
-                    fee: Box::new(additional_cost),
-                    balance: Box::new(balance),
-                }
-                .into());
-            };
-            balance = new_balance
-        }
+        // Mantle default disable fee charge
+        // if !cfg.is_fee_charge_disabled() {
+        //     let additional_cost = chain.tx_cost_with_tx(tx, spec);
+        //     let Some(new_balance) = balance.checked_sub(additional_cost) else {
+        //         return Err(InvalidTransaction::LackOfFundForMaxFee {
+        //             fee: Box::new(additional_cost),
+        //             balance: Box::new(balance),
+        //         }
+        //         .into());
+        //     };
+        //     balance = new_balance
+        // }
 
         let balance = calculate_caller_fee(balance, tx, block, cfg)?;
 
@@ -313,17 +313,18 @@ where
         evm: &mut Self::Evm,
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        let mut additional_refund = U256::ZERO;
+        let additional_refund = U256::ZERO;
 
-        if evm.ctx().tx().tx_type() != DEPOSIT_TRANSACTION_TYPE
-            && !evm.ctx().cfg().is_fee_charge_disabled()
-        {
-            let spec = evm.ctx().cfg().spec();
-            additional_refund = evm
-                .ctx()
-                .chain()
-                .operator_fee_refund(frame_result.gas(), spec);
-        }
+        // Mantle default disable fee charge
+        // if evm.ctx().tx().tx_type() != DEPOSIT_TRANSACTION_TYPE
+        //     && !evm.ctx().cfg().is_fee_charge_disabled()
+        // {
+        //     let spec = evm.ctx().cfg().spec();
+        //     additional_refund = evm
+        //         .ctx()
+        //         .chain()
+        //         .operator_fee_refund(frame_result.gas(), spec);
+        // }
 
         reimburse_caller(evm.ctx(), frame_result.gas(), additional_refund).map_err(From::from)
     }

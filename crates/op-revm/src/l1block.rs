@@ -1,9 +1,9 @@
 //! Contains the `[L1BlockInfo]` type and its implementation.
 use crate::{
     constants::{
-        BASE_FEE_SCALAR_OFFSET, BLOB_BASE_FEE_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_OFFSET,
-        DA_FOOTPRINT_GAS_SCALAR_SLOT, ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT,
-        EMPTY_SCALARS, GAS_ORACLE_CONTRACT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT,
+        DA_FOOTPRINT_GAS_SCALAR_OFFSET,
+        DA_FOOTPRINT_GAS_SCALAR_SLOT,
+        GAS_ORACLE_CONTRACT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT,
         L1_SCALAR_SLOT, OPERATOR_FEE_CONSTANT_OFFSET, OPERATOR_FEE_JOVIAN_MULTIPLIER,
         OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE_SCALAR_DECIMAL, OPERATOR_FEE_SCALAR_OFFSET,
         TOKEN_RATIO_SLOT,
@@ -104,35 +104,35 @@ impl L1BlockInfo {
         Ok(())
     }
 
-    /// Try to fetch the L1 block info from the database, post-Ecotone.
-    fn try_fetch_ecotone<DB: Database>(&mut self, db: &mut DB) -> Result<(), DB::Error> {
-        self.l1_blob_base_fee = Some(db.storage(L1_BLOCK_CONTRACT, ECOTONE_L1_BLOB_BASE_FEE_SLOT)?);
+    // /// Try to fetch the L1 block info from the database, post-Ecotone.
+    // fn try_fetch_ecotone<DB: Database>(&mut self, db: &mut DB) -> Result<(), DB::Error> {
+    //     self.l1_blob_base_fee = Some(db.storage(L1_BLOCK_CONTRACT, ECOTONE_L1_BLOB_BASE_FEE_SLOT)?);
 
-        let l1_fee_scalars = db
-            .storage(L1_BLOCK_CONTRACT, ECOTONE_L1_FEE_SCALARS_SLOT)?
-            .to_be_bytes::<32>();
+    //     let l1_fee_scalars = db
+    //         .storage(L1_BLOCK_CONTRACT, ECOTONE_L1_FEE_SCALARS_SLOT)?
+    //         .to_be_bytes::<32>();
 
-        self.l1_base_fee_scalar = U256::from_be_slice(
-            l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BASE_FEE_SCALAR_OFFSET + 4].as_ref(),
-        );
+    //     self.l1_base_fee_scalar = U256::from_be_slice(
+    //         l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BASE_FEE_SCALAR_OFFSET + 4].as_ref(),
+    //     );
 
-        let l1_blob_base_fee = U256::from_be_slice(
-            l1_fee_scalars[BLOB_BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4].as_ref(),
-        );
-        self.l1_blob_base_fee_scalar = Some(l1_blob_base_fee);
+    //     let l1_blob_base_fee = U256::from_be_slice(
+    //         l1_fee_scalars[BLOB_BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4].as_ref(),
+    //     );
+    //     self.l1_blob_base_fee_scalar = Some(l1_blob_base_fee);
 
-        // Check if the L1 fee scalars are empty. If so, we use the Bedrock cost function.
-        // The L1 fee overhead is only necessary if `empty_ecotone_scalars` is true, as it was deprecated in Ecotone.
-        self.empty_ecotone_scalars = l1_blob_base_fee.is_zero()
-            && l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4]
-                == EMPTY_SCALARS;
-        self.l1_fee_overhead = self
-            .empty_ecotone_scalars
-            .then(|| db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT))
-            .transpose()?;
+    //     // Check if the L1 fee scalars are empty. If so, we use the Bedrock cost function.
+    //     // The L1 fee overhead is only necessary if `empty_ecotone_scalars` is true, as it was deprecated in Ecotone.
+    //     self.empty_ecotone_scalars = l1_blob_base_fee.is_zero()
+    //         && l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4]
+    //             == EMPTY_SCALARS;
+    //     self.l1_fee_overhead = self
+    //         .empty_ecotone_scalars
+    //         .then(|| db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT))
+    //         .transpose()?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     /// Try to fetch the L1 block info from the database.
     pub fn try_fetch<DB: Database>(
