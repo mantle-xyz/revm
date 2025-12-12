@@ -7,6 +7,7 @@ use alloy_consensus::{transaction::SignerRecoverable, TxEip1559, TxEip2930, TxEi
 use alloy_eips::{BlockId, Decodable2718, Typed2718};
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
+use alloy_rpc_types::eth::EIP1186AccountProofResponse;
 use dotenv::dotenv;
 use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
 use op_alloy_network::Optimism;
@@ -21,7 +22,7 @@ use revm::{
     context_interface::either::Either,
     database::{AlloyDB, CacheDB, StateBuilder},
     database_interface::WrapDatabaseAsync,
-    primitives::TxKind,
+    primitives::{TxKind, KECCAK_EMPTY},
     Context, ExecuteCommitEvm,
 };
 use std::time::Instant;
@@ -38,12 +39,26 @@ async fn main() -> anyhow::Result<()> {
     let client = ProviderBuilder::<_, _, Optimism>::default().connect_http(rpc_url);
 
     // Params
-    let start_block = 86486915;
-    let end_block = 86486917;
+    let start_block = std::env::var("START_BLOCK")
+        .expect("START_BLOCK must be set")
+        .parse::<u64>()?;
+    let end_block = std::env::var("END_BLOCK")
+        .expect("END_BLOCK must be set")
+        .parse::<u64>()?;
+    let spec = std::env::var("OP_SPEC")
+        .unwrap_or_else(|_| "Isthmus".to_string())
+        .parse::<OpSpecId>()
+        .expect("Invalid OP_SPEC value. Valid values: Bedrock, Regolith, Canyon, Ecotone, Fjord, Granite, Holocene, Isthmus, Jovian, Interop, Osaka");
+
+    // Check if state verification is enabled
+    let state_verify = std::env::var("STATE_VERIFY")
+        .unwrap_or_else(|_| "false".to_string())
+        .to_lowercase()
+        == "true";
 
     for i in start_block..=end_block {
         println!("Processing block number: {i}");
-        process_block(i, chain_id, client.clone()).await?;
+        process_block(i, chain_id, spec, state_verify, client.clone()).await?;
     }
 
     Ok(())
@@ -52,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
 async fn process_block(
     block_number: u64,
     chain_id: u64,
+    spec: OpSpecId,
+    state_verify: bool,
     client: impl Provider<Optimism> + Clone,
 ) -> anyhow::Result<()> {
     // Fetch the transaction-rich block
@@ -84,7 +101,7 @@ async fn process_block(
         })
         .modify_cfg_chained(|c| {
             c.chain_id = chain_id;
-            c.spec = OpSpecId::ISTHMUS;
+            c.spec = spec;
         });
 
     let mut evm = ctx.build_op();
@@ -109,7 +126,7 @@ async fn process_block(
             .await
             .expect("Block not found");
         let tx = OpTxEnvelope::decode_2718(&mut raw_tx.as_ref()).unwrap();
-        
+
         let optx = prepare_tx_env(&tx, tx.recover_signer().unwrap(), raw_tx);
         evm.0.modify_tx(|etx| {
             *etx = optx;
@@ -117,7 +134,7 @@ async fn process_block(
 
         let is_deposit = tx.is_deposit();
         println!("is_deposit: {is_deposit}");
-        
+
         let res = evm.replay_commit();
 
         if let Err(ref res) = res {
@@ -139,6 +156,13 @@ async fn process_block(
             println!("--- passed✅");
         } else {
             println!("--- failed❌");
+        }
+    }
+
+    // Verify account states using eth_getProof if enabled
+    if state_verify {
+        if let Err(e) = verify_storage_with_proof(&state, client.clone(), block_number).await {
+            println!("⚠️  Error during verification: {}", e);
         }
     }
 
@@ -282,4 +306,101 @@ impl ToTxEnv for TxEip7702 {
             ..Default::default()
         }
     }
+}
+
+// ============================================================================
+// Block State Verification Functions
+// ============================================================================
+
+/// Batch verify account storage slots and state using eth_getProof
+async fn verify_storage_with_proof<DB>(
+    state: &revm::database::State<DB>,
+    client: impl Provider<Optimism> + Clone,
+    block_number: u64,
+) -> anyhow::Result<()> {
+    let block_id: BlockId = block_number.into();
+    let accounts = &state.cache.accounts;
+
+    let mut total_failed = 0;
+    let mut balance_mismatches = 0;
+    let mut nonce_mismatches = 0;
+    let mut code_hash_mismatches = 0;
+
+    for (address, cache_account) in accounts {
+        if let Some(account) = &cache_account.account {
+            // Collect all storage slot keys (batch query)
+            let storage_keys: Vec<B256> = account.storage.keys().map(|k| B256::from(*k)).collect();
+
+            // Call eth_getProof once to get account state and all storage slot proofs
+            let proof_result: Result<EIP1186AccountProofResponse, _> = client
+                .get_proof(*address, storage_keys.clone())
+                .block_id(block_id)
+                .await;
+
+            match proof_result {
+                Ok(proof) => {
+                    // Verify basic account information
+                    if proof.balance != account.info.balance {
+                        balance_mismatches += 1;
+                        println!("  ❌ Balance mismatch for {}: remote={}, local={}", 
+                            address, proof.balance, account.info.balance);
+                    }
+                    if proof.nonce != account.info.nonce {
+                        nonce_mismatches += 1;
+                        println!("  ❌ Nonce mismatch for {}: remote={}, local={}", 
+                            address, proof.nonce, account.info.nonce);
+                    }
+                    
+                    // Compare code_hash with compatibility for empty code representations
+                    // Both KECCAK_EMPTY and zero hash represent "no code"
+                    let remote_is_empty = proof.code_hash == KECCAK_EMPTY || proof.code_hash == B256::ZERO;
+                    let local_is_empty = account.info.code_hash == KECCAK_EMPTY || account.info.code_hash == B256::ZERO;
+                    
+                    if !(remote_is_empty && local_is_empty) && proof.code_hash != account.info.code_hash {
+                        code_hash_mismatches += 1;
+                        println!("  ❌ Code hash mismatch for {}: remote={}, local={}", 
+                            address, proof.code_hash, account.info.code_hash);
+                    }
+
+                    // Verify each storage slot (if any)
+                    if !storage_keys.is_empty() {
+                        for storage_proof in &proof.storage_proof {
+                            let key = storage_proof.key;
+                            let value_from_proof = storage_proof.value;
+
+                            let key_str = format!("{:?}", key);
+                            let key_str_clean =
+                                key_str.trim_start_matches("Hash(0x").trim_end_matches(")");
+
+                            if let Ok(key_u256) = U256::from_str_radix(key_str_clean, 16) {
+                                if let Some(cached_value) = account.storage.get(&key_u256) {
+                                    if value_from_proof != *cached_value {
+                                        total_failed += 1;
+                                        println!("  ❌ Storage mismatch for {} at slot {}: remote={}, local={}", 
+                                            address, key, value_from_proof, cached_value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️  Failed to get proof for account {}: {}", address, e);
+                }
+            }
+        }
+    }
+
+    // Print concise verification result (similar to gas used verification)
+    let all_match = total_failed == 0 && balance_mismatches == 0 && nonce_mismatches == 0 && code_hash_mismatches == 0;
+
+    if all_match {
+        println!("--- State verification: passed✅");
+    } else {
+        println!("--- State verification: failed❌");
+        println!("  Balance mismatches: {}, Nonce mismatches: {}, Code hash mismatches: {}, Storage mismatches: {}", 
+            balance_mismatches, nonce_mismatches, code_hash_mismatches, total_failed);
+    }
+
+    Ok(())
 }

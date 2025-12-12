@@ -7,49 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [25.0.2](https://github.com/bluealloy/revm/compare/revm-interpreter-v25.0.1...revm-interpreter-v25.0.2) - 2025-08-23
-
-### Fixed
-
-- *(interpreter)* correct CreateContractStartingWithEF halt mapping ([#2890](https://github.com/bluealloy/revm/pull/2890))
-
-## [25.0.1](https://github.com/bluealloy/revm/compare/revm-interpreter-v25.0.0...revm-interpreter-v25.0.1) - 2025-08-12
+## [29.0.1](https://github.com/bluealloy/revm/compare/revm-interpreter-v29.0.0...revm-interpreter-v29.0.1) - 2025-11-07
 
 ### Other
 
-- updated the following local packages: revm-primitives, revm-bytecode, revm-context-interface
+- updated the following local packages: revm-primitives, revm-bytecode, revm-state, revm-context-interface
 
-## [25.0.0](https://github.com/bluealloy/revm/compare/revm-interpreter-v24.0.0...revm-interpreter-v25.0.0) - 2025-08-06
+## [28.0.1](https://github.com/bluealloy/revm/compare/revm-interpreter-v28.0.0...revm-interpreter-v28.0.1) - 2025-10-30
+
+### Fixed
+
+- hook up Cfg::memory_limit ([#3129](https://github.com/bluealloy/revm/pull/3129))
+
+## [28.0.0](https://github.com/bluealloy/revm/compare/revm-interpreter-v27.0.2...revm-interpreter-v28.0.0) - 2025-10-17
 
 ### Added
 
-- short address for journal cold/warm check ([#2849](https://github.com/bluealloy/revm/pull/2849))
-- gastable, record static gas in Interpreter loop ([#2822](https://github.com/bluealloy/revm/pull/2822))
+- Optional Bytecode in CallInput ([#3110](https://github.com/bluealloy/revm/pull/3110))
 
 ### Fixed
 
-- map new once and for all (+ci) ([#2852](https://github.com/bluealloy/revm/pull/2852))
+- return MemoryLimitOOG when memory_limit is enabled ([#3109](https://github.com/bluealloy/revm/pull/3109))
 
 ### Other
 
-- *(deps)* bump ruint ([#2811](https://github.com/bluealloy/revm/pull/2811))
-- specialize halt, making instruction code very slightly smaller ([#2840](https://github.com/bluealloy/revm/pull/2840))
-- update README.md ([#2842](https://github.com/bluealloy/revm/pull/2842))
-- add debug assertions to set_action ([#2832](https://github.com/bluealloy/revm/pull/2832))
-- improve ExtBytecode hash handling ([#2826](https://github.com/bluealloy/revm/pull/2826))
-- fix inspector, cleanup loop ([#2797](https://github.com/bluealloy/revm/pull/2797))
-- start InstructionResult at 1 ([#2802](https://github.com/bluealloy/revm/pull/2802))
-- fix typos ([#2800](https://github.com/bluealloy/revm/pull/2800))
-- improve inspector loop ([#2776](https://github.com/bluealloy/revm/pull/2776))
-- add rust-version and note about MSRV ([#2789](https://github.com/bluealloy/revm/pull/2789))
-- collapse debug info for interpreter macros ([#2780](https://github.com/bluealloy/revm/pull/2780))
-# Changelog
-All notable changes to this project will be documented in this file.
+- *(instructions)* fix typo in spurious_dragon variable ([#3106](https://github.com/bluealloy/revm/pull/3106))
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [27.0.2](https://github.com/bluealloy/revm/compare/revm-interpreter-v27.0.1...revm-interpreter-v27.0.2) - 2025-10-15
 
-## [Unreleased]
+### Other
+
+- updated the following local packages: revm-bytecode, revm-state, revm-context-interface
 
 ## [27.0.1](https://github.com/bluealloy/revm/compare/revm-interpreter-v27.0.0...revm-interpreter-v27.0.1) - 2025-10-15
 
@@ -100,6 +88,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 
 - updated the following local packages: revm-context-interface
+
+## [25.0.2](https://github.com/bluealloy/revm/compare/revm-interpreter-v25.0.1...revm-interpreter-v25.0.2) - 2025-08-23
+
+### Fixed
+
+- *(interpreter)* correct CreateContractStartingWithEF halt mapping ([#2890](https://github.com/bluealloy/revm/pull/2890))
+
+## [25.0.1](https://github.com/bluealloy/revm/compare/revm-interpreter-v25.0.0...revm-interpreter-v25.0.1) - 2025-08-12
+
+### Other
+
+- updated the following local packages: revm-primitives, revm-bytecode, revm-context-interface
+
+## [25.0.0](https://github.com/bluealloy/revm/compare/revm-interpreter-v24.0.0...revm-interpreter-v25.0.0) - 2025-08-06
+
+### Added
+
+- short address for journal cold/warm check ([#2849](https://github.com/bluealloy/revm/pull/2849))
+- gastable, record static gas in Interpreter loop ([#2822](https://github.com/bluealloy/revm/pull/2822))
+
+### Fixed
+
+- map new once and for all (+ci) ([#2852](https://github.com/bluealloy/revm/pull/2852))
+
+### Other
+
+- *(deps)* bump ruint ([#2811](https://github.com/bluealloy/revm/pull/2811))
+- specialize halt, making instruction code very slightly smaller ([#2840](https://github.com/bluealloy/revm/pull/2840))
+- update README.md ([#2842](https://github.com/bluealloy/revm/pull/2842))
+- add debug assertions to set_action ([#2832](https://github.com/bluealloy/revm/pull/2832))
+- improve ExtBytecode hash handling ([#2826](https://github.com/bluealloy/revm/pull/2826))
+- fix inspector, cleanup loop ([#2797](https://github.com/bluealloy/revm/pull/2797))
+- start InstructionResult at 1 ([#2802](https://github.com/bluealloy/revm/pull/2802))
+- fix typos ([#2800](https://github.com/bluealloy/revm/pull/2800))
+- improve inspector loop ([#2776](https://github.com/bluealloy/revm/pull/2776))
+- add rust-version and note about MSRV ([#2789](https://github.com/bluealloy/revm/pull/2789))
+- collapse debug info for interpreter macros ([#2780](https://github.com/bluealloy/revm/pull/2780))
+# Changelog
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [24.0.0](https://github.com/bluealloy/revm/compare/revm-interpreter-v23.0.2...revm-interpreter-v24.0.0) - 2025-07-23
 

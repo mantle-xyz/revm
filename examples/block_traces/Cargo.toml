@@ -30,6 +30,7 @@ alloy-eips.workspace = true
 alloy-provider = { workspace = true, default-features = true }
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
+alloy-rpc-types = { version = "1.0.27", default-features = false, features = ["eth"] }
 
 op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v210", default-features = false, features = [
     "k256",
