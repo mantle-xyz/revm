@@ -1,14 +1,14 @@
 //! Contains the `[L1BlockInfo]` type and its implementation.
 use crate::{
     constants::{
-        DA_FOOTPRINT_GAS_SCALAR_OFFSET,
-        DA_FOOTPRINT_GAS_SCALAR_SLOT,
-        GAS_ORACLE_CONTRACT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT,
-        L1_SCALAR_SLOT, OPERATOR_FEE_CONSTANT_OFFSET, OPERATOR_FEE_JOVIAN_MULTIPLIER,
+        BASE_FEE_SCALAR_OFFSET, BLOB_BASE_FEE_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_OFFSET,
+        DA_FOOTPRINT_GAS_SCALAR_SLOT, ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT,
+        EMPTY_SCALARS, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT, L1_SCALAR_SLOT,
+        NON_ZERO_BYTE_COST, OPERATOR_FEE_CONSTANT_OFFSET, OPERATOR_FEE_JOVIAN_MULTIPLIER,
         OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE_SCALAR_DECIMAL, OPERATOR_FEE_SCALAR_OFFSET,
-        TOKEN_RATIO_SLOT,
+        TOKEN_RATIO_SLOT, GAS_ORACLE_CONTRACT
     },
-    transaction::OpTxTr,
+    transaction::{estimate_tx_compressed_size, OpTxTr},
     OpSpecId,
 };
 use revm::{
@@ -240,6 +240,14 @@ impl L1BlockInfo {
     /// Prior to regolith, an extra 68 non-zero bytes were included in the rollup data costs to
     /// account for the empty signature.
     pub fn data_gas(&self, input: &[u8], spec_id: OpSpecId) -> U256 {
+        if spec_id.is_enabled_in(OpSpecId::FJORD) {
+            let estimated_size = self.tx_estimated_size_fjord(input);
+
+            return estimated_size
+                .saturating_mul(U256::from(NON_ZERO_BYTE_COST))
+                .wrapping_div(U256::from(1_000_000));
+        };
+
         // tokens in calldata where non-zero bytes are priced 4 times higher than zero bytes (Same as in Istanbul).
         let mut tokens_in_transaction_data = get_tokens_in_calldata(input, true);
 
@@ -249,6 +257,13 @@ impl L1BlockInfo {
         }
 
         U256::from(tokens_in_transaction_data.saturating_mul(STANDARD_TOKEN_COST))
+    }
+
+    // Calculate the estimated compressed transaction size in bytes, scaled by 1e6.
+    // This value is computed based on the following formula:
+    // max(minTransactionSize, intercept + fastlzCoef*fastlzSize)
+    fn tx_estimated_size_fjord(&self, input: &[u8]) -> U256 {
+        U256::from(estimate_tx_compressed_size(input))
     }
 
     /// Clears the cached L1 cost of the transaction.

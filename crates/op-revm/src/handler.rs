@@ -1,7 +1,7 @@
 //!Handler related to Optimism chain
 use crate::{
     api::exec::OpContextTr,
-    constants::{BASE_FEE_RECIPIENT, GAS_ORACLE_CONTRACT},
+    constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT, GAS_ORACLE_CONTRACT},
     transaction::{deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr},
     BvmEth, L1BlockInfo, OpHaltReason, OpSpecId,
 };
@@ -216,20 +216,20 @@ where
         validate_account_nonce_and_code_with_components(&caller_account.info, tx, cfg)?;
 
         // check additional cost and deduct it from the caller's balances
-        let balance = caller_account.info.balance;
+        let mut balance = caller_account.info.balance;
 
         // Mantle default disable fee charge
-        // if !cfg.is_fee_charge_disabled() {
-        //     let additional_cost = chain.tx_cost_with_tx(tx, spec);
-        //     let Some(new_balance) = balance.checked_sub(additional_cost) else {
-        //         return Err(InvalidTransaction::LackOfFundForMaxFee {
-        //             fee: Box::new(additional_cost),
-        //             balance: Box::new(balance),
-        //         }
-        //         .into());
-        //     };
-        //     balance = new_balance
-        // }
+        if !cfg.is_fee_charge_disabled() {
+            let additional_cost = chain.tx_cost_with_tx(tx, spec);
+            let Some(new_balance) = balance.checked_sub(additional_cost) else {
+                return Err(InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(additional_cost),
+                    balance: Box::new(balance),
+                }
+                .into());
+            };
+            balance = new_balance
+        }
 
         let balance = calculate_caller_fee(balance, tx, block, cfg)?;
 
@@ -313,18 +313,18 @@ where
         evm: &mut Self::Evm,
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        let additional_refund = U256::ZERO;
+        let mut additional_refund = U256::ZERO;
 
         // Mantle default disable fee charge
-        // if evm.ctx().tx().tx_type() != DEPOSIT_TRANSACTION_TYPE
-        //     && !evm.ctx().cfg().is_fee_charge_disabled()
-        // {
-        //     let spec = evm.ctx().cfg().spec();
-        //     additional_refund = evm
-        //         .ctx()
-        //         .chain()
-        //         .operator_fee_refund(frame_result.gas(), spec);
-        // }
+        if evm.ctx().tx().tx_type() != DEPOSIT_TRANSACTION_TYPE
+            && !evm.ctx().cfg().is_fee_charge_disabled()
+        {
+            let spec = evm.ctx().cfg().spec();
+            additional_refund = evm
+                .ctx()
+                .chain()
+                .operator_fee_refund(frame_result.gas(), spec);
+        }
 
         reimburse_caller(evm.ctx(), frame_result.gas(), additional_refund).map_err(From::from)
     }
@@ -453,18 +453,38 @@ where
         }
 
         self.mainnet.reward_beneficiary(evm, frame_result)?;
+        let basefee = evm.ctx().block().basefee() as u128;
 
+        // If the transaction is not a deposit transaction, fees are paid out
+        // to both the Base Fee Vault as well as the L1 Fee Vault.
         let ctx = evm.ctx();
-        let basefee = ctx.block().basefee() as u128;
+        let enveloped = ctx.tx().enveloped_tx().cloned();
+        let spec = ctx.cfg().spec();
+        let l1_block_info = ctx.chain_mut();
 
+        let Some(enveloped_tx) = &enveloped else {
+            return Err(ERROR::from_string(
+                "[OPTIMISM] Failed to load enveloped transaction.".into(),
+            ));
+        };
+
+        let l1_cost = l1_block_info.calculate_tx_l1_cost(enveloped_tx, spec);
+        let operator_fee_cost = if spec.is_enabled_in(OpSpecId::ISTHMUS) {
+            l1_block_info.operator_fee_charge(
+                enveloped_tx,
+                U256::from(frame_result.gas().used()),
+                spec,
+            )
+        } else {
+            U256::ZERO
+        };
         let base_fee_amount = U256::from(basefee.saturating_mul(frame_result.gas().used() as u128));
 
         // Send fees to their respective recipients
-        #[allow(clippy::single_element_loop)]
         for (recipient, amount) in [
-            // (L1_FEE_RECIPIENT, l1_cost),
+            (L1_FEE_RECIPIENT, l1_cost),
             (BASE_FEE_RECIPIENT, base_fee_amount),
-            // (OPERATOR_FEE_RECIPIENT, operator_fee_cost),
+            (OPERATOR_FEE_RECIPIENT, operator_fee_cost),
         ] {
             ctx.journal_mut().balance_incr(recipient, amount)?;
         }
