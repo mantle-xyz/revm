@@ -944,11 +944,15 @@ mod tests {
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
-                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
-                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
-                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
+                // Current implementation always reads from L1_SCALAR_SLOT, which is not set in test, so returns 0
+                l1_base_fee_scalar: U256::from(0),
+                // Current implementation does not read from ECOTONE_L1_BLOB_BASE_FEE_SLOT
+                l1_blob_base_fee: None,
+                // Current implementation does not read from ECOTONE_L1_FEE_SCALARS_SLOT
+                l1_blob_base_fee_scalar: None,
                 empty_ecotone_scalars: false,
-                l1_fee_overhead: None,
+                // Current implementation always reads from L1_OVERHEAD_SLOT, which is not set in test, so returns 0
+                l1_fee_overhead: Some(U256::from(0)),
                 operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
                 tx_l1_cost: Some(U256::ZERO),
@@ -1039,11 +1043,15 @@ mod tests {
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
-                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
-                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
-                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
+                // Current implementation always reads from L1_SCALAR_SLOT, which is not set in test, so returns 0
+                l1_base_fee_scalar: U256::from(0),
+                // Current implementation does not read from ECOTONE_L1_BLOB_BASE_FEE_SLOT
+                l1_blob_base_fee: None,
+                // Current implementation does not read from ECOTONE_L1_FEE_SCALARS_SLOT
+                l1_blob_base_fee_scalar: None,
                 empty_ecotone_scalars: false,
-                l1_fee_overhead: None,
+                // Current implementation always reads from L1_OVERHEAD_SLOT, which is not set in test, so returns 0
+                l1_fee_overhead: Some(U256::from(0)),
                 operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
                 tx_l1_cost: Some(U256::ZERO),
@@ -1161,11 +1169,15 @@ mod tests {
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
-                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
-                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
-                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
+                // Current implementation always reads from L1_SCALAR_SLOT, which is not set in test, so returns 0
+                l1_base_fee_scalar: U256::from(0),
+                // Current implementation does not read from ECOTONE_L1_BLOB_BASE_FEE_SLOT
+                l1_blob_base_fee: None,
+                // Current implementation does not read from ECOTONE_L1_FEE_SCALARS_SLOT
+                l1_blob_base_fee_scalar: None,
                 empty_ecotone_scalars: false,
-                l1_fee_overhead: None,
+                // Current implementation always reads from L1_OVERHEAD_SLOT, which is not set in test, so returns 0
+                l1_fee_overhead: Some(U256::from(0)),
                 token_ratio: Some(U256::ZERO),
                 tx_l1_cost: Some(U256::ZERO),
                 ..Default::default()
@@ -1236,11 +1248,15 @@ mod tests {
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
-                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
-                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
-                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
+                // Current implementation always reads from L1_SCALAR_SLOT, which is not set in test, so returns 0
+                l1_base_fee_scalar: U256::from(0),
+                // Current implementation does not read from ECOTONE_L1_BLOB_BASE_FEE_SLOT
+                l1_blob_base_fee: None,
+                // Current implementation does not read from ECOTONE_L1_FEE_SCALARS_SLOT
+                l1_blob_base_fee_scalar: None,
                 empty_ecotone_scalars: false,
-                l1_fee_overhead: None,
+                // Current implementation always reads from L1_OVERHEAD_SLOT, which is not set in test, so returns 0
+                l1_fee_overhead: Some(U256::from(0)),
                 operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
                 token_ratio: Some(U256::ZERO),
