@@ -1,7 +1,7 @@
 //!Handler related to Optimism chain
 use crate::{
     api::exec::OpContextTr,
-    constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT, GAS_ORACLE_CONTRACT},
+    constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},
     transaction::{deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr},
     BvmEth, L1BlockInfo, OpHaltReason, OpSpecId,
 };
@@ -20,11 +20,10 @@ use revm::{
         EthFrame, EvmTr, FrameResult, Handler, MainnetHandler,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorHandler},
-    interpreter::{
-        interpreter::EthInterpreter, interpreter_action::FrameInit, Gas, InitialAndFloorGas,
-    },
-    primitives::{hardfork::SpecId, Address, TxKind, U256},
+    interpreter::{interpreter::EthInterpreter, interpreter_action::FrameInit, Gas},
+    primitives::{hardfork::SpecId, U256},
 };
+use std::boxed::Box;
 
 /// Optimism handler extends the [`Handler`] with Optimism specific logic.
 #[derive(Debug, Clone)]
@@ -98,64 +97,6 @@ where
         self.mainnet.validate_env(evm)
     }
 
-    /**
-     * Validates and calculates the initial gas requirements for a transaction.
-     *
-     * For deposit transactions, this simply returns the base gas calculation from the mainnet handler.
-     * For non-deposit transactions, this method:
-     * 1. Updates L1 block info in the following scenarios:
-     *    - When the current transaction belongs to a different block than previously cached
-     *    - When the transaction target is the gas oracle contract, indicating a token ratio update
-     *      that needs to be reloaded for the next transaction
-     * 2. Adjusts both initial_gas and floor_gas by multiplying with the token ratio
-     *
-     * The token ratio adjustment is essential for properly accounting for the price difference
-     * between ETH and MNT.
-     */
-    fn validate_initial_tx_gas(
-        &self,
-        evm: &mut Self::Evm,
-    ) -> Result<InitialAndFloorGas, Self::Error> {
-        let mut initial_gas = self.mainnet.validate_initial_tx_gas(evm)?;
-
-        let (block, tx, cfg, journal, chain, _) = evm.ctx().all_mut();
-        let block_number = block.number();
-        let spec = cfg.spec();
-        if tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
-            Ok(initial_gas)
-        } else {
-            let to = match tx.kind() {
-                TxKind::Call(to) => to,
-                TxKind::Create => Address::ZERO,
-            };
-            // The L1-cost fee is only computed for Optimism non-deposit transactions.
-            if chain.l2_block != Some(block_number) {
-                // L1 block info is stored in the context for later use.
-                // and it will be reloaded from the database if it is not for the current block or the token ratio is updated.(when the gas oracle is updated)
-                *chain = L1BlockInfo::try_fetch(journal.db_mut(), block_number, spec)?;
-            }
-
-            // Reset the l2_block if the tx is set token ratio, we need reload token ratio from the database in next transaction
-            // [TODO] verify selector of the tx
-            if to == GAS_ORACLE_CONTRACT {
-                chain.reset_l2_block();
-            }
-
-            // if the tx is not a deposit transaction, we need to multiply the initial gas by the token ratio
-            let token_ratio = chain.get_token_ratio();
-            initial_gas.initial_gas = initial_gas
-                .initial_gas
-                .checked_mul(token_ratio.try_into().unwrap())
-                .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
-
-            initial_gas.floor_gas = initial_gas
-                .floor_gas
-                .checked_mul(token_ratio.try_into().unwrap())
-                .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
-            Ok(initial_gas)
-        }
-    }
-
     fn validate_against_state_and_deduct_caller(
         &self,
         evm: &mut Self::Evm,
@@ -218,7 +159,6 @@ where
         // check additional cost and deduct it from the caller's balances
         let mut balance = caller_account.info.balance;
 
-        // Mantle default disable fee charge
         if !cfg.is_fee_charge_disabled() {
             let additional_cost = chain.tx_cost_with_tx(tx, spec);
             let Some(new_balance) = balance.checked_sub(additional_cost) else {
@@ -315,7 +255,6 @@ where
     ) -> Result<(), Self::Error> {
         let mut additional_refund = U256::ZERO;
 
-        // Mantle default disable fee charge
         if evm.ctx().tx().tx_type() != DEPOSIT_TRANSACTION_TYPE
             && !evm.ctx().cfg().is_fee_charge_disabled()
         {
@@ -329,60 +268,6 @@ where
         reimburse_caller(evm.ctx(), frame_result.gas(), additional_refund).map_err(From::from)
     }
 
-    fn execution(
-        &mut self,
-        evm: &mut Self::Evm,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<FrameResult, Self::Error> {
-        let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
-
-        let (block, tx, cfg, _, chain, _) = evm.ctx().all_mut();
-
-        // l1cost = l1cost / effective_gas_price
-        // gas_limit = gas_limit - l1cost
-        // gas_limit = gas_limit / token_ratio
-        if !is_deposit {
-            let spec = cfg.spec();
-
-            let token_ratio = chain.get_token_ratio();
-
-            let enveloped_tx = tx
-                .enveloped_tx()
-                .expect("all not deposit tx have enveloped tx")
-                .clone();
-            let basefee = block.basefee() as u128;
-            let mut tx_l1_cost = chain.calculate_tx_l1_cost(&enveloped_tx, spec);
-            let effective_gas_price = tx.effective_gas_price(basefee);
-
-            if effective_gas_price > 0 {
-                tx_l1_cost = tx_l1_cost.wrapping_div(U256::from(effective_gas_price));
-            }
-
-            if tx_l1_cost.gt(&U256::from(gas_limit)) {
-                return Err(ERROR::from(OpTransactionError::Base(
-                    InvalidTransaction::CallGasCostMoreThanGasLimit {
-                        initial_gas: init_and_floor_gas.initial_gas,
-                        gas_limit,
-                    },
-                )));
-            }
-
-            gas_limit = gas_limit.wrapping_sub(tx_l1_cost.try_into().unwrap());
-            gas_limit = gas_limit.wrapping_div(token_ratio.try_into().unwrap());
-        }
-
-        // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
-
-        // Run execution loop
-        let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
-
-        // Handle last frame result
-        self.last_frame_result(evm, &mut frame_result)?;
-        Ok(frame_result)
-    }
-
     fn refund(
         &self,
         evm: &mut Self::Evm,
@@ -390,53 +275,20 @@ where
         eip7702_refund: i64,
     ) {
         frame_result.gas_mut().record_refund(eip7702_refund);
-        let ctx = evm.ctx();
-        let tx = ctx.tx();
-        let is_deposit = tx.tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let is_system = tx.is_system_transaction();
-        let gas = frame_result.gas_mut();
 
-        if tx.eth_value().is_some() && !tx.input().is_empty() {
-            gas.set_remaining(gas.remaining().saturating_sub(4500));
-        }
+        let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
+        let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
 
-        let limit = gas.limit();
-        let token_ratio_u64: u64 = ctx.chain().get_token_ratio().try_into().unwrap();
-
-        assert!(
-            token_ratio_u64 <= i64::MAX as u64,
-            "token_ratio {token_ratio_u64} exceeds i64::MAX"
-        );
-
-        if !is_system && !is_deposit {
-            // limit = limit / token_ratio
-            if token_ratio_u64 > 0 {
-                gas.set_limit(gas.limit().saturating_div(token_ratio_u64));
-            }
-        } else {
-            gas.set_refund(0);
-        }
-
-        let is_regolith = ctx.cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
         // Prior to Regolith, deposit transactions did not receive gas refunds.
         let is_gas_refund_disabled = is_deposit && !is_regolith;
         if !is_gas_refund_disabled {
-            gas.set_final_refund(
-                ctx.cfg()
+            frame_result.gas_mut().set_final_refund(
+                evm.ctx()
+                    .cfg()
                     .spec()
                     .into_eth_spec()
                     .is_enabled_in(SpecId::LONDON),
             );
-        }
-
-        if !is_system && !is_deposit {
-            // refund = refund * token_ratio
-            // remaining = remaining * token_ratio
-            gas.set_refund(gas.refunded().saturating_mul(token_ratio_u64 as i64));
-            gas.set_remaining(gas.remaining().saturating_mul(token_ratio_u64));
-
-            // restore the original gas limit
-            gas.set_limit(limit);
         }
     }
 
@@ -599,60 +451,6 @@ where
     ERROR: EvmTrError<EVM> + From<OpTransactionError> + FromStringError + IsTxError,
 {
     type IT = EthInterpreter;
-
-    fn inspect_execution(
-        &mut self,
-        evm: &mut Self::Evm,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<FrameResult, Self::Error> {
-        let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let mut gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
-
-        let (block, tx, cfg, _, chain, _) = evm.ctx().all_mut();
-
-        // l1cost = l1cost / effective_gas_price
-        // gas_limit = gas_limit - l1cost
-        // gas_limit = gas_limit / token_ratio
-        if !is_deposit {
-            let spec = cfg.spec();
-
-            let token_ratio = chain.get_token_ratio();
-
-            let enveloped_tx = tx
-                .enveloped_tx()
-                .expect("all not deposit tx have enveloped tx")
-                .clone();
-            let basefee = block.basefee() as u128;
-            let mut tx_l1_cost = chain.calculate_tx_l1_cost(&enveloped_tx, spec);
-            let effective_gas_price = tx.effective_gas_price(basefee);
-
-            if effective_gas_price > 0 {
-                tx_l1_cost = tx_l1_cost.wrapping_div(U256::from(effective_gas_price));
-            }
-
-            if tx_l1_cost.gt(&U256::from(gas_limit)) {
-                return Err(ERROR::from(OpTransactionError::Base(
-                    InvalidTransaction::CallGasCostMoreThanGasLimit {
-                        initial_gas: init_and_floor_gas.initial_gas,
-                        gas_limit,
-                    },
-                )));
-            }
-
-            gas_limit = gas_limit.wrapping_sub(tx_l1_cost.try_into().unwrap());
-            gas_limit = gas_limit.wrapping_div(token_ratio.try_into().unwrap());
-        }
-
-        // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
-
-        // Run execution loop
-        let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
-
-        // Handle last frame result
-        self.last_frame_result(evm, &mut frame_result)?;
-        Ok(frame_result)
-    }
 }
 
 #[cfg(test)]
@@ -669,6 +467,7 @@ mod tests {
     use alloy_primitives::uint;
     use revm::{
         context::{BlockEnv, Context, TxEnv},
+        context_interface::result::InvalidTransaction,
         database::InMemoryDB,
         database_interface::EmptyDB,
         handler::EthFrame,
@@ -677,6 +476,7 @@ mod tests {
         state::AccountInfo,
     };
     use rstest::rstest;
+    use std::boxed::Box;
 
     /// Creates frame result.
     fn call_last_frame_return(
@@ -754,7 +554,7 @@ mod tests {
         let gas = call_last_frame_return(ctx.clone(), InstructionResult::Stop, ret_gas);
         assert_eq!(gas.remaining(), 90);
         assert_eq!(gas.spent(), 10);
-        assert_eq!(gas.refunded(), 0); // min(20, 10/5)
+        assert_eq!(gas.refunded(), 2); // min(20, 10/5)
 
         let gas = call_last_frame_return(ctx, InstructionResult::Revert, ret_gas);
         assert_eq!(gas.remaining(), 90);
@@ -944,15 +744,11 @@ mod tests {
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
-                // Current implementation always reads from L1_SCALAR_SLOT, which is not set in test, so returns 0
-                l1_base_fee_scalar: U256::from(0),
-                // Current implementation does not read from ECOTONE_L1_BLOB_BASE_FEE_SLOT
-                l1_blob_base_fee: None,
-                // Current implementation does not read from ECOTONE_L1_FEE_SCALARS_SLOT
-                l1_blob_base_fee_scalar: None,
+                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
+                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
+                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
                 empty_ecotone_scalars: false,
-                // Current implementation always reads from L1_OVERHEAD_SLOT, which is not set in test, so returns 0
-                l1_fee_overhead: Some(U256::from(0)),
+                l1_fee_overhead: None,
                 operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
                 tx_l1_cost: Some(U256::ZERO),
@@ -1043,15 +839,11 @@ mod tests {
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
-                // Current implementation always reads from L1_SCALAR_SLOT, which is not set in test, so returns 0
-                l1_base_fee_scalar: U256::from(0),
-                // Current implementation does not read from ECOTONE_L1_BLOB_BASE_FEE_SLOT
-                l1_blob_base_fee: None,
-                // Current implementation does not read from ECOTONE_L1_FEE_SCALARS_SLOT
-                l1_blob_base_fee_scalar: None,
+                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
+                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
+                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
                 empty_ecotone_scalars: false,
-                // Current implementation always reads from L1_OVERHEAD_SLOT, which is not set in test, so returns 0
-                l1_fee_overhead: Some(U256::from(0)),
+                l1_fee_overhead: None,
                 operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
                 tx_l1_cost: Some(U256::ZERO),
@@ -1169,17 +961,13 @@ mod tests {
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
-                // Current implementation always reads from L1_SCALAR_SLOT, which is not set in test, so returns 0
-                l1_base_fee_scalar: U256::from(0),
-                // Current implementation does not read from ECOTONE_L1_BLOB_BASE_FEE_SLOT
-                l1_blob_base_fee: None,
-                // Current implementation does not read from ECOTONE_L1_FEE_SCALARS_SLOT
-                l1_blob_base_fee_scalar: None,
+                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
+                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
+                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
                 empty_ecotone_scalars: false,
-                // Current implementation always reads from L1_OVERHEAD_SLOT, which is not set in test, so returns 0
-                l1_fee_overhead: Some(U256::from(0)),
-                token_ratio: Some(U256::ZERO),
+                l1_fee_overhead: None,
                 tx_l1_cost: Some(U256::ZERO),
+                token_ratio: Some(U256::ZERO),
                 ..Default::default()
             }
         );
@@ -1248,15 +1036,11 @@ mod tests {
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
-                // Current implementation always reads from L1_SCALAR_SLOT, which is not set in test, so returns 0
-                l1_base_fee_scalar: U256::from(0),
-                // Current implementation does not read from ECOTONE_L1_BLOB_BASE_FEE_SLOT
-                l1_blob_base_fee: None,
-                // Current implementation does not read from ECOTONE_L1_FEE_SCALARS_SLOT
-                l1_blob_base_fee_scalar: None,
+                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
+                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
+                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
                 empty_ecotone_scalars: false,
-                // Current implementation always reads from L1_OVERHEAD_SLOT, which is not set in test, so returns 0
-                l1_fee_overhead: Some(U256::from(0)),
+                l1_fee_overhead: None,
                 operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
                 token_ratio: Some(U256::ZERO),
@@ -1311,13 +1095,96 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_l1_cost_full_gas() {
+    fn test_remove_operator_cost_isthmus() {
         let caller = Address::ZERO;
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             caller,
             AccountInfo {
-                balance: U256::from(1048),
+                balance: U256::from(151),
+                ..Default::default()
+            },
+        );
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(L1BlockInfo {
+                operator_fee_scalar: Some(U256::from(10_000_000)),
+                operator_fee_constant: Some(U256::from(50)),
+                l2_block: Some(U256::from(0)),
+                ..Default::default()
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .with_tx(
+                OpTransaction::builder()
+                    .base(TxEnv::builder().gas_limit(10))
+                    .enveloped_tx(Some(bytes!("FACADE")))
+                    .build_fill(),
+            );
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        // Under Isthmus the operator fee cost is operator_fee_scalar * gas_limit / 1e6 + operator_fee_constant
+        // 10_000_000 * 10 / 1_000_000 + 50 = 150
+        handler
+            .validate_against_state_and_deduct_caller(&mut evm)
+            .unwrap();
+
+        // Check the account balance is updated.
+        let account = evm.ctx().journal_mut().load_account(caller).unwrap();
+        assert_eq!(account.info.balance, U256::from(1));
+    }
+
+    #[test]
+    fn test_remove_operator_cost_jovian() {
+        let caller = Address::ZERO;
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(2_051),
+                ..Default::default()
+            },
+        );
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(L1BlockInfo {
+                operator_fee_scalar: Some(U256::from(2)),
+                operator_fee_constant: Some(U256::from(50)),
+                l2_block: Some(U256::from(0)),
+                ..Default::default()
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::JOVIAN)
+            .with_tx(
+                OpTransaction::builder()
+                    .base(TxEnv::builder().gas_limit(10))
+                    .enveloped_tx(Some(bytes!("FACADE")))
+                    .build_fill(),
+            );
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        // Under Jovian the operator fee cost is operator_fee_scalar * gas_limit * 100 + operator_fee_constant
+        // 2 * 10 * 100 + 50 = 2_050
+        handler
+            .validate_against_state_and_deduct_caller(&mut evm)
+            .unwrap();
+
+        let account = evm.ctx().journal_mut().load_account(caller).unwrap();
+        assert_eq!(account.info.balance, U256::from(1));
+    }
+
+    #[test]
+    fn test_remove_l1_cost_lack_of_funds() {
+        let caller = Address::ZERO;
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(48),
                 ..Default::default()
             },
         );
@@ -1340,9 +1207,16 @@ mod tests {
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
 
+        // l1block cost is 1048 fee.
         assert_eq!(
             handler.validate_against_state_and_deduct_caller(&mut evm),
-            Ok(())
+            Err(EVMError::Transaction(
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(U256::from(1048)),
+                    balance: Box::new(U256::from(48)),
+                }
+                .into(),
+            ))
         );
     }
 

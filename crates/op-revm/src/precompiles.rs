@@ -39,6 +39,7 @@ impl OpPrecompiles {
             OpSpecId::ISTHMUS => isthmus(),
             OpSpecId::INTEROP | OpSpecId::JOVIAN => jovian(),
         };
+
         Self {
             inner: EthPrecompiles {
                 precompiles,
