@@ -378,7 +378,7 @@ impl L1BlockInfo {
     pub fn get_token_ratio(&self) -> U256 {
         match self.token_ratio {
             Some(ratio) if ratio > U256::from(0) => ratio,
-            _ => U256::from(1),
+            _ => U256::from(0), // todo!("token ratio is not set")
         }
     }
 
