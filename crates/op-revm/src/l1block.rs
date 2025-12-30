@@ -5,8 +5,8 @@ use crate::{
         DA_FOOTPRINT_GAS_SCALAR_SLOT, ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT,
         EMPTY_SCALARS, GAS_ORACLE_CONTRACT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT,
         L1_SCALAR_SLOT, NON_ZERO_BYTE_COST, OPERATOR_FEE_CONSTANT_OFFSET,
-        OPERATOR_FEE_JOVIAN_MULTIPLIER, OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE_SCALAR_DECIMAL,
-        OPERATOR_FEE_SCALAR_OFFSET, TOKEN_RATIO_SLOT,
+        OPERATOR_FEE_JOVIAN_MULTIPLIER, OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE_SCALAR_OFFSET,
+        TOKEN_RATIO_SLOT,
     },
     transaction::{estimate_tx_compressed_size, OpTxTr},
     OpSpecId,
@@ -174,17 +174,17 @@ impl L1BlockInfo {
     /// Calculate the operator fee for executing this transaction.
     ///
     /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
-    pub fn operator_fee_charge(&self, input: &[u8], gas_limit: U256, spec_id: OpSpecId) -> U256 {
+    pub fn operator_fee_charge(&self, input: &[u8], gas_limit: U256) -> U256 {
         // If the input is a deposit transaction or empty, the default value is zero.
         if input.is_empty() || input.first() == Some(&0x7E) {
             return U256::ZERO;
         }
 
-        self.operator_fee_charge_inner(gas_limit, spec_id)
+        self.operator_fee_charge_inner(gas_limit)
     }
 
     /// Calculate the operator fee for the given `gas`.
-    fn operator_fee_charge_inner(&self, gas: U256, spec_id: OpSpecId) -> U256 {
+    fn operator_fee_charge_inner(&self, gas: U256) -> U256 {
         let operator_fee_scalar = self
             .operator_fee_scalar
             .expect("Missing operator fee scalar for isthmus L1 Block");
@@ -192,12 +192,9 @@ impl L1BlockInfo {
             .operator_fee_constant
             .expect("Missing operator fee constant for isthmus L1 Block");
 
-        let product = if spec_id.is_enabled_in(OpSpecId::JOVIAN) {
-            gas.saturating_mul(operator_fee_scalar)
-                .saturating_mul(U256::from(OPERATOR_FEE_JOVIAN_MULTIPLIER))
-        } else {
-            gas.saturating_mul(operator_fee_scalar) / U256::from(OPERATOR_FEE_SCALAR_DECIMAL)
-        };
+        let product = gas
+            .saturating_mul(operator_fee_scalar)
+            .saturating_mul(U256::from(OPERATOR_FEE_JOVIAN_MULTIPLIER));
 
         product.saturating_add(operator_fee_constant)
     }
@@ -206,16 +203,14 @@ impl L1BlockInfo {
     ///
     /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
     pub fn operator_fee_refund(&self, gas: &Gas, spec_id: OpSpecId) -> U256 {
-        if !spec_id.is_enabled_in(OpSpecId::ISTHMUS) {
+        if !spec_id.is_enabled_in(OpSpecId::ARSIA) {
             return U256::ZERO;
         }
 
-        let operator_cost_gas_limit =
-            self.operator_fee_charge_inner(U256::from(gas.limit()), spec_id);
-        let operator_cost_gas_used = self.operator_fee_charge_inner(
-            U256::from(gas.limit() - (gas.remaining() + gas.refunded() as u64)),
-            spec_id,
-        );
+        let operator_cost_gas_limit = self.operator_fee_charge_inner(U256::from(gas.limit()));
+        let operator_cost_gas_used = self.operator_fee_charge_inner(U256::from(
+            gas.limit() - (gas.remaining() + gas.refunded() as u64),
+        ));
 
         operator_cost_gas_limit.saturating_sub(operator_cost_gas_used)
     }
@@ -252,15 +247,11 @@ impl L1BlockInfo {
     /// Calculate additional transaction cost with OpTxTr.
     ///
     /// Internally calls [`L1BlockInfo::tx_cost`].
-    #[track_caller]
-    pub fn tx_cost_with_tx(&mut self, tx: impl OpTxTr, spec: OpSpecId) -> U256 {
+    pub fn tx_cost_with_tx(&mut self, tx: impl OpTxTr, spec: OpSpecId) -> Option<U256> {
         // account for additional cost of l1 fee and operator fee
-        let enveloped_tx = tx
-            .enveloped_tx()
-            .expect("all not deposit tx have enveloped tx")
-            .clone();
+        let enveloped_tx = tx.enveloped_tx()?;
         let gas_limit = U256::from(tx.gas_limit());
-        self.tx_cost(&enveloped_tx, gas_limit, spec)
+        Some(self.tx_cost(enveloped_tx, gas_limit, spec))
     }
 
     /// Calculate additional transaction cost.
@@ -270,8 +261,8 @@ impl L1BlockInfo {
         let mut additional_cost = self.calculate_tx_l1_cost(enveloped_tx, spec);
 
         // compute operator fee
-        if spec.is_enabled_in(OpSpecId::ISTHMUS) {
-            let operator_fee_charge = self.operator_fee_charge(enveloped_tx, gas_limit, spec);
+        if spec.is_enabled_in(OpSpecId::ARSIA) {
+            let operator_fee_charge = self.operator_fee_charge(enveloped_tx, gas_limit);
             additional_cost = additional_cost.saturating_add(operator_fee_charge);
         }
 
@@ -313,6 +304,10 @@ impl L1BlockInfo {
     /// `estimatedSize*(baseFeeScalar*l1BaseFee*16 + blobFeeScalar*l1BlobBaseFee)/1e12`
     fn calculate_tx_l1_cost_arsia(&self, input: &[u8]) -> U256 {
         let l1_fee_scaled = self.calculate_l1_fee_scaled_ecotone();
+        if l1_fee_scaled.is_zero() {
+            return U256::ZERO;
+        }
+
         let estimated_size = self.tx_estimated_size_fjord(input);
 
         estimated_size
@@ -335,7 +330,7 @@ impl L1BlockInfo {
         calldata_cost_per_byte.saturating_add(blob_cost_per_byte)
     }
 
-    /// Reset the l2_block to u64::MAX.
+    /// Reset the l2_block to None.
     pub fn reset_l2_block(&mut self) {
         self.l2_block = None
     }
@@ -697,13 +692,8 @@ mod tests {
 
         let input = [0x01u8];
 
-        let isthmus_fee =
-            l1_block_info.operator_fee_charge(&input, U256::from(1_000u64), OpSpecId::ISTHMUS);
-        assert_eq!(isthmus_fee, U256::from(11u64));
-
-        let jovian_fee =
-            l1_block_info.operator_fee_charge(&input, U256::from(1_000u64), OpSpecId::JOVIAN);
-        assert_eq!(jovian_fee, U256::from(100_000_010u64));
+        let operator_fee = l1_block_info.operator_fee_charge(&input, U256::from(1_000u64));
+        assert_eq!(operator_fee, U256::from(100_000_010u64));
     }
 
     #[test]
@@ -718,8 +708,10 @@ mod tests {
             ..Default::default()
         };
 
-        let refunded = l1_block_info.operator_fee_refund(&gas, OpSpecId::ISTHMUS);
+        let isthmus_refunded = l1_block_info.operator_fee_refund(&gas, OpSpecId::ISTHMUS);
+        assert_eq!(isthmus_refunded, U256::ZERO);
 
-        assert_eq!(refunded, U256::from(100))
+        let arsia_refunded = l1_block_info.operator_fee_refund(&gas, OpSpecId::ARSIA);
+        assert_eq!(arsia_refunded, U256::from(10_000_000_000u64))
     }
 }
