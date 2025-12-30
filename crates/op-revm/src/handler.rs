@@ -333,11 +333,14 @@ where
         let base_fee_amount = U256::from(basefee.saturating_mul(frame_result.gas().used() as u128));
 
         // Send fees to their respective recipients
-        for (recipient, amount) in [
-            (L1_FEE_RECIPIENT, l1_cost),
-            (BASE_FEE_RECIPIENT, base_fee_amount),
-            (OPERATOR_FEE_RECIPIENT, operator_fee_cost),
-        ] {
+        let mut recipients = vec![(BASE_FEE_RECIPIENT, base_fee_amount)];
+        if spec.is_enabled_in(OpSpecId::ARSIA) {
+            recipients.extend([
+                (L1_FEE_RECIPIENT, l1_cost),
+                (OPERATOR_FEE_RECIPIENT, operator_fee_cost),
+            ]);
+        }
+        for (recipient, amount) in recipients {
             ctx.journal_mut().balance_incr(recipient, amount)?;
         }
 
