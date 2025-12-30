@@ -333,11 +333,14 @@ where
         let base_fee_amount = U256::from(basefee.saturating_mul(frame_result.gas().used() as u128));
 
         // Send fees to their respective recipients
-        for (recipient, amount) in [
-            (L1_FEE_RECIPIENT, l1_cost),
-            (BASE_FEE_RECIPIENT, base_fee_amount),
-            (OPERATOR_FEE_RECIPIENT, operator_fee_cost),
-        ] {
+        let mut recipients = vec![(BASE_FEE_RECIPIENT, base_fee_amount)];
+        if spec.is_enabled_in(OpSpecId::ARSIA) {
+            recipients.extend([
+                (L1_FEE_RECIPIENT, l1_cost),
+                (OPERATOR_FEE_RECIPIENT, operator_fee_cost),
+            ]);
+        }
+        for (recipient, amount) in recipients {
             ctx.journal_mut().balance_incr(recipient, amount)?;
         }
 
@@ -753,7 +756,7 @@ mod tests {
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
                 tx_l1_cost: Some(U256::ZERO),
                 da_footprint_gas_scalar: None,
-                token_ratio: Some(U256::ZERO),
+                token_ratio: U256::ZERO,
             }
         );
     }
@@ -848,7 +851,7 @@ mod tests {
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
                 tx_l1_cost: Some(U256::ZERO),
                 da_footprint_gas_scalar: Some(DA_FOOTPRINT_GAS_SCALAR as u16),
-                token_ratio: Some(U256::ZERO),
+                token_ratio: U256::ZERO,
             }
         );
     }
@@ -902,7 +905,7 @@ mod tests {
                 l1_base_fee: L1_BASE_FEE,
                 l1_fee_overhead: Some(L1_FEE_OVERHEAD),
                 l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
-                token_ratio: Some(U256::ZERO),
+                token_ratio: U256::ZERO,
                 tx_l1_cost: Some(U256::ZERO),
                 ..Default::default()
             }
@@ -967,7 +970,7 @@ mod tests {
                 empty_ecotone_scalars: false,
                 l1_fee_overhead: None,
                 tx_l1_cost: Some(U256::ZERO),
-                token_ratio: Some(U256::ZERO),
+                token_ratio: U256::ZERO,
                 ..Default::default()
             }
         );
@@ -1043,7 +1046,7 @@ mod tests {
                 l1_fee_overhead: None,
                 operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
                 operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
-                token_ratio: Some(U256::ZERO),
+                token_ratio: U256::ZERO,
                 tx_l1_cost: Some(U256::ZERO),
                 ..Default::default()
             }
