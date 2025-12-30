@@ -43,7 +43,7 @@ pub struct L1BlockInfo {
     /// The current L1 fee scalar.
     pub l1_base_fee_scalar: U256,
     /// The current token ratio.
-    pub token_ratio: Option<U256>,
+    pub token_ratio: U256,
     /// The current L1 blob base fee. None if Ecotone is not activated, except if `empty_ecotone_scalars` is `true`.
     pub l1_blob_base_fee: Option<U256>,
     /// The current L1 blob base fee scalar. None if Ecotone is not activated.
@@ -154,7 +154,7 @@ impl L1BlockInfo {
         let mut out = L1BlockInfo {
             l2_block: Some(l2_block),
             l1_base_fee: l1_base_fee,
-            token_ratio: Some(token_ratio),
+            token_ratio: token_ratio,
             l1_fee_overhead: Some(l1_fee_overhead),
             l1_base_fee_scalar: l1_fee_scalar,
             ..Default::default()
@@ -303,6 +303,7 @@ impl L1BlockInfo {
             .saturating_add(self.l1_fee_overhead.unwrap_or_default())
             .saturating_mul(self.l1_base_fee)
             .saturating_mul(self.l1_base_fee_scalar)
+            .saturating_mul(self.token_ratio)
             .wrapping_div(U256::from(1_000_000))
     }
 
@@ -317,7 +318,7 @@ impl L1BlockInfo {
         estimated_size
             .saturating_mul(l1_fee_scaled)
             .wrapping_div(U256::from(1_000_000_000_000u64))
-            .saturating_mul(self.get_token_ratio())
+            .saturating_mul(self.token_ratio)
     }
 
     // l1BaseFee*16*l1BaseFeeScalar + l1BlobBaseFee*l1BlobBaseFeeScalar
@@ -332,14 +333,6 @@ impl L1BlockInfo {
             .saturating_mul(self.l1_blob_base_fee_scalar.unwrap_or_default());
 
         calldata_cost_per_byte.saturating_add(blob_cost_per_byte)
-    }
-
-    /// Get the token ratio. If the token ratio is not set, return 1.
-    pub fn get_token_ratio(&self) -> U256 {
-        match self.token_ratio {
-            Some(ratio) if ratio > U256::from(0) => ratio,
-            _ => U256::from(0), // todo!("token ratio is not set")
-        }
     }
 
     /// Reset the l2_block to u64::MAX.
@@ -427,13 +420,14 @@ mod tests {
             l1_base_fee: U256::from(1_000),
             l1_fee_overhead: Some(U256::from(1_000)),
             l1_base_fee_scalar: U256::from(1_000),
-            token_ratio: Some(U256::from(token_ratio)),
+            token_ratio: U256::from(token_ratio),
             ..Default::default()
         };
 
         let input = bytes!("FACADE");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::REGOLITH);
-        assert_eq!(gas_cost, U256::from(1048));
+        let expected_cost = U256::from(1048).saturating_mul(U256::from(token_ratio));
+        assert_eq!(gas_cost, expected_cost);
         l1_block_info.clear_tx_l1_cost();
 
         // Zero rollup data gas cost should result in zero
@@ -464,7 +458,7 @@ mod tests {
             l1_base_fee_scalar: U256::from(1_000),
             l1_blob_base_fee: Some(U256::from(1_000)),
             l1_blob_base_fee_scalar: Some(U256::from(1_000)),
-            token_ratio: Some(U256::from(token_ratio)),
+            token_ratio: U256::from(token_ratio),
             ..Default::default()
         };
 
@@ -491,11 +485,11 @@ mod tests {
 
         // Verify that different token_ratio values produce proportional results
         l1_block_info.clear_tx_l1_cost();
-        l1_block_info.token_ratio = Some(U256::from(1));
+        l1_block_info.token_ratio = U256::from(1);
         let gas_cost_ratio_1 = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::ARSIA);
 
         l1_block_info.clear_tx_l1_cost();
-        l1_block_info.token_ratio = Some(U256::from(2));
+        l1_block_info.token_ratio = U256::from(2);
         let gas_cost_ratio_2 = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::ARSIA);
 
         // Cost with ratio=2 should be exactly double of cost with ratio=1
@@ -527,7 +521,7 @@ mod tests {
             l1_base_fee_scalar: U256::from(1_000),
             l1_blob_base_fee: Some(U256::from(1_000)),
             l1_blob_base_fee_scalar: Some(U256::from(1_000)),
-            token_ratio: Some(U256::from(1)),
+            token_ratio: U256::from(1),
             ..Default::default()
         };
 
@@ -579,7 +573,7 @@ mod tests {
             l1_base_fee_scalar: U256::from(5227),
             l1_blob_base_fee_scalar: Some(U256::from(1014213)),
             l1_blob_base_fee: Some(U256::from(1)),
-            token_ratio: Some(U256::from(1)),
+            token_ratio: U256::from(1),
             ..Default::default() // L1 fee overhead (l1 gas used) deprecated since Fjord
         };
 
