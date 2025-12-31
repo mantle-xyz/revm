@@ -27,7 +27,7 @@ use revm::{
     },
     primitives::{hardfork::SpecId, U256},
 };
-use std::boxed::Box;
+use std::{boxed::Box, vec};
 
 /// Optimism handler extends the [`Handler`] with Optimism specific logic.
 #[derive(Debug, Clone)]
