@@ -19,6 +19,7 @@ use revm::{
         handler::EvmTrError,
         post_execution::{self, reimburse_caller},
         pre_execution::{calculate_caller_fee, validate_account_nonce_and_code_with_components},
+        validation::validate_tx_env,
         EthFrame, EvmTr, FrameResult, Handler, MainnetHandler,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorHandler},
@@ -98,7 +99,12 @@ where
             return Err(OpTransactionError::MissingEnvelopedTx.into());
         }
 
-        self.mainnet.validate_env(evm)
+        let spec = ctx.cfg().spec();
+        if spec.is_enabled_in(OpSpecId::ARSIA) {
+            self.mainnet.validate_env(evm)
+        } else {
+            validate_tx_env(ctx, spec.into_eth_spec()).map_err(Into::into)
+        }
     }
 
     /**
