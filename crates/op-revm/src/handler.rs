@@ -210,13 +210,6 @@ where
             return Ok(());
         }
 
-        // [TODO]
-        // L1 block info is stored in the context for later use.
-        // and it will be reloaded from the database if it is not for the current block.
-        if chain.l2_block != Some(block.number()) {
-            *chain = L1BlockInfo::try_fetch(journal.db_mut(), block.number(), spec)?;
-        }
-
         let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
 
         // validates account nonce and code
@@ -623,7 +616,8 @@ mod tests {
         api::default_ctx::OpContext,
         constants::{
             BASE_FEE_SCALAR_OFFSET, ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT,
-            L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, OPERATOR_FEE_SCALARS_SLOT,
+            L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT, L1_SCALAR_SLOT,
+            OPERATOR_FEE_SCALARS_SLOT, TOKEN_RATIO_SLOT,
         },
         DefaultOp, OpBuilder, OpTransaction,
     };
@@ -722,7 +716,7 @@ mod tests {
             .with_tx(
                 OpTransaction::builder()
                     .base(TxEnv::builder().gas_limit(100))
-                    .source_hash(B256::ZERO) // Not a deposit transaction
+                    .source_hash(B256::ZERO)
                     .enveloped_tx(Some(bytes!("FACADE")))
                     .build()
                     .unwrap(),
@@ -821,29 +815,31 @@ mod tests {
 
     #[test]
     fn test_remove_l1_cost_non_deposit() {
-        use crate::constants::{
-            ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT, L1_BASE_FEE_SLOT,
-            TOKEN_RATIO_SLOT,
-        };
         let caller = Address::ZERO;
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             caller,
             AccountInfo {
-                balance: U256::from(1610), // Increased to cover L1 fees (1600) + base fees
+                balance: U256::from(1610),
                 ..Default::default()
             },
         );
         // Set up L1 block contract storage for ARSIA
         let l1_block_contract = db.load_account(L1_BLOCK_CONTRACT).unwrap();
-        l1_block_contract.storage.insert(L1_BASE_FEE_SLOT, U256::from(1_000));
-        l1_block_contract.storage.insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
+        l1_block_contract
+            .storage
+            .insert(L1_BASE_FEE_SLOT, U256::from(1_000));
+        l1_block_contract
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
         l1_block_contract
             .storage
             .insert(ECOTONE_L1_FEE_SCALARS_SLOT, U256::from(1_000) << 128); // base_fee_scalar = 1000
         let gas_oracle_contract = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
-        gas_oracle_contract.storage.insert(TOKEN_RATIO_SLOT, U256::from(1)); // token_ratio = 1
-        
+        gas_oracle_contract
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(1)); // token_ratio = 1
+
         let ctx = Context::op()
             .with_db(db)
             .with_chain(L1BlockInfo {
@@ -852,7 +848,7 @@ mod tests {
                 l1_blob_base_fee: Some(U256::ZERO),
                 l1_blob_base_fee_scalar: Some(U256::ZERO),
                 l2_block: Some(U256::from(0)),
-                operator_fee_scalar: Some(U256::ZERO), // Set to zero to avoid operator fee
+                operator_fee_scalar: Some(U256::ZERO),
                 operator_fee_constant: Some(U256::ZERO),
                 token_ratio: U256::from(1),
                 ..Default::default()
@@ -884,38 +880,16 @@ mod tests {
     fn test_reload_l1_block_info_isthmus() {
         const BLOCK_NUM: U256 = uint!(100_U256);
         const L1_BASE_FEE: U256 = uint!(1_U256);
-        const L1_BLOB_BASE_FEE: U256 = uint!(2_U256);
-        const L1_BASE_FEE_SCALAR: u64 = 3;
-        const L1_BLOB_BASE_FEE_SCALAR: u64 = 4;
-        const L1_FEE_SCALARS: U256 = U256::from_limbs([
-            0,
-            (L1_BASE_FEE_SCALAR << (64 - BASE_FEE_SCALAR_OFFSET * 2)) | L1_BLOB_BASE_FEE_SCALAR,
-            0,
-            0,
-        ]);
-        const OPERATOR_FEE_SCALAR: u64 = 5;
-        const OPERATOR_FEE_CONST: u64 = 6;
-        const OPERATOR_FEE: U256 =
-            U256::from_limbs([OPERATOR_FEE_CONST, OPERATOR_FEE_SCALAR, 0, 0]);
 
         let mut db = InMemoryDB::default();
         let l1_block_contract = db.load_account(L1_BLOCK_CONTRACT).unwrap();
         l1_block_contract
             .storage
             .insert(L1_BASE_FEE_SLOT, L1_BASE_FEE);
-        l1_block_contract
-            .storage
-            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, L1_BLOB_BASE_FEE);
-        l1_block_contract
-            .storage
-            .insert(ECOTONE_L1_FEE_SCALARS_SLOT, L1_FEE_SCALARS);
-        l1_block_contract
-            .storage
-            .insert(OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE);
         db.insert_account_info(
             Address::ZERO,
             AccountInfo {
-                balance: U256::from(10_000_000_000_000u64), // Increased to cover L1 fees and operator fees
+                balance: U256::from(10_000_000_000_000u64),
                 ..Default::default()
             },
         );
@@ -923,8 +897,8 @@ mod tests {
         let ctx = Context::op()
             .with_db(db)
             .with_chain(L1BlockInfo {
-                l2_block: Some(BLOCK_NUM + U256::from(1)), // ahead by one block
-                operator_fee_scalar: Some(U256::ZERO), // Set to zero to avoid operator fee
+                l2_block: Some(BLOCK_NUM + U256::from(1)),
+                operator_fee_scalar: Some(U256::ZERO),
                 operator_fee_constant: Some(U256::ZERO),
                 ..Default::default()
             })
@@ -932,7 +906,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
         let mut evm = ctx.build_op();
 
@@ -940,6 +914,8 @@ mod tests {
 
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+        // Call validate_initial_tx_gas first to load L1BlockInfo
+        handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
             .validate_against_state_and_deduct_caller(&mut evm)
             .unwrap();
@@ -949,16 +925,10 @@ mod tests {
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
-                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
-                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
-                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
-                empty_ecotone_scalars: false,
-                l1_fee_overhead: None,
-                operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
-                operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
-                tx_l1_cost: Some(U256::ZERO),
-                da_footprint_gas_scalar: Some(0), // ARSIA calls try_fetch_jovian which sets this to 0 if not in storage
+                l1_base_fee_scalar: U256::ZERO,
+                l1_fee_overhead: Some(U256::ZERO),
                 token_ratio: U256::ZERO,
+                ..Default::default()
             }
         );
     }
@@ -1003,7 +973,7 @@ mod tests {
         db.insert_account_info(
             Address::ZERO,
             AccountInfo {
-                balance: U256::from(6000),
+                balance: U256::from(20_000_000),
                 ..Default::default()
             },
         );
@@ -1024,7 +994,7 @@ mod tests {
             // set the operator fee to a low value
             .with_tx(
                 OpTransaction::builder()
-                    .base(TxEnv::builder().gas_limit(10))
+                    .base(TxEnv::builder().gas_limit(30_000))
                     .enveloped_tx(Some(bytes!("FACADE")))
                     .build_fill(),
             );
@@ -1035,6 +1005,8 @@ mod tests {
 
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+        // Call validate_initial_tx_gas first to load L1BlockInfo
+        handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
             .validate_against_state_and_deduct_caller(&mut evm)
             .unwrap();
@@ -1078,6 +1050,7 @@ mod tests {
         l1_block_contract
             .storage
             .insert(L1_SCALAR_SLOT, U256::from(L1_BASE_FEE_SCALAR));
+
         db.insert_account_info(
             Address::ZERO,
             AccountInfo {
@@ -1096,34 +1069,29 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
 
         let mut evm = ctx.build_op();
         assert_ne!(evm.ctx().chain().l2_block, Some(BLOCK_NUM));
 
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+        // Call validate_initial_tx_gas first to load L1BlockInfo
+        handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
             .validate_against_state_and_deduct_caller(&mut evm)
             .unwrap();
 
-        // ARSIA calls try_fetch_ecotone which sets empty_ecotone_scalars based on scalars
-        // Since there are no ecotone scalars in storage, they will be set to 0
         assert_eq!(
             *evm.ctx().chain(),
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
                 l1_fee_overhead: Some(L1_FEE_OVERHEAD),
-                l1_base_fee_scalar: U256::ZERO, // ARSIA calls try_fetch_ecotone which overwrites this
+                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
                 token_ratio: U256::ZERO,
-                tx_l1_cost: Some(U256::ZERO),
-                empty_ecotone_scalars: true,
-                l1_blob_base_fee: Some(U256::ZERO),
-                l1_blob_base_fee_scalar: Some(U256::ZERO),
-                operator_fee_scalar: Some(U256::ZERO),
-                operator_fee_constant: Some(U256::ZERO),
-                da_footprint_gas_scalar: Some(0),
+                tx_l1_cost: None,
+                ..Default::default()
             }
         );
     }
@@ -1178,12 +1146,12 @@ mod tests {
 
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+        // Call validate_initial_tx_gas first to load L1BlockInfo
+        handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
             .validate_against_state_and_deduct_caller(&mut evm)
             .unwrap();
 
-        // ECOTONE is not ARSIA, so it won't call try_fetch_ecotone
-        // It will use the default L1BlockInfo structure
         assert_eq!(
             *evm.ctx().chain(),
             L1BlockInfo {
@@ -1202,38 +1170,16 @@ mod tests {
     fn test_load_l1_block_info_isthmus_none() {
         const BLOCK_NUM: U256 = uint!(100_U256);
         const L1_BASE_FEE: U256 = uint!(1_U256);
-        const L1_BLOB_BASE_FEE: U256 = uint!(2_U256);
-        const L1_BASE_FEE_SCALAR: u64 = 3;
-        const L1_BLOB_BASE_FEE_SCALAR: u64 = 4;
-        const L1_FEE_SCALARS: U256 = U256::from_limbs([
-            0,
-            (L1_BASE_FEE_SCALAR << (64 - BASE_FEE_SCALAR_OFFSET * 2)) | L1_BLOB_BASE_FEE_SCALAR,
-            0,
-            0,
-        ]);
-        const OPERATOR_FEE_SCALAR: u64 = 5;
-        const OPERATOR_FEE_CONST: u64 = 6;
-        const OPERATOR_FEE: U256 =
-            U256::from_limbs([OPERATOR_FEE_CONST, OPERATOR_FEE_SCALAR, 0, 0]);
 
         let mut db = InMemoryDB::default();
         let l1_block_contract = db.load_account(L1_BLOCK_CONTRACT).unwrap();
         l1_block_contract
             .storage
             .insert(L1_BASE_FEE_SLOT, L1_BASE_FEE);
-        l1_block_contract
-            .storage
-            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, L1_BLOB_BASE_FEE);
-        l1_block_contract
-            .storage
-            .insert(ECOTONE_L1_FEE_SCALARS_SLOT, L1_FEE_SCALARS);
-        l1_block_contract
-            .storage
-            .insert(OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE);
         db.insert_account_info(
             Address::ZERO,
             AccountInfo {
-                balance: U256::from(10_000_000_000_000u64), // Increased to cover L1 fees and operator fees
+                balance: U256::from(10_000_000_000_000u64),
                 ..Default::default()
             },
         );
@@ -1241,7 +1187,7 @@ mod tests {
         let ctx = Context::op()
             .with_db(db)
             .with_chain(L1BlockInfo {
-                operator_fee_scalar: Some(U256::ZERO), // Set to zero to avoid operator fee
+                operator_fee_scalar: Some(U256::ZERO),
                 operator_fee_constant: Some(U256::ZERO),
                 ..Default::default()
             })
@@ -1249,7 +1195,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
         let mut evm = ctx.build_op();
 
@@ -1257,55 +1203,53 @@ mod tests {
 
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+        // Call validate_initial_tx_gas first to load L1BlockInfo
+        handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
             .validate_against_state_and_deduct_caller(&mut evm)
             .unwrap();
 
-        // ARSIA calls try_fetch_ecotone, try_fetch_isthmus, and try_fetch_jovian
         assert_eq!(
             *evm.ctx().chain(),
             L1BlockInfo {
                 l2_block: Some(BLOCK_NUM),
                 l1_base_fee: L1_BASE_FEE,
-                l1_base_fee_scalar: U256::from(L1_BASE_FEE_SCALAR),
-                l1_blob_base_fee: Some(L1_BLOB_BASE_FEE),
-                l1_blob_base_fee_scalar: Some(U256::from(L1_BLOB_BASE_FEE_SCALAR)),
-                empty_ecotone_scalars: false,
-                l1_fee_overhead: None,
-                operator_fee_scalar: Some(U256::from(OPERATOR_FEE_SCALAR)),
-                operator_fee_constant: Some(U256::from(OPERATOR_FEE_CONST)),
+                l1_base_fee_scalar: U256::ZERO,
+                l1_fee_overhead: Some(U256::ZERO),
+                tx_l1_cost: None,
                 token_ratio: U256::ZERO,
-                tx_l1_cost: Some(U256::ZERO),
-                da_footprint_gas_scalar: Some(0), // ARSIA calls try_fetch_jovian which sets this to 0 if not in storage
+                ..Default::default()
             }
         );
     }
 
     #[test]
     fn test_remove_l1_cost() {
-        use crate::constants::{
-            ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT, L1_BASE_FEE_SLOT,
-            TOKEN_RATIO_SLOT,
-        };
         let caller = Address::ZERO;
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             caller,
             AccountInfo {
-                balance: U256::from(1601), // Increased to cover L1 fees (1600) + base fees
+                balance: U256::from(1601),
                 ..Default::default()
             },
         );
         // Set up L1 block contract storage for ARSIA
         let l1_block_contract = db.load_account(L1_BLOCK_CONTRACT).unwrap();
-        l1_block_contract.storage.insert(L1_BASE_FEE_SLOT, U256::from(1_000));
-        l1_block_contract.storage.insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
+        l1_block_contract
+            .storage
+            .insert(L1_BASE_FEE_SLOT, U256::from(1_000));
+        l1_block_contract
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
         l1_block_contract
             .storage
             .insert(ECOTONE_L1_FEE_SCALARS_SLOT, U256::from(1_000) << 128); // base_fee_scalar = 1000
         let gas_oracle_contract = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
-        gas_oracle_contract.storage.insert(TOKEN_RATIO_SLOT, U256::from(1)); // token_ratio = 1
-        
+        gas_oracle_contract
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(1)); // token_ratio = 1
+
         let ctx = Context::op()
             .with_db(db)
             .with_chain(L1BlockInfo {
@@ -1314,7 +1258,7 @@ mod tests {
                 l1_blob_base_fee: Some(U256::ZERO),
                 l1_blob_base_fee_scalar: Some(U256::ZERO),
                 l2_block: Some(U256::from(0)),
-                operator_fee_scalar: Some(U256::ZERO), // Set to zero to avoid operator fee
+                operator_fee_scalar: Some(U256::ZERO),
                 operator_fee_constant: Some(U256::ZERO),
                 token_ratio: U256::from(1),
                 ..Default::default()
@@ -1428,10 +1372,6 @@ mod tests {
 
     #[test]
     fn test_remove_l1_cost_lack_of_funds() {
-        use crate::constants::{
-            ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT, L1_BASE_FEE_SLOT,
-            TOKEN_RATIO_SLOT,
-        };
         let caller = Address::ZERO;
         let mut db = InMemoryDB::default();
         db.insert_account_info(
@@ -1441,16 +1381,22 @@ mod tests {
                 ..Default::default()
             },
         );
-        // Set up L1 block contract storage for ARSIA
+
         let l1_block_contract = db.load_account(L1_BLOCK_CONTRACT).unwrap();
-        l1_block_contract.storage.insert(L1_BASE_FEE_SLOT, U256::from(1_000));
-        l1_block_contract.storage.insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
+        l1_block_contract
+            .storage
+            .insert(L1_BASE_FEE_SLOT, U256::from(1_000));
+        l1_block_contract
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
         l1_block_contract
             .storage
             .insert(ECOTONE_L1_FEE_SCALARS_SLOT, U256::from(1_000) << 128); // base_fee_scalar = 1000
         let gas_oracle_contract = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
-        gas_oracle_contract.storage.insert(TOKEN_RATIO_SLOT, U256::from(1)); // token_ratio = 1
-        
+        gas_oracle_contract
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(1)); // token_ratio = 1
+
         let ctx = Context::op()
             .with_db(db)
             .with_chain(L1BlockInfo {
@@ -1459,7 +1405,7 @@ mod tests {
                 l1_blob_base_fee: Some(U256::ZERO),
                 l1_blob_base_fee_scalar: Some(U256::ZERO),
                 l2_block: Some(U256::from(0)),
-                operator_fee_scalar: Some(U256::ZERO), // Set to zero to avoid operator fee
+                operator_fee_scalar: Some(U256::ZERO),
                 operator_fee_constant: Some(U256::ZERO),
                 token_ratio: U256::from(1),
                 ..Default::default()
@@ -1780,5 +1726,150 @@ mod tests {
             .data;
 
         assert_eq!(balance, U256::from(mint_amount));
+    }
+
+    #[test]
+    fn test_token_ratio_update_behavior() {
+        const BLOCK_NUM: U256 = uint!(100_U256);
+        const OLD_TOKEN_RATIO: u64 = 1;
+        const NEW_TOKEN_RATIO: u64 = 2;
+
+        let mut db = InMemoryDB::default();
+        // Set initial token ratio in gas oracle contract
+        let gas_oracle_contract = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
+        gas_oracle_contract
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
+
+        // Set up L1 block contract storage
+        let l1_block_contract = db.load_account(L1_BLOCK_CONTRACT).unwrap();
+        l1_block_contract
+            .storage
+            .insert(L1_BASE_FEE_SLOT, U256::from(1_000));
+        l1_block_contract
+            .storage
+            .insert(L1_OVERHEAD_SLOT, U256::from(1_000));
+        l1_block_contract
+            .storage
+            .insert(L1_SCALAR_SLOT, U256::from(1_000));
+
+        // Set up caller account with sufficient balance
+        db.insert_account_info(
+            Address::ZERO,
+            AccountInfo {
+                balance: U256::from(100_000_000),
+                ..Default::default()
+            },
+        );
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(L1BlockInfo {
+                l2_block: Some(BLOCK_NUM),
+                token_ratio: U256::from(OLD_TOKEN_RATIO),
+                ..Default::default()
+            })
+            .with_block(BlockEnv {
+                number: BLOCK_NUM,
+                ..Default::default()
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        // Transaction 1: Deposit transaction - should use old token ratio (1)
+        let mut evm1 = ctx
+            .clone()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(TxEnv::builder().gas_limit(100_000))
+                    .source_hash(B256::from([1u8; 32])) // Deposit transaction
+                    .build_fill(),
+            )
+            .build_op();
+
+        // Deposit transactions don't multiply by token ratio
+        let initial_gas1 = handler.validate_initial_tx_gas(&mut evm1).unwrap();
+        // Deposit tx should not multiply by token ratio, so initial_gas should be base value
+        assert_eq!(initial_gas1.initial_gas, 21000); // Base transaction cost
+
+        // Transaction 2: Call gas oracle contract to update token ratio
+        // Update token ratio in storage - update the original db so subsequent transactions can see it
+        let gas_oracle_contract = evm1
+            .ctx()
+            .journal_mut()
+            .db_mut()
+            .load_account(GAS_ORACLE_CONTRACT)
+            .unwrap();
+        gas_oracle_contract
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(NEW_TOKEN_RATIO));
+
+        // Extract the updated db from evm1 and use it for subsequent transactions
+        // This simulates the real scenario where the token ratio update is persisted to the database
+        let updated_db = evm1.ctx().journal().db().clone();
+        let ctx_with_updated_db = Context::op()
+            .with_db(updated_db)
+            .with_chain(L1BlockInfo {
+                l2_block: Some(BLOCK_NUM),
+                token_ratio: U256::from(OLD_TOKEN_RATIO),
+                ..Default::default()
+            })
+            .with_block(BlockEnv {
+                number: BLOCK_NUM,
+                ..Default::default()
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let mut evm2 = ctx_with_updated_db
+            .clone()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(100_000)
+                            .caller(Address::ZERO)
+                            .to(GAS_ORACLE_CONTRACT),
+                    )
+                    .enveloped_tx(Some(bytes!("FACADE")))
+                    .build()
+                    .unwrap(),
+            )
+            .build_op();
+
+        // This transaction calls gas oracle contract, which should reset l2_block
+        // It should use old token ratio (1) because the chain still has the old value cached
+        let initial_gas2 = handler.validate_initial_tx_gas(&mut evm2).unwrap();
+        // Should use old token ratio (1) before the reset
+        assert_eq!(initial_gas2.initial_gas, 21000 * OLD_TOKEN_RATIO);
+
+        // Verify that l2_block was reset
+        assert_eq!(evm2.ctx().chain().l2_block, None);
+
+        // Transaction 3: Regular transaction - should use new token ratio (2)
+        // Create a new context with l2_block reset to None so it will reload from database
+        let mut evm3 = ctx_with_updated_db
+            .with_chain(L1BlockInfo {
+                l2_block: None, // Reset to None so it will reload from database
+                token_ratio: U256::from(OLD_TOKEN_RATIO), // This will be overwritten when reloaded
+                ..Default::default()
+            })
+            .with_tx(
+                OpTransaction::builder()
+                    .base(TxEnv::builder().gas_limit(100_000))
+                    .enveloped_tx(Some(bytes!("FACADE")))
+                    .build_fill(),
+            )
+            .build_op();
+
+        // This transaction should reload L1BlockInfo and use new token ratio
+        let initial_gas3 = handler.validate_initial_tx_gas(&mut evm3).unwrap();
+        // Should use new token ratio (2)
+        assert_eq!(initial_gas3.initial_gas, 21000 * NEW_TOKEN_RATIO);
+
+        // Verify that L1BlockInfo was reloaded with new token ratio
+        assert_eq!(evm3.ctx().chain().token_ratio, U256::from(NEW_TOKEN_RATIO));
+        assert_eq!(evm3.ctx().chain().l2_block, Some(BLOCK_NUM));
     }
 }
