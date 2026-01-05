@@ -19,7 +19,7 @@ workspace = true
 
 [dependencies]
 # revm
-revm.workspace = true
+revm = { workspace = true, features = ["serde"] }
 auto_impl.workspace = true
 alloy-sol-types.workspace = true
 
@@ -34,6 +34,8 @@ sha2.workspace = true
 serde_json = { workspace = true, features = ["alloc", "preserve_order"] }
 serde = { workspace = true, features = ["derive"] }
 alloy-primitives.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "process"] }
+tempfile = "3.10"
 
 [features]
 default = ["std", "c-kzg", "secp256k1", "portable", "blst"]

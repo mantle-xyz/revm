@@ -2090,4 +2090,5 @@ mod tests {
             "L1 cost should be calculated with NEW_TOKEN_RATIO (3040)"
         );
     }
+
 }

@@ -26,6 +26,8 @@ use revm::{
     Context, ExecuteCommitEvm,
 };
 use std::time::Instant;
+use std::fs;
+use std::path::Path;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -56,9 +58,20 @@ async fn main() -> anyhow::Result<()> {
         .to_lowercase()
         == "true";
 
+    // Check if cache_db export is enabled
+    // Default to false if not set
+    let export_cache_db = std::env::var("EXPORT_CACHE_DB")
+        .unwrap_or_else(|_| "false".to_string())
+        .to_lowercase()
+        == "true";
+    
+    if export_cache_db {
+        println!("⚠️  EXPORT_CACHE_DB is enabled - cache_db will be exported");
+    }
+
     for i in start_block..=end_block {
         println!("Processing block number: {i}");
-        process_block(i, chain_id, spec, state_verify, client.clone()).await?;
+        process_block(i, chain_id, spec, state_verify, export_cache_db, client.clone()).await?;
     }
 
     Ok(())
@@ -69,6 +82,7 @@ async fn process_block(
     chain_id: u64,
     spec: OpSpecId,
     state_verify: bool,
+    export_cache_db: bool,
     client: impl Provider<Optimism> + Clone,
 ) -> anyhow::Result<()> {
     // Fetch the transaction-rich block
@@ -166,12 +180,46 @@ async fn process_block(
         }
     }
 
+    // Export cache_db data if enabled
+    if export_cache_db {
+        if let Err(e) = export_cache_db_data(&state, block_number).await {
+            println!("⚠️  Error during cache_db export: {}", e);
+        } else {
+            println!("--- cache_db exported✅");
+        }
+    }
+
     let elapsed = start.elapsed();
     println!(
         "Finished block {block_number}. Total CPU time: {:.6}s",
         elapsed.as_secs_f64()
     );
 
+    Ok(())
+}
+
+/// Export cache_db data to JSON file
+async fn export_cache_db_data<P: alloy_provider::Provider<op_alloy_network::Optimism> + Clone>(
+    state: &revm::database::State<revm::database::CacheDB<revm::database_interface::WrapDatabaseAsync<revm::database::AlloyDB<op_alloy_network::Optimism, P>>>>,
+    block_number: u64,
+) -> anyhow::Result<()> {
+    // Create output directory if it doesn't exist
+    let output_dir = Path::new("cache_db_exports");
+    if !output_dir.exists() {
+        fs::create_dir_all(output_dir)?;
+    }
+
+    // Access CacheDB's cache directly since State.database is pub
+    // Cache already supports serde serialization when serde feature is enabled
+    // Serialize the cache to JSON
+    let json = serde_json::to_string_pretty(&state.database.cache)?;
+    
+    // Write to file
+    let file_path = output_dir.join(format!("block_{}.json", block_number));
+    fs::write(&file_path, json)?;
+    
+    println!("Exported cache_db data to: {}", file_path.display());
+    
     Ok(())
 }
 
