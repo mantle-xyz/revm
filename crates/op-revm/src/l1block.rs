@@ -221,6 +221,14 @@ impl L1BlockInfo {
     /// Prior to regolith, an extra 68 non-zero bytes were included in the rollup data costs to
     /// account for the empty signature.
     pub fn data_gas(&self, input: &[u8], spec_id: OpSpecId) -> U256 {
+        if spec_id.is_enabled_in(OpSpecId::FJORD) {
+            let estimated_size = self.tx_estimated_size_fjord(input);
+
+            return estimated_size
+                .saturating_mul(U256::from(NON_ZERO_BYTE_COST))
+                .wrapping_div(U256::from(1_000_000));
+        };
+
         // tokens in calldata where non-zero bytes are priced 4 times higher than zero bytes (Same as in Istanbul).
         let mut tokens_in_transaction_data = get_tokens_in_calldata(input, true);
 
