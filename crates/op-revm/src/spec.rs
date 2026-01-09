@@ -43,7 +43,7 @@ impl OpSpecId {
             Self::CANYON => SpecId::SHANGHAI,
             Self::ECOTONE | Self::FJORD | Self::GRANITE | Self::HOLOCENE => SpecId::CANCUN,
             Self::ISTHMUS | Self::JOVIAN | Self::INTEROP => SpecId::PRAGUE,
-            Self::OSAKA| Self::ARSIA => SpecId::OSAKA,
+            Self::OSAKA | Self::ARSIA => SpecId::OSAKA,
         }
     }
 
@@ -221,10 +221,22 @@ mod tests {
             (
                 OpSpecId::ARSIA,
                 vec![
+                    (SpecId::PRAGUE, true),
+                    (SpecId::SHANGHAI, true),
+                    (SpecId::CANCUN, true),
+                    (SpecId::MERGE, true),
                     (SpecId::OSAKA, true),
-                    (SpecId::default(), false),
                 ],
-                vec![(OpSpecId::OSAKA, true)],
+                vec![
+                    (OpSpecId::BEDROCK, true),
+                    (OpSpecId::REGOLITH, true),
+                    (OpSpecId::CANYON, true),
+                    (OpSpecId::ECOTONE, true),
+                    (OpSpecId::FJORD, true),
+                    (OpSpecId::HOLOCENE, true),
+                    (OpSpecId::ISTHMUS, true),
+                    (OpSpecId::OSAKA, true),
+                ],
             ),
         ];
 

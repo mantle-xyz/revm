@@ -41,3 +41,4 @@ op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v
 # misc
 anyhow.workspace = true
 dotenv = "0.15"
+serde_json = { workspace = true }
