@@ -401,51 +401,45 @@ where
         frame_result.gas_mut().record_refund(eip7702_refund);
         let (_, tx, cfg, _, chain, _) = evm.ctx().all_mut();
         let is_deposit = tx.tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let is_regolith = cfg.spec().is_enabled_in(OpSpecId::REGOLITH);
         let is_london = cfg.spec().into_eth_spec().is_enabled_in(SpecId::LONDON);
-        let is_gas_refund_disabled = is_deposit && !is_regolith;
-        if cfg.spec().is_enabled_in(OpSpecId::ARSIA) && !is_gas_refund_disabled {
-            // Prior to Regolith, deposit transactions did not receive gas refunds.
-            frame_result.gas_mut().set_final_refund(is_london);
-        } else {
-            let is_system = tx.is_system_transaction();
-            let gas = frame_result.gas_mut();
+        let gas = frame_result.gas_mut();
+        let is_system = tx.is_system_transaction();
 
-            if tx.eth_value().is_some() && !tx.input().is_empty() {
-                gas.set_remaining(gas.remaining().saturating_sub(4500));
-            }
+        if tx.eth_value().is_some() && !tx.input().is_empty() {
+            gas.set_remaining(gas.remaining().saturating_sub(4500));
+        }
 
-            let limit = gas.limit();
-            let token_ratio_u64: u64 = chain.token_ratio.try_into().unwrap();
+        let limit = gas.limit();
+        let token_ratio_u64: u64 = chain.token_ratio.try_into().unwrap();
 
-            assert!(
-                token_ratio_u64 <= i64::MAX as u64,
-                "token_ratio {token_ratio_u64} exceeds i64::MAX"
-            );
+        assert!(
+            token_ratio_u64 <= i64::MAX as u64,
+            "token_ratio {token_ratio_u64} exceeds i64::MAX"
+        );
 
-            if !is_system && !is_deposit {
-                // limit = limit / token_ratio
+        let is_arsia = cfg.spec().is_enabled_in(OpSpecId::ARSIA);
+
+        if !is_system && !is_deposit {
+            if !is_arsia {
+                //  adjust limit temporarily for refund calculation
                 if token_ratio_u64 > 0 {
                     gas.set_limit(gas.limit().saturating_div(token_ratio_u64));
                 }
-            } else {
-                gas.set_refund(0);
             }
 
-            // Prior to Regolith, deposit transactions did not receive gas refunds.
-            if !is_gas_refund_disabled {
-                gas.set_final_refund(is_london);
-            }
+            // Calculate final refund based on (possibly adjusted) limit
+            gas.set_final_refund(is_london);
 
-            if !is_system && !is_deposit {
-                // refund = refund * token_ratio
-                // remaining = remaining * token_ratio
+            if !is_arsia {
+                // scale refund and remaining by token_ratio, restore limit
                 gas.set_refund(gas.refunded().saturating_mul(token_ratio_u64 as i64));
                 gas.set_remaining(gas.remaining().saturating_mul(token_ratio_u64));
-
-                // restore the original gas limit
                 gas.set_limit(limit);
             }
+        } else {
+            // Deposit and system transactions: no refunds
+            gas.set_refund(0);
+            gas.set_final_refund(is_london);
         }
     }
 
@@ -1750,7 +1744,7 @@ mod tests {
         // All transactions use ISTHMUS spec
 
         const BLOCK_NUM: U256 = uint!(89689906_U256);
-        
+
         // Values extracted from block 89689906
         // L1_BLOCK_CONTRACT storage slots and GAS_ORACLE_CONTRACT storage slots
         // Token ratio at block start (from previous block 89689905): 3045 (0xbe5)
@@ -1762,7 +1756,7 @@ mod tests {
         const L1_BASE_FEE_SCALAR: u64 = 10000;
 
         let mut db = InMemoryDB::default();
-        
+
         // Set up L1 block contract storage
         let l1_block_contract = db.load_account(L1_BLOCK_CONTRACT).unwrap();
         l1_block_contract
@@ -1783,9 +1777,12 @@ mod tests {
 
         // Set up caller accounts with sufficient balance
         // Addresses from block 89689906 transactions
-        let deposit_sender = Address::from_str("0xdeaddeaddeaddeaddeaddeaddeaddeaddead0001").unwrap();
-        let token_ratio_sender = Address::from_str("0xe8bf1c5750354694ed75f97b549cf570fa516725").unwrap();
-        let regular_tx_sender = Address::from_str("0xd99ac0681b904991169a4f398b9043781adbe0c3").unwrap();
+        let deposit_sender =
+            Address::from_str("0xdeaddeaddeaddeaddeaddeaddeaddeaddead0001").unwrap();
+        let token_ratio_sender =
+            Address::from_str("0xe8bf1c5750354694ed75f97b549cf570fa516725").unwrap();
+        let regular_tx_sender =
+            Address::from_str("0xd99ac0681b904991169a4f398b9043781adbe0c3").unwrap();
 
         db.insert_account_info(
             deposit_sender,
@@ -1831,7 +1828,9 @@ mod tests {
         // Transaction 1: Deposit transaction
         // Transaction hash: 0x9334f65ee1716e7f374b3a499ff82899a0f0e168fd61d2c316bf0eda5c3ea212
         const DEPOSIT_TX_RLP: &[u8] = &hex!("015d8eb9000000000000000000000000000000000000000000000000000000000170a5b400000000000000000000000000000000000000000000000000000000695a10370000000000000000000000000000000000000000000000000000000003453db78236bc1a30d9f0a2c237de8235d815dab3258124d87a238d6559ddbb208f012a00000000000000000000000000000000000000000000000000000000000000010000000000000000000000002f40d796917ffb642bd2e2bdd2c762a5e40fd74900000000000000000000000000000000000000000000000000000000000000bc0000000000000000000000000000000000000000000000000000000000002710");
-        let deposit_source_hash = B256::from_str("0x35e1ede43236480e80925f8a1f4d91c209ab586d058cf7af2b48c754915282c7").unwrap();
+        let deposit_source_hash =
+            B256::from_str("0x35e1ede43236480e80925f8a1f4d91c209ab586d058cf7af2b48c754915282c7")
+                .unwrap();
         let mut evm1 = ctx
             .clone()
             .with_tx(
@@ -1847,8 +1846,7 @@ mod tests {
         let initial_gas1 = handler.validate_initial_tx_gas(&mut evm1).unwrap();
         // Deposit tx should not multiply by token ratio
         assert_eq!(
-            initial_gas1.initial_gas,
-            21000,
+            initial_gas1.initial_gas, 21000,
             "Deposit transaction should not multiply by token ratio"
         );
 
@@ -1892,7 +1890,8 @@ mod tests {
         // Transaction 4: Set token ratio transaction
         // Transaction hash: 0x0ca2cfb8a879f0688913c19cf153969edbb9fb587503b12cef5e920d8aa70283
         // Calls gas oracle contract to set token ratio
-        const SET_TOKEN_RATIO_TX_RLP: &[u8] = &hex!("e38e91f90000000000000000000000000000000000000000000000000000000000000be0");
+        const SET_TOKEN_RATIO_TX_RLP: &[u8] =
+            &hex!("e38e91f90000000000000000000000000000000000000000000000000000000000000be0");
         let mut evm2 = ctx_with_updated_db
             .clone()
             .with_tx(
@@ -1912,12 +1911,12 @@ mod tests {
         // This transaction calls gas oracle contract, which should reset l2_block
         // It should use old token ratio (INITIAL_TOKEN_RATIO) because the chain still has the old value cached
         let initial_gas2 = handler.validate_initial_tx_gas(&mut evm2).unwrap();
-        
+
         // Calculate expected gas with old token ratio (3045)
         // The base gas (before multiplying by token_ratio) should be consistent
         let base_gas_before = initial_gas2.initial_gas / INITIAL_TOKEN_RATIO;
         let expected_gas_before = base_gas_before * INITIAL_TOKEN_RATIO;
-        
+
         // Should use old token ratio (3045) before the reset
         assert_eq!(
             initial_gas2.initial_gas,
@@ -1927,7 +1926,7 @@ mod tests {
             base_gas_before,
             INITIAL_TOKEN_RATIO
         );
-        
+
         // Verify the gas calculation uses INITIAL_TOKEN_RATIO
         assert_eq!(
             initial_gas2.initial_gas % INITIAL_TOKEN_RATIO,
@@ -1953,7 +1952,8 @@ mod tests {
         // Transaction hash: 0xd398169756466a2d1b3fb4c377972d6ecefb9c26ae30ee84aeaa215f2cf77780
         // Create a new context with l2_block reset to None so it will reload from database
         const REGULAR_TX_RLP: &[u8] = &hex!("38899935000000000000000000000000428ef0f8209be073ae7ccf4c2586942e2d21820f000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000412d3b8b4ed1764ae8529350b87648aca1fbf2f4c8e22fcaed899a050292caf9ba4e68c61e5baa496e7ab64b3fbca12a65584142a17228ac9e5457055d4412fa051b00000000000000000000000000000000000000000000000000000000000000");
-        let regular_tx_to = Address::from_str("0x5523985926aa12ba58dc5ad00ddca99678d7227e").unwrap();
+        let regular_tx_to =
+            Address::from_str("0x5523985926aa12ba58dc5ad00ddca99678d7227e").unwrap();
         let mut evm3 = ctx_with_updated_db
             .with_chain(L1BlockInfo {
                 l2_block: None, // Reset to None so it will reload from database
@@ -1978,13 +1978,13 @@ mod tests {
 
         // This transaction should reload L1BlockInfo and use new token ratio
         let initial_gas3 = handler.validate_initial_tx_gas(&mut evm3).unwrap();
-        
+
         // Calculate expected gas with new token ratio (3040)
         // The base gas (before multiplying by token_ratio) should be the same as before
         // Only the token_ratio multiplier changes from 3045 to 3040
         let base_gas_after = initial_gas3.initial_gas / NEW_TOKEN_RATIO;
         let expected_gas_after = base_gas_after * NEW_TOKEN_RATIO;
-        
+
         // Should use new token ratio (3040) after reload
         assert_eq!(
             initial_gas3.initial_gas,
@@ -1994,7 +1994,7 @@ mod tests {
             base_gas_after,
             NEW_TOKEN_RATIO
         );
-        
+
         // Verify that gas calculation changed due to token ratio change
         // Since token_ratio decreased from 3045 to 3040, gas should decrease
         assert!(
@@ -2005,28 +2005,27 @@ mod tests {
             initial_gas3.initial_gas,
             NEW_TOKEN_RATIO
         );
-        
+
         // Verify the base gas calculation and token ratio multiplier
         let base_gas_before = initial_gas2.initial_gas / INITIAL_TOKEN_RATIO;
         let base_gas_after = initial_gas3.initial_gas / NEW_TOKEN_RATIO;
-        
+
         // Calculate the actual difference due to token ratio change
         let gas_diff = initial_gas2.initial_gas - initial_gas3.initial_gas;
         let ratio_diff = INITIAL_TOKEN_RATIO - NEW_TOKEN_RATIO;
-        
+
         // Verify that the gas difference is consistent with token ratio difference
         // If base gas were the same, the difference would be: base_gas * (3045 - 3040) = base_gas * 5
         let expected_diff_if_same_base = base_gas_before * ratio_diff;
-        
+
         // Verify the gas difference matches the expected difference when base gas is the same
         if base_gas_before == base_gas_after {
             assert_eq!(
-                gas_diff,
-                expected_diff_if_same_base,
+                gas_diff, expected_diff_if_same_base,
                 "Gas difference should match token ratio difference when base gas is the same"
             );
         }
-        
+
         // Verify token ratio multiplier is correctly applied
         assert_eq!(
             initial_gas2.initial_gas % INITIAL_TOKEN_RATIO,
@@ -2072,23 +2071,21 @@ mod tests {
         // For ISTHMUS spec, L1 cost calculation should use the reloaded token ratio
         let mut chain_info = evm3.ctx().chain().clone();
         chain_info.clear_tx_l1_cost();
-        let l1_cost_with_new_ratio = chain_info.calculate_tx_l1_cost(REGULAR_TX_RLP, OpSpecId::ISTHMUS);
-        
+        let l1_cost_with_new_ratio =
+            chain_info.calculate_tx_l1_cost(REGULAR_TX_RLP, OpSpecId::ISTHMUS);
+
         // Verify that L1 cost calculation uses NEW_TOKEN_RATIO
         // L1 cost formula for ISTHMUS: (data_gas + overhead) * l1_base_fee * l1_base_fee_scalar * token_ratio / 1_000_000
         let data_gas = chain_info.data_gas(REGULAR_TX_RLP, OpSpecId::ISTHMUS);
-        let expected_l1_cost = (data_gas
-            .saturating_add(L1_FEE_OVERHEAD))
+        let expected_l1_cost = (data_gas.saturating_add(L1_FEE_OVERHEAD))
             .saturating_mul(L1_BASE_FEE)
             .saturating_mul(U256::from(L1_BASE_FEE_SCALAR))
             .saturating_mul(U256::from(NEW_TOKEN_RATIO))
             .wrapping_div(U256::from(1_000_000));
-        
+
         assert_eq!(
-            l1_cost_with_new_ratio,
-            expected_l1_cost,
+            l1_cost_with_new_ratio, expected_l1_cost,
             "L1 cost should be calculated with NEW_TOKEN_RATIO (3040)"
         );
     }
-
 }
