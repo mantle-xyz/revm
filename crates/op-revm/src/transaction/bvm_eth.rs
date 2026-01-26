@@ -92,17 +92,29 @@ impl BvmEth {
     {
         let (_, tx, _, journal, _, _) = context.all_mut();
 
+        let eth_value = tx.eth_value();
+        let eth_tx_value = tx.eth_tx_value();
+
+        // Only load and touch BVM_ETH account when there's actual work to do.
+        // This avoids warming the contract address unnecessarily.
+        let needs_mint = eth_value.is_some();
+        let needs_transfer = !mint_only && eth_tx_value.is_some();
+
+        if !needs_mint && !needs_transfer {
+            return Ok(());
+        }
+
         journal.load_account(Self::ADDRESS).map_err(db_error)?;
 
         // Handle mint if eth_value is present in the transaction
-        if let Some(eth_value) = tx.eth_value() {
+        if let Some(eth_value) = eth_value {
             let from = tx.caller();
             Self::mint_inner(journal, tx, from, U256::from(eth_value))?;
         }
 
-        if !mint_only {
-            // Handle transfer if eth_tx_value is present in the transaction
-            if let Some(eth_tx_value) = tx.eth_tx_value() {
+        // Handle transfer if eth_tx_value is present in the transaction
+        if let Some(eth_tx_value) = eth_tx_value {
+            if !mint_only {
                 Self::transfer_inner(journal, tx, U256::from(eth_tx_value))?;
             }
         }
@@ -262,9 +274,8 @@ impl BvmEth {
 mod tests {
     use super::*;
     use crate::{
-        api::default_ctx::DefaultOp,
-        handler::OpHandler,
-        L1BlockInfo, OpBuilder, OpSpecId, OpTransaction,
+        api::default_ctx::DefaultOp, handler::OpHandler, L1BlockInfo, OpBuilder, OpSpecId,
+        OpTransaction,
     };
     use alloy_sol_types::{sol, SolEvent};
     use revm::{
@@ -277,7 +288,12 @@ mod tests {
     };
     use rstest::rstest;
     use serde::{Deserialize, Serialize};
-    use std::{collections::HashSet, fs, path::{Path, PathBuf}, str::FromStr};
+    use std::{
+        collections::HashSet,
+        fs,
+        path::{Path, PathBuf},
+        str::FromStr,
+    };
     use tempfile::tempdir;
 
     sol! {
@@ -313,6 +329,244 @@ mod tests {
             U256::from_str("0x0000000000000000000000000000000000000000000000000000000000000002")
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn test_process_eth_deposit_no_eth_value_no_eth_tx_value() {
+        // When both eth_value and eth_tx_value are None, should return early
+        // and not load BVM_ETH account
+        let caller = address!("1234567890123456789012345678901234567890");
+        let to = address!("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .with_chain(L1BlockInfo::default())
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = revm::primitives::TxKind::Call(to);
+                tx.base.gas_limit = 1_000_000;
+                tx.deposit.eth_value = None;
+                tx.deposit.eth_tx_value = None;
+            });
+
+        let result = BvmEth::process_eth_deposit(&mut ctx, false);
+        assert!(result.is_ok());
+
+        // BVM_ETH account should NOT be loaded
+        assert!(
+            !ctx.journaled_state
+                .inner
+                .state
+                .contains_key(&BvmEth::ADDRESS),
+            "BVM_ETH should not be loaded when eth_value and eth_tx_value are both None"
+        );
+
+        // No logs should be emitted
+        assert!(ctx.journaled_state.inner.logs.is_empty());
+    }
+
+    #[test]
+    fn test_process_eth_deposit_only_eth_value() {
+        // When only eth_value is present, should mint BVM_ETH
+        let eth_value = 1_000_000_000_000_000_000u128; // 1 ETH
+        let caller = address!("1234567890123456789012345678901234567890");
+        let to = address!("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .with_chain(L1BlockInfo::default())
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = revm::primitives::TxKind::Call(to);
+                tx.base.gas_limit = 1_000_000;
+                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_tx_value = None;
+            });
+
+        let result = BvmEth::process_eth_deposit(&mut ctx, false);
+        assert!(result.is_ok());
+
+        // BVM_ETH account should be loaded
+        assert!(
+            ctx.journaled_state
+                .inner
+                .state
+                .contains_key(&BvmEth::ADDRESS),
+            "BVM_ETH should be loaded when eth_value is present"
+        );
+
+        // Should have Mint event
+        let logs = &ctx.journaled_state.inner.logs;
+        assert_eq!(logs.len(), 1, "Should have exactly 1 log (Mint event)");
+        assert_eq!(logs[0].address, BvmEth::ADDRESS);
+        assert_eq!(logs[0].topics()[0], BvmEth::MINT_SELECTOR);
+    }
+
+    #[test]
+    fn test_process_eth_deposit_only_eth_tx_value() {
+        // When only eth_tx_value is present, should transfer BVM_ETH
+        let eth_tx_value = 500_000_000_000_000_000u128; // 0.5 ETH
+        let caller = address!("1234567890123456789012345678901234567890");
+        let to = address!("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .with_chain(L1BlockInfo::default())
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = revm::primitives::TxKind::Call(to);
+                tx.base.gas_limit = 1_000_000;
+                tx.deposit.eth_value = None;
+                tx.deposit.eth_tx_value = Some(eth_tx_value);
+            });
+
+        // First, give the caller some BVM_ETH balance for transfer
+        use revm::context_interface::JournalTr;
+        let balance_slot = BvmEth::get_balance_slot(caller);
+        ctx.journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load account");
+        ctx.journaled_state
+            .sstore(BvmEth::ADDRESS, balance_slot, U256::from(eth_tx_value))
+            .expect("sstore");
+        // Clear logs from setup
+        ctx.journaled_state.inner.logs.clear();
+
+        let result = BvmEth::process_eth_deposit(&mut ctx, false);
+        assert!(result.is_ok());
+
+        // BVM_ETH account should be loaded
+        assert!(
+            ctx.journaled_state
+                .inner
+                .state
+                .contains_key(&BvmEth::ADDRESS),
+            "BVM_ETH should be loaded when eth_tx_value is present"
+        );
+
+        // Should have Transfer event
+        let logs = &ctx.journaled_state.inner.logs;
+        assert_eq!(logs.len(), 1, "Should have exactly 1 log (Transfer event)");
+        assert_eq!(logs[0].address, BvmEth::ADDRESS);
+        assert_eq!(logs[0].topics()[0], BvmEth::TRANSFER_SELECTOR);
+    }
+
+    #[test]
+    fn test_process_eth_deposit_both_values() {
+        // When both eth_value and eth_tx_value are present, should mint and transfer
+        let eth_value = 1_000_000_000_000_000_000u128; // 1 ETH
+        let eth_tx_value = 500_000_000_000_000_000u128; // 0.5 ETH
+        let caller = address!("1234567890123456789012345678901234567890");
+        let to = address!("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .with_chain(L1BlockInfo::default())
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = revm::primitives::TxKind::Call(to);
+                tx.base.gas_limit = 1_000_000;
+                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_tx_value = Some(eth_tx_value);
+            });
+
+        let result = BvmEth::process_eth_deposit(&mut ctx, false);
+        assert!(result.is_ok());
+
+        // BVM_ETH account should be loaded
+        assert!(
+            ctx.journaled_state
+                .inner
+                .state
+                .contains_key(&BvmEth::ADDRESS),
+            "BVM_ETH should be loaded when eth_value or eth_tx_value is present"
+        );
+
+        // Should have Mint and Transfer events
+        let logs = &ctx.journaled_state.inner.logs;
+        assert_eq!(
+            logs.len(),
+            2,
+            "Should have 2 logs (Mint and Transfer events)"
+        );
+
+        // First log should be Mint
+        assert_eq!(logs[0].address, BvmEth::ADDRESS);
+        assert_eq!(logs[0].topics()[0], BvmEth::MINT_SELECTOR);
+
+        // Second log should be Transfer
+        assert_eq!(logs[1].address, BvmEth::ADDRESS);
+        assert_eq!(logs[1].topics()[0], BvmEth::TRANSFER_SELECTOR);
+    }
+
+    #[test]
+    fn test_process_eth_deposit_mint_only_flag() {
+        // When mint_only is true and eth_tx_value is present, should only mint
+        let eth_value = 1_000_000_000_000_000_000u128;
+        let eth_tx_value = 500_000_000_000_000_000u128;
+        let caller = address!("1234567890123456789012345678901234567890");
+        let to = address!("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .with_chain(L1BlockInfo::default())
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = revm::primitives::TxKind::Call(to);
+                tx.base.gas_limit = 1_000_000;
+                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_tx_value = Some(eth_tx_value);
+            });
+
+        let result = BvmEth::process_eth_deposit(&mut ctx, true); // mint_only = true
+        assert!(result.is_ok());
+
+        // Should only have Mint event, no Transfer
+        let logs = &ctx.journaled_state.inner.logs;
+        assert_eq!(logs.len(), 1, "Should have exactly 1 log (Mint event only)");
+        assert_eq!(logs[0].topics()[0], BvmEth::MINT_SELECTOR);
+    }
+
+    #[test]
+    fn test_process_eth_deposit_mint_only_no_eth_value() {
+        // When mint_only is true but only eth_tx_value is present,
+        // should return early because needs_transfer is false when mint_only=true
+        let eth_tx_value = 500_000_000_000_000_000u128;
+        let caller = address!("1234567890123456789012345678901234567890");
+        let to = address!("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .with_chain(L1BlockInfo::default())
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = revm::primitives::TxKind::Call(to);
+                tx.base.gas_limit = 1_000_000;
+                tx.deposit.eth_value = None;
+                tx.deposit.eth_tx_value = Some(eth_tx_value);
+            });
+
+        let result = BvmEth::process_eth_deposit(&mut ctx, true); // mint_only = true
+        assert!(result.is_ok());
+
+        // BVM_ETH account should NOT be loaded because:
+        // - needs_mint = false (eth_value is None)
+        // - needs_transfer = false (mint_only is true)
+        assert!(
+            !ctx.journaled_state
+                .inner
+                .state
+                .contains_key(&BvmEth::ADDRESS),
+            "BVM_ETH should not be loaded when mint_only=true and eth_value is None"
+        );
+
+        assert!(ctx.journaled_state.inner.logs.is_empty());
     }
 
     /// Test case data structure
@@ -453,8 +707,11 @@ mod tests {
         });
 
         let mut evm = ctx.build_op();
-        let mut handler =
-            OpHandler::<_, EVMError<_, crate::transaction::error::OpTransactionError>, EthFrame<EthInterpreter>>::new();
+        let mut handler = OpHandler::<
+            _,
+            EVMError<_, crate::transaction::error::OpTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
 
         // handler.run() will internally call validate_against_state_and_deduct_caller
         // so we should not call it manually here to avoid duplicate process_eth_deposit
@@ -535,10 +792,7 @@ mod tests {
                 "Expected log {} not found. Address: {:?}, Topics: {:?}, Data: {}",
                 i,
                 expected_address,
-                expected_topics
-                    .iter()
-                    .map(hex::encode)
-                    .collect::<Vec<_>>(),
+                expected_topics.iter().map(hex::encode).collect::<Vec<_>>(),
                 hex::encode(expected_data)
             );
 
