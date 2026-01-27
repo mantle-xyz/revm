@@ -3,6 +3,7 @@ use crate::{
     api::exec::OpContextTr,
     constants::{
         BASE_FEE_RECIPIENT, GAS_ORACLE_CONTRACT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT,
+        BVM_ETH_MINT_GAS_COMPENSATION,
     },
     transaction::{deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr},
     BvmEth, L1BlockInfo, OpHaltReason, OpSpecId,
@@ -405,8 +406,10 @@ where
         let gas = frame_result.gas_mut();
         let is_system = tx.is_system_transaction();
 
-        if tx.eth_value().is_some() && !tx.input().is_empty() {
-            gas.set_remaining(gas.remaining().saturating_sub(4500));
+        // Apply gas compensation when BVM_ETH operations (mint or transfer) warm the account
+        // and there's subsequent EVM execution that might access BVM_ETH
+        if (tx.eth_value().is_some() || tx.eth_tx_value().is_some()) && !tx.input().is_empty() {
+            gas.set_remaining(gas.remaining().saturating_sub(BVM_ETH_MINT_GAS_COMPENSATION));
         }
 
         let limit = gas.limit();
@@ -2086,6 +2089,271 @@ mod tests {
         assert_eq!(
             l1_cost_with_new_ratio, expected_l1_cost,
             "L1 cost should be calculated with NEW_TOKEN_RATIO (3040)"
+        );
+    }
+
+    #[test]
+    fn test_bvm_eth_gas_compensation_applied() {
+        let eth_value = 1_000_000_000_000_000_000u128; // 1 ETH
+        let initial_gas = 10000u64;
+        let remaining_gas = 5000u64;
+
+        let ctx = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .data(Bytes::from(vec![0x12, 0x34])), // Non-empty input
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_tx_chained(|tx| {
+                tx.deposit.eth_value = Some(eth_value);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+
+        let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
+        
+        // Gas compensation (4500) should be subtracted from remaining gas
+        // Since remaining_gas (5000) > BVM_ETH_MINT_GAS_COMPENSATION (4500), 
+        // remaining should be 5000 - 4500 = 500
+        assert_eq!(
+            gas.remaining(),
+            remaining_gas - BVM_ETH_MINT_GAS_COMPENSATION,
+            "Gas compensation should be applied when eth_value exists and input is not empty"
+        );
+    }
+
+    #[test]
+    fn test_bvm_eth_gas_compensation_value_is_4500() {
+        // This verifies the constant matches the documented calculation:
+        // Account access difference: 2500 (cold: 2600, warm: 100)
+        // Storage slot access difference: 2000 (cold: 2100, warm: 100)
+        // Total: 2500 + 2000 = 4500
+        let eth_value = 1_000_000_000_000_000_000u128; // 1 ETH
+        let initial_gas = 10000u64;
+        let remaining_gas = 10000u64; // Use larger value to avoid saturation
+
+        // Test with compensation applied (eth_value exists and input is not empty)
+        // Note: Compensation also applies when eth_tx_value exists (tested separately)
+        let ctx_with_compensation = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .data(Bytes::from(vec![0x12, 0x34])), // Non-empty input
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_tx_chained(|tx| {
+                tx.deposit.eth_value = Some(eth_value);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+
+        // Test without compensation (no eth_value)
+        let ctx_without_compensation = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .data(Bytes::from(vec![0x12, 0x34])), // Non-empty input
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+        // eth_value is None by default, so compensation should not be applied
+
+        let gas_with_compensation =
+            call_last_frame_return(ctx_with_compensation, InstructionResult::Stop, Gas::new(remaining_gas));
+        let gas_without_compensation =
+            call_last_frame_return(ctx_without_compensation, InstructionResult::Stop, Gas::new(remaining_gas));
+
+        // Calculate the difference in remaining gas
+        let gas_difference = gas_without_compensation.remaining() - gas_with_compensation.remaining();
+
+        // Verify the difference is exactly 4500
+        assert_eq!(
+            gas_difference,
+            BVM_ETH_MINT_GAS_COMPENSATION,
+            "Gas compensation should be exactly {} (account diff 2500 + storage diff 2000)",
+            BVM_ETH_MINT_GAS_COMPENSATION
+        );
+        assert_eq!(
+            BVM_ETH_MINT_GAS_COMPENSATION,
+            4500,
+            "BVM_ETH_MINT_GAS_COMPENSATION constant should be 4500"
+        );
+    }
+
+    #[test]
+    fn test_bvm_eth_gas_compensation_not_applied_empty_input() {
+        let eth_value = 1_000_000_000_000_000_000u128; // 1 ETH
+        let initial_gas = 10000u64;
+        let remaining_gas = 5000u64;
+
+        let ctx = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .data(Bytes::new()), // Empty input
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_tx_chained(|tx| {
+                tx.deposit.eth_value = Some(eth_value);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+
+        let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
+        
+        // Gas compensation should NOT be applied when input is empty
+        assert_eq!(
+            gas.remaining(),
+            remaining_gas,
+            "Gas compensation should NOT be applied when input is empty"
+        );
+    }
+
+    #[test]
+    fn test_bvm_eth_gas_compensation_not_applied_no_eth_value() {
+        let initial_gas = 10000u64;
+        let remaining_gas = 5000u64;
+
+        let ctx = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .data(Bytes::from(vec![0x12, 0x34])), // Non-empty input
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+        // eth_value and eth_tx_value are None by default
+
+        let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
+        
+        // Gas compensation should NOT be applied when both eth_value and eth_tx_value are None
+        assert_eq!(
+            gas.remaining(),
+            remaining_gas,
+            "Gas compensation should NOT be applied when both eth_value and eth_tx_value are None"
+        );
+    }
+
+    #[test]
+    fn test_bvm_eth_gas_compensation_saturating_sub() {
+        let eth_value = 1_000_000_000_000_000_000u128; // 1 ETH
+        let initial_gas = 10000u64;
+        let remaining_gas = 3000u64; // Less than BVM_ETH_MINT_GAS_COMPENSATION (4500)
+
+        let ctx = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .data(Bytes::from(vec![0x12, 0x34])), // Non-empty input
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_tx_chained(|tx| {
+                tx.deposit.eth_value = Some(eth_value);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+
+        let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
+        
+        // Gas compensation should use saturating_sub, so remaining should be 0 (not negative)
+        assert_eq!(
+            gas.remaining(),
+            0,
+            "Gas compensation should use saturating_sub when remaining gas is less than compensation"
+        );
+    }
+
+    #[test]
+    fn test_bvm_eth_gas_compensation_zero_eth_value() {
+        let initial_gas = 10000u64;
+        let remaining_gas = 5000u64;
+
+        let ctx = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .data(Bytes::from(vec![0x12, 0x34])), // Non-empty input
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_tx_chained(|tx| {
+                tx.deposit.eth_value = Some(0); // Zero eth_value should be filtered out
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+
+        let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
+        
+        // Gas compensation should NOT be applied when eth_value is zero (returns None)
+        assert_eq!(
+            gas.remaining(),
+            remaining_gas,
+            "Gas compensation should NOT be applied when eth_value is zero"
+        );
+    }
+
+    #[test]
+    fn test_bvm_eth_gas_compensation_only_eth_tx_value() {
+        // Test that gas compensation is also applied when only eth_tx_value exists
+        // According to state.go, transferBVMETH also accesses BVM_ETH storage and would warm
+        // the account in REVM, so compensation is needed.
+        //
+        // Note: This test only verifies the compensation logic in refund(), not the actual
+        // transfer execution. The compensation check looks at eth_value() or eth_tx_value() and input(),
+        // so it doesn't matter if the transfer would succeed or fail.
+        let eth_tx_value = 500_000_000_000_000_000u128; // 0.5 ETH
+        let initial_gas = 10000u64;
+        let remaining_gas = 5000u64;
+
+        let ctx = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .data(Bytes::from(vec![0x12, 0x34])), // Non-empty input
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_tx_chained(|tx| {
+                tx.deposit.eth_value = None;
+                tx.deposit.eth_tx_value = Some(eth_tx_value);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+
+        let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
+        
+        // Gas compensation (4500) should be subtracted from remaining gas
+        // Since remaining_gas (5000) > BVM_ETH_MINT_GAS_COMPENSATION (4500), 
+        // remaining should be 5000 - 4500 = 500
+        assert_eq!(
+            gas.remaining(),
+            remaining_gas - BVM_ETH_MINT_GAS_COMPENSATION,
+            "Gas compensation should be applied when only eth_tx_value exists and input is not empty"
         );
     }
 }

@@ -74,3 +74,16 @@ pub const GAS_ORACLE_CONTRACT: Address = address!("42000000000000000000000000000
 
 /// The address of the sequencer fee wallet, which is block coinbase.
 pub const SEQUENCER_FEE_VAULT_ADDRESS: Address = address!("4200000000000000000000000000000000000011");
+
+/// Gas compensation for BVM_ETH mint operations to align with go-ethereum behavior.
+///
+/// This constant compensates for the gas calculation difference between REVM and go-ethereum
+/// when handling BVM_ETH state operations. The value of 4500 is derived from EIP-2929 access
+/// list gas costs:
+/// - Account access difference: 2500 (cold: 2600, warm: 100)
+/// - Storage slot access difference: 2000 (cold: 2100, warm: 100)
+///
+/// REVM marks BVM_ETH account and storage slots as warm during mint/transfer operations,
+/// while go-ethereum keeps them cold. When subsequent EVM execution accesses BVM_ETH,
+/// this compensation ensures consistent gas consumption.
+pub const BVM_ETH_MINT_GAS_COMPENSATION: u64 = 4500;
