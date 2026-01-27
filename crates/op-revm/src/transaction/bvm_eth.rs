@@ -274,7 +274,8 @@ impl BvmEth {
 mod tests {
     use super::*;
     use crate::{
-        api::default_ctx::DefaultOp, handler::OpHandler, L1BlockInfo, OpBuilder, OpSpecId,
+        api::default_ctx::DefaultOp, handler::OpHandler,
+        transaction::deposit::DepositTransactionParts, L1BlockInfo, OpBuilder, OpSpecId,
         OpTransaction,
     };
     use alloy_sol_types::{sol, SolEvent};
@@ -679,32 +680,36 @@ mod tests {
             ..Default::default()
         };
 
-        let mut ctx = Context::op()
+        // Build deposit transaction parts
+        let deposit = DepositTransactionParts {
+            source_hash,
+            mint: Some(0),
+            is_system_transaction: false,
+            eth_value: Some(eth_value.to::<u128>()),
+            eth_tx_value: Some(eth_tx_value.to::<u128>()),
+        };
+
+        // Build complete OpTransaction
+        let op_tx = OpTransaction {
+            base: TxEnv {
+                caller: from,
+                kind: revm::primitives::TxKind::Call(to),
+                gas_limit: test_case.gas_limit,
+                gas_price: 0,
+                value: U256::ZERO,
+                data: Bytes::from(tx_input),
+                ..Default::default()
+            },
+            enveloped_tx: None,
+            deposit,
+        };
+
+        let ctx = Context::op()
             .with_db(db)
             .with_chain(l1_block_info)
             .with_block(block_env)
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
-            .with_tx(
-                OpTransaction::builder()
-                    .base(
-                        TxEnv::builder()
-                            .caller(from)
-                            .to(to)
-                            .gas_limit(test_case.gas_limit)
-                            .gas_price(0)
-                            .value(U256::ZERO),
-                    )
-                    .source_hash(source_hash)
-                    .mint(0)
-                    .enveloped_tx(None)
-                    .build_fill(),
-            );
-
-        ctx.modify_tx(|tx| {
-            tx.deposit.eth_value = Some(eth_value.to::<u128>());
-            tx.deposit.eth_tx_value = Some(eth_tx_value.to::<u128>());
-            tx.base.data = Bytes::from(tx_input);
-        });
+            .with_tx(op_tx);
 
         let mut evm = ctx.build_op();
         let mut handler = OpHandler::<

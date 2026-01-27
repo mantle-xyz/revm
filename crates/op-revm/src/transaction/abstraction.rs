@@ -31,7 +31,7 @@ pub trait OpTxTr: Transaction {
     fn is_deposit(&self) -> bool {
         self.tx_type() == DEPOSIT_TRANSACTION_TYPE
     }
-    
+
     /// Returns the eth value of the deposit transaction
     fn eth_value(&self) -> Option<u128>;
 
@@ -220,7 +220,7 @@ impl<T: Transaction> OpTxTr for OpTransaction<T> {
     }
 
     fn eth_tx_value(&self) -> Option<u128> {
-        self.deposit.eth_tx_value
+        self.deposit.eth_tx_value.filter(|&v| v != 0)
     }
 }
 
@@ -411,5 +411,22 @@ mod tests {
         // Verify gas related calculations - deposit transactions use gas_price for effective gas price
         assert_eq!(op_tx.effective_gas_price(90), 100);
         assert_eq!(op_tx.max_fee_per_gas(), 100);
+    }
+
+    #[test]
+    fn test_eth_value_filtering() {
+        let op_tx = OpTransaction {
+            base: TxEnv::default(),
+            enveloped_tx: None,
+            deposit: DepositTransactionParts {
+                source_hash: B256::ZERO,
+                mint: None,
+                is_system_transaction: false,
+                eth_tx_value: Some(0),
+                eth_value: Some(0),
+            },
+        };
+        assert_eq!(op_tx.eth_value(), None);
+        assert_eq!(op_tx.eth_tx_value(), None);
     }
 }
