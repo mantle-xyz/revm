@@ -8,7 +8,7 @@ use crate::{
         OPERATOR_FEE_JOVIAN_MULTIPLIER, OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE_SCALAR_OFFSET,
         TOKEN_RATIO_SLOT,
     },
-    transaction::{estimate_tx_compressed_size, OpTxTr},
+    transaction::{estimate_tx_compressed_size, estimate_tx_compressed_size_with_delta, OpTxTr},
     OpSpecId,
 };
 use revm::{
@@ -311,17 +311,41 @@ impl L1BlockInfo {
     /// [OpSpecId::ARSIA] L1 cost function:
     /// `estimatedSize*(baseFeeScalar*l1BaseFee*16 + blobFeeScalar*l1BlobBaseFee)/1e12`
     fn calculate_tx_l1_cost_arsia(&self, input: &[u8]) -> U256 {
+        self.calculate_tx_l1_cost_arsia_with_delta(input, 0)
+    }
+
+    /// Like [`calculate_tx_l1_cost_arsia`] but adds `fastlz_delta` to compressed size (e.g. +80 for geth alignment).
+    /// Uses geth Fjord formula: estimatedDASizeScaled = max(MinTxSizeScaled, intercept + coef*fastLzSize).
+    /// [`estimate_tx_compressed_size_with_delta`] already returns that scaled value; use it directly.
+    fn calculate_tx_l1_cost_arsia_with_delta(&self, input: &[u8], fastlz_delta: u64) -> U256 {
         let l1_fee_scaled = self.calculate_l1_fee_scaled_ecotone();
         if l1_fee_scaled.is_zero() {
             return U256::ZERO;
         }
 
-        let estimated_size = self.tx_estimated_size_fjord(input);
+        let estimated_size_scaled = estimate_tx_compressed_size_with_delta(input, fastlz_delta);
 
-        estimated_size
+        U256::from(estimated_size_scaled)
             .saturating_mul(l1_fee_scaled)
             .wrapping_div(U256::from(1_000_000_000_000u64))
             .saturating_mul(self.token_ratio)
+    }
+
+    /// L1 cost for RPC estimate (no cache). Uses `fastlz_delta` in Arsia formula to align with geth (+80).
+    pub fn calculate_tx_l1_cost_for_estimate(
+        &self,
+        input: &[u8],
+        spec_id: OpSpecId,
+        fastlz_delta: u64,
+    ) -> U256 {
+        if input.is_empty() || input.first() == Some(&0x7E) {
+            return U256::ZERO;
+        }
+        if spec_id.is_enabled_in(OpSpecId::ARSIA) {
+            self.calculate_tx_l1_cost_arsia_with_delta(input, fastlz_delta)
+        } else {
+            self.calculate_tx_l1_cost_before_arsia(input, spec_id)
+        }
     }
 
     // l1BaseFee*16*l1BaseFeeScalar + l1BlobBaseFee*l1BlobBaseFeeScalar
