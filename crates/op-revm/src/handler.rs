@@ -922,6 +922,54 @@ mod tests {
     }
 
     #[test]
+    fn test_execution_uses_divisor_one_when_token_ratio_low64_is_zero() {
+        let caller = Address::with_last_byte(0x31);
+        let recipient = Address::with_last_byte(0x32);
+        let tx_input = bytes!("FACADE");
+
+        let run = |token_ratio: U256| {
+            let ctx = Context::op()
+                .with_chain(L1BlockInfo {
+                    l2_block: Some(U256::from(1)),
+                    l1_base_fee: U256::from(1),
+                    l1_fee_overhead: Some(U256::ZERO),
+                    l1_base_fee_scalar: U256::from(1),
+                    token_ratio,
+                    ..Default::default()
+                })
+                .with_block(BlockEnv {
+                    number: U256::from(1),
+                    basefee: 1,
+                    ..Default::default()
+                })
+                .with_tx(regular_tx(caller, recipient, 1_000_000, &tx_input))
+                .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+            let mut evm = ctx.build_op();
+            let mut handler =
+                OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+            let init = handler.validate_initial_tx_gas(&mut evm)?;
+            handler.execution(&mut evm, &init)
+        };
+
+        // low 64 bits are 0, so execution path should clamp divisor to 1.
+        let low64_zero_ratio: U256 = U256::from(1u64) << 64u32;
+        assert_eq!(low64_zero_ratio.as_limbs()[0], 0);
+        assert_eq!(low64_zero_ratio.as_limbs()[0].max(1), 1);
+
+        // The main assertion here is "no panic" in execution path with low64 == 0.
+        let zero_low64_result = run(low64_zero_ratio)
+            .map(|frame| frame.interpreter_result().result)
+            .map_err(|err| err.to_string());
+        if let Err(msg) = zero_low64_result {
+            assert!(
+                !msg.to_ascii_lowercase().contains("divide"),
+                "unexpected divide-by-zero style error: {msg}"
+            );
+        }
+    }
+
+    #[test]
     fn test_consume_gas_deposit_tx() {
         let ctx = Context::op()
             .with_tx(
