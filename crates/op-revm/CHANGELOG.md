@@ -7,6 +7,228 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [13.0.0](https://github.com/mantle-xyz/revm/compare/op-revm-v12.0.2...op-revm-v13.0.0) - 2026-03-04
+
+### Added
+
+- support fastlz_delta in Arsia L1 cost for geth estimateTotalFee alignment
+- validate transaction environment based on ARSIA spec
+- support arsia operator fee ([#16](https://github.com/mantle-xyz/revm/pull/16))
+- support arsia fee model ([#15](https://github.com/mantle-xyz/revm/pull/15))
+- add osaka precompiles support
+- support fusaka
+- *(jovian)* add da footprint block limit. ([#3003](https://github.com/mantle-xyz/revm/pull/3003))
+- *(op-revm)* implement jovian operator fee fix ([#2996](https://github.com/mantle-xyz/revm/pull/2996))
+- *(op-revm)* Add an option to disable "fee-charge" on `op-revm` ([#2980](https://github.com/mantle-xyz/revm/pull/2980))
+- [**breaking**] Remove kzg-rs ([#2909](https://github.com/mantle-xyz/revm/pull/2909))
+- *(fusaka)* Add PrecompileId ([#2904](https://github.com/mantle-xyz/revm/pull/2904))
+- fix renamed functions for system_call ([#2824](https://github.com/mantle-xyz/revm/pull/2824))
+- refactor test utils ([#2813](https://github.com/mantle-xyz/revm/pull/2813))
+- add system transaction inspection support ([#2808](https://github.com/mantle-xyz/revm/pull/2808))
+- Align naming of SystemCallEvm function to ExecuteEvm ([#2814](https://github.com/mantle-xyz/revm/pull/2814))
+- rename bn128 to bn254 for Ethereum standard consistency ([#2810](https://github.com/mantle-xyz/revm/pull/2810))
+- *(osaka)* update EIP-7825 constant ([#2753](https://github.com/mantle-xyz/revm/pull/2753))
+- optional_eip3541 ([#2661](https://github.com/mantle-xyz/revm/pull/2661))
+- add fallible conversion from OpHaltReason to HaltReason ([#2649](https://github.com/mantle-xyz/revm/pull/2649))
+- remove EOF ([#2644](https://github.com/mantle-xyz/revm/pull/2644))
+- *(precompile)* rug/gmp-based modexp ([#2596](https://github.com/mantle-xyz/revm/pull/2596))
+- enable P256 in Osaka ([#2601](https://github.com/mantle-xyz/revm/pull/2601))
+- add with_caller for system_transact ([#2587](https://github.com/mantle-xyz/revm/pull/2587))
+- *(Osaka)* EIP-7825 tx limit cap ([#2575](https://github.com/mantle-xyz/revm/pull/2575))
+- expand timestamp/block_number to u256 ([#2546](https://github.com/mantle-xyz/revm/pull/2546))
+- transact multi tx ([#2517](https://github.com/mantle-xyz/revm/pull/2517))
+- *(op-revm)* add testdata comparison utility for EVM execution output ([#2525](https://github.com/mantle-xyz/revm/pull/2525))
+- system_call switch order of inputs, address than bytes ([#2485](https://github.com/mantle-xyz/revm/pull/2485))
+- *(Osaka)* disable EOF ([#2480](https://github.com/mantle-xyz/revm/pull/2480))
+- skip cloning of call input from shared memory ([#2462](https://github.com/mantle-xyz/revm/pull/2462))
+- *(Handler)* merge state validation with deduct_caller ([#2460](https://github.com/mantle-xyz/revm/pull/2460))
+- *(tx)* Add Either RecoveredAuthorization ([#2448](https://github.com/mantle-xyz/revm/pull/2448))
+- add precompiles getter to OpPrecompiles ([#2444](https://github.com/mantle-xyz/revm/pull/2444))
+- *(EOF)* Changes needed for devnet-1 ([#2377](https://github.com/mantle-xyz/revm/pull/2377))
+- *(docs)* MyEvm example and book cleanup ([#2218](https://github.com/mantle-xyz/revm/pull/2218))
+- remove specification crate ([#2165](https://github.com/mantle-xyz/revm/pull/2165))
+- book structure ([#2082](https://github.com/mantle-xyz/revm/pull/2082))
+- *(examples)* generate block traces ([#895](https://github.com/mantle-xyz/revm/pull/895))
+- implement EIP-4844 ([#668](https://github.com/mantle-xyz/revm/pull/668))
+- *(Shanghai)* All EIPs: push0, warm coinbase, limit/measure initcode ([#376](https://github.com/mantle-xyz/revm/pull/376))
+- Migrate `primitive_types::U256` to `ruint::Uint<256, 4>` ([#239](https://github.com/mantle-xyz/revm/pull/239))
+- Introduce ByteCode format, Update Readme ([#156](https://github.com/mantle-xyz/revm/pull/156))
+
+### Fixed
+
+- arsia refund
+- unit tests
+- add FJORD in data_gas
+- build error
+- token ratio is not set default is one
+- unit tests
+- arsia account info
+- fix unit tests
+- eth_value is zero
+- *(op-revm)* return error instead of panic when enveloped_tx is missing ([#3055](https://github.com/mantle-xyz/revm/pull/3055))
+- add missing is_fee_charge_disabled check ([#3007](https://github.com/mantle-xyz/revm/pull/3007))
+- Apply spelling corrections from PRs #2926, #2915, #2908 ([#2978](https://github.com/mantle-xyz/revm/pull/2978))
+- *(op-revm)* clear enveloped_tx for deposit txs in build_fill and align docs ([#2957](https://github.com/mantle-xyz/revm/pull/2957))
+- *(handler)* correct transaction ID decrement logic ([#2892](https://github.com/mantle-xyz/revm/pull/2892))
+- *(op-revm)* system tx not enveloped ([#2807](https://github.com/mantle-xyz/revm/pull/2807))
+- nonce changed is not reverted in journal if fail due to insufficient balance ([#2805](https://github.com/mantle-xyz/revm/pull/2805))
+- gas deduction with `disable_balance_check` ([#2699](https://github.com/mantle-xyz/revm/pull/2699))
+- OpTransactionBuilder dont override envelope ([#2681](https://github.com/mantle-xyz/revm/pull/2681))
+- call stack_frame.clear() at end ([#2656](https://github.com/mantle-xyz/revm/pull/2656))
+- *(multitx)* Add local flags for create and selfdestruct ([#2581](https://github.com/mantle-xyz/revm/pull/2581))
+- *(op)* bump nonce on deposit ([#2503](https://github.com/mantle-xyz/revm/pull/2503))
+- *(op)* call cleanup on local context ([#2499](https://github.com/mantle-xyz/revm/pull/2499))
+- *(op)* mark caller account as touched ([#2495](https://github.com/mantle-xyz/revm/pull/2495))
+- fix typo and update links ([#2387](https://github.com/mantle-xyz/revm/pull/2387))
+- fix typos ([#620](https://github.com/mantle-xyz/revm/pull/620))
+
+### Other
+
+- Add sequential same-block timing tests for fee params and token ratio updates in op-revm.
+- add BVM_ETH_MINT_GAS_COMPENSATION
+- add test for bvm_eth when value is zero
+- optimize BVM_ETH account loading by checking transaction values before accessing the journal ([#21](https://github.com/mantle-xyz/revm/pull/21))
+- add mantle test case
+- support arsia
+- add state verification
+- add estimate_tx_compressed_size
+- add OP_SPEC in env
+- Merge origin/main into merge-upstream-v98
+- Merge tag 'v98' into merge-upstream-v98
+- eth_value is zero
+- add tips
+- update deps
+- Merge revm v91
+- release ([#3079](https://github.com/mantle-xyz/revm/pull/3079))
+- bump minor versions ([#3078](https://github.com/mantle-xyz/revm/pull/3078))
+- release ([#3061](https://github.com/mantle-xyz/revm/pull/3061))
+- *(op)* backport of #3073 fix for l1block info ([#3076](https://github.com/mantle-xyz/revm/pull/3076))
+- backport v89 changelog ([#3075](https://github.com/mantle-xyz/revm/pull/3075))
+- *(op)* split paths for deposit tx in caller deduction ([#3041](https://github.com/mantle-xyz/revm/pull/3041))
+- release ([#2958](https://github.com/mantle-xyz/revm/pull/2958))
+- changelog update for v87 ([#3056](https://github.com/mantle-xyz/revm/pull/3056))
+- add boundless ([#3043](https://github.com/mantle-xyz/revm/pull/3043))
+- helper function gas_balance_spending ([#3030](https://github.com/mantle-xyz/revm/pull/3030))
+- helper caller_initial_modification added ([#3032](https://github.com/mantle-xyz/revm/pull/3032))
+- EvmTr and InspectorEvmTr receive all/all_mut fn ([#3037](https://github.com/mantle-xyz/revm/pull/3037))
+- add ensure_enough_balance helper ([#3033](https://github.com/mantle-xyz/revm/pull/3033))
+- *(op-revm)* propagate optional_fee_charge feature ([#3020](https://github.com/mantle-xyz/revm/pull/3020))
+- Set l2_block in try_fetch for pre-Isthmus forks; add reload tests ([#2994](https://github.com/mantle-xyz/revm/pull/2994))
+- prealloc few frames ([#2965](https://github.com/mantle-xyz/revm/pull/2965))
+- treat empty input as zero operator fee in operator_fee_charge ([#2973](https://github.com/mantle-xyz/revm/pull/2973))
+- add SECURITY.md ([#2956](https://github.com/mantle-xyz/revm/pull/2956))
+- *(op-revm)* rm redundant phantom ([#2943](https://github.com/mantle-xyz/revm/pull/2943))
+- *(op-revm)* add serialize DepositTransactionParts test ([#2942](https://github.com/mantle-xyz/revm/pull/2942))
+- *(handler)* provide `&CallInputs`to`PrecompileProvider::run` ([#2921](https://github.com/mantle-xyz/revm/pull/2921))
+- tag v86 revm v29.0.0 ([#2912](https://github.com/mantle-xyz/revm/pull/2912))
+- release ([#2899](https://github.com/mantle-xyz/revm/pull/2899))
+- release ([#2873](https://github.com/mantle-xyz/revm/pull/2873))
+- rm ee-test from revm/op-revm ([#2857](https://github.com/mantle-xyz/revm/pull/2857))
+- release ([#2854](https://github.com/mantle-xyz/revm/pull/2854))
+- update README.md ([#2842](https://github.com/mantle-xyz/revm/pull/2842))
+- *(op-revm)* Adds caller nonce assertion to op-revm intergation tests ([#2815](https://github.com/mantle-xyz/revm/pull/2815))
+- *(op-revm)* Full test coverage `OpTransactionError` ([#2818](https://github.com/mantle-xyz/revm/pull/2818))
+- Update test data for renamed tests ([#2817](https://github.com/mantle-xyz/revm/pull/2817))
+- reuse global crypto provide idea ([#2786](https://github.com/mantle-xyz/revm/pull/2786))
+- add rust-version and note about MSRV ([#2789](https://github.com/mantle-xyz/revm/pull/2789))
+- add OnceLock re-export with no_std support ([#2787](https://github.com/mantle-xyz/revm/pull/2787))
+- Add dyn Crypto trait to PrecompileFn ([#2772](https://github.com/mantle-xyz/revm/pull/2772))
+- release ([#2771](https://github.com/mantle-xyz/revm/pull/2771))
+- *(op-revm)* test for optional balance check ([#2746](https://github.com/mantle-xyz/revm/pull/2746))
+- change gas parameter to immutable reference ([#2702](https://github.com/mantle-xyz/revm/pull/2702))
+- release ([#2682](https://github.com/mantle-xyz/revm/pull/2682))
+- simplify gas calculations by introducing a used() method ([#2703](https://github.com/mantle-xyz/revm/pull/2703))
+- tag v81 revm v27.0.1 ([#2689](https://github.com/mantle-xyz/revm/pull/2689))
+- v80 revm v27.0.1 ([#2683](https://github.com/mantle-xyz/revm/pull/2683))
+- release ([#2659](https://github.com/mantle-xyz/revm/pull/2659))
+- cargo clippy --fix --all ([#2671](https://github.com/mantle-xyz/revm/pull/2671))
+- *(op/handler)* verify caller account is touched by zero value transfer ([#2669](https://github.com/mantle-xyz/revm/pull/2669))
+- use TxEnv::builder ([#2652](https://github.com/mantle-xyz/revm/pull/2652))
+- release ([#2657](https://github.com/mantle-xyz/revm/pull/2657))
+- bump v77 ([#2651](https://github.com/mantle-xyz/revm/pull/2651))
+- release ([#2641](https://github.com/mantle-xyz/revm/pull/2641))
+- re-use frame allocation ([#2636](https://github.com/mantle-xyz/revm/pull/2636))
+- rename `transact` methods ([#2616](https://github.com/mantle-xyz/revm/pull/2616))
+- release ([#2577](https://github.com/mantle-xyz/revm/pull/2577))
+- tag v75 revm v24.0.1 ([#2563](https://github.com/mantle-xyz/revm/pull/2563)) ([#2589](https://github.com/mantle-xyz/revm/pull/2589))
+- *(op-revm)* impl type alias for Default OpEvm ([#2576](https://github.com/mantle-xyz/revm/pull/2576))
+- *(docs)* add lints to database-interface and op-revm crates ([#2568](https://github.com/mantle-xyz/revm/pull/2568))
+- ContextTr rm *_ref, and add *_mut fn ([#2560](https://github.com/mantle-xyz/revm/pull/2560))
+- *(test)* preserve order of fields in json fixtures ([#2541](https://github.com/mantle-xyz/revm/pull/2541))
+- op remove circular dep ([#2540](https://github.com/mantle-xyz/revm/pull/2540))
+- tag v74 revm v24.0.0 ([#2539](https://github.com/mantle-xyz/revm/pull/2539))
+- release ([#2527](https://github.com/mantle-xyz/revm/pull/2527))
+- make crates.io version badge clickable ([#2526](https://github.com/mantle-xyz/revm/pull/2526))
+- release ([#2500](https://github.com/mantle-xyz/revm/pull/2500))
+- *(op)* revert previous and localize fix ([#2504](https://github.com/mantle-xyz/revm/pull/2504))
+- *(op-revm)* release v4.0.1 ([#2497](https://github.com/mantle-xyz/revm/pull/2497))
+- *(op)* Add test coverage to OP result module ([#2491](https://github.com/mantle-xyz/revm/pull/2491))
+- *(op)* Add test coverage to `OpTransactionError` ([#2490](https://github.com/mantle-xyz/revm/pull/2490))
+- tag v71, revm v23.1.0 semver major bump ([#2492](https://github.com/mantle-xyz/revm/pull/2492))
+- release ([#2487](https://github.com/mantle-xyz/revm/pull/2487))
+- *(op)* Set l2 block num in reloaded isthmus l1 block info ([#2465](https://github.com/mantle-xyz/revm/pull/2465))
+- Add clones to FrameData ([#2482](https://github.com/mantle-xyz/revm/pull/2482))
+- *(op)* Add test for verifying default OpSpecId update ([#2478](https://github.com/mantle-xyz/revm/pull/2478))
+- copy edit The Book ([#2463](https://github.com/mantle-xyz/revm/pull/2463))
+- bump dependency version ([#2431](https://github.com/mantle-xyz/revm/pull/2431))
+- fixed broken link ([#2421](https://github.com/mantle-xyz/revm/pull/2421))
+- backport from release branch ([#2415](https://github.com/mantle-xyz/revm/pull/2415)) ([#2416](https://github.com/mantle-xyz/revm/pull/2416))
+- links to main readme ([#2298](https://github.com/mantle-xyz/revm/pull/2298))
+- add links to arch page ([#2297](https://github.com/mantle-xyz/revm/pull/2297))
+- tag v63 revm v20.0.0-alpha.6 ([#2219](https://github.com/mantle-xyz/revm/pull/2219))
+- rename revm-optimism to op-revm ([#2141](https://github.com/mantle-xyz/revm/pull/2141))
+- fix README link ([#2139](https://github.com/mantle-xyz/revm/pull/2139))
+- *(readme)* add tycho-simulation to "Used by" ([#1926](https://github.com/mantle-xyz/revm/pull/1926))
+- Update README.md examples section ([#1853](https://github.com/mantle-xyz/revm/pull/1853))
+- Bump new logo ([#1735](https://github.com/mantle-xyz/revm/pull/1735))
+- *(README)* add rbuilder to used-by ([#1585](https://github.com/mantle-xyz/revm/pull/1585))
+- added simular to used-by ([#1521](https://github.com/mantle-xyz/revm/pull/1521))
+- add Trin to used by list ([#1393](https://github.com/mantle-xyz/revm/pull/1393))
+- Fix typo in readme ([#1185](https://github.com/mantle-xyz/revm/pull/1185))
+- Add Hardhat to the "Used by" list ([#1164](https://github.com/mantle-xyz/revm/pull/1164))
+- Add VERBS to used by list ([#1141](https://github.com/mantle-xyz/revm/pull/1141))
+- license date and revm docs ([#1080](https://github.com/mantle-xyz/revm/pull/1080))
+- *(docs)* Update the benchmark docs to point to revm package ([#906](https://github.com/mantle-xyz/revm/pull/906))
+- *(docs)* Update top-level benchmark docs ([#894](https://github.com/mantle-xyz/revm/pull/894))
+- clang requirement ([#784](https://github.com/mantle-xyz/revm/pull/784))
+- Readme Updates ([#756](https://github.com/mantle-xyz/revm/pull/756))
+- Logo ([#743](https://github.com/mantle-xyz/revm/pull/743))
+- book workflow ([#537](https://github.com/mantle-xyz/revm/pull/537))
+- add example to revm crate ([#468](https://github.com/mantle-xyz/revm/pull/468))
+- Update README.md ([#424](https://github.com/mantle-xyz/revm/pull/424))
+- add no_std to primitives ([#366](https://github.com/mantle-xyz/revm/pull/366))
+- revm-precompiles to revm-precompile
+- Bump v20, changelog ([#350](https://github.com/mantle-xyz/revm/pull/350))
+- typos ([#232](https://github.com/mantle-xyz/revm/pull/232))
+- Add support for old forks. ([#191](https://github.com/mantle-xyz/revm/pull/191))
+- revm bump 1.8. update libs. snailtracer rename ([#159](https://github.com/mantle-xyz/revm/pull/159))
+- typo fixes
+- fix readme typo
+- Big Refactor. Machine to Interpreter. refactor instructions. call/create struct ([#52](https://github.com/mantle-xyz/revm/pull/52))
+- readme. debuger update
+- Bump revm v0.3.0. README updated
+- readme
+- Add time elapsed for tests
+- readme updated
+- Include Basefee into cost calc. readme change
+- Initialize precompile accounts
+- Status update. Taking a break
+- Merkle calc. Tweaks and debugging for eip158
+- Replace aurora bn lib with parity's. All Bn128Add/Mul/Pair tests passes
+- TEMP
+- one tab removed
+- readme
+- README Example simplified
+- Gas calculation for Call/Create. Example Added
+- readme usage
+- README changes
+- Static gas cost added
+- Subroutine changelogs and reverts
+- Readme postulates
+- Spelling
+- Restructure project
+- First iteration. Machine is looking okay
+
 ## [12.0.2](https://github.com/bluealloy/revm/compare/op-revm-v12.0.1...op-revm-v12.0.2) - 2025-11-10
 
 ### Fixed
