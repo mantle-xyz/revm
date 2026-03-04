@@ -147,10 +147,8 @@ where
 
             if !cfg.spec().is_enabled_in(OpSpecId::ARSIA) {
                 // if the tx is not a deposit transaction and ARSIA is not enabled, we need to multiply the initial gas by the token ratio
-                let token_ratio: u64 = chain
-                    .token_ratio
-                    .try_into()
-                    .map_err(|_| OpTransactionError::TokenRatioOutOfRange)?;
+                // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to u64.
+                let token_ratio = chain.token_ratio.to::<u64>();
                 initial_gas.initial_gas = initial_gas
                     .initial_gas
                     .checked_mul(token_ratio)
@@ -380,9 +378,8 @@ where
             // Edge case: if token ratio is zero, set it to 1.
             // This is only possible if the token ratio is not set at all.
             let token_ratio = chain.token_ratio.max(U256::from(1));
-            let token_ratio_u64: u64 = token_ratio
-                .try_into()
-                .map_err(|_| OpTransactionError::TokenRatioOutOfRange)?;
+            // Keep behavior aligned with op-geth: truncate to u64 and ensure non-zero divisor.
+            let token_ratio_u64 = token_ratio.to::<u64>().max(1);
             let tx_l1_cost_u64: u64 = tx_l1_cost
                 .try_into()
                 .map_err(|_| OpTransactionError::TxL1CostOutOfRange)?;
@@ -422,8 +419,8 @@ where
         }
 
         let limit = gas.limit();
-        // Keep refund path panic-free even if token_ratio storage is unexpectedly corrupted.
-        let token_ratio_u64 = u64::try_from(chain.token_ratio).unwrap_or(u64::MAX);
+        // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to u64.
+        let token_ratio_u64 = chain.token_ratio.to::<u64>();
         let token_ratio_i64 = i64::try_from(token_ratio_u64).unwrap_or(i64::MAX);
 
         let is_arsia = cfg.spec().is_enabled_in(OpSpecId::ARSIA);

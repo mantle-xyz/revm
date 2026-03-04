@@ -49,8 +49,6 @@ pub enum OpTransactionError {
     /// Non-deposit transactions on Optimism must have `enveloped_tx` field set
     /// to properly calculate L1 costs.
     MissingEnvelopedTx,
-    /// Token ratio from L1 storage cannot be represented in runtime gas arithmetic.
-    TokenRatioOutOfRange,
     /// Computed L1 cost cannot be represented in runtime gas arithmetic.
     TxL1CostOutOfRange,
 }
@@ -79,9 +77,6 @@ impl Display for OpTransactionError {
                     f,
                     "missing enveloped transaction bytes for non-deposit transaction"
                 )
-            }
-            Self::TokenRatioOutOfRange => {
-                write!(f, "token ratio is out of range for u64 gas arithmetic")
             }
             Self::TxL1CostOutOfRange => {
                 write!(f, "tx l1 cost is out of range for u64 gas arithmetic")
@@ -173,10 +168,6 @@ mod test {
         assert_eq!(
             OpTransactionError::MissingEnvelopedTx.to_string(),
             "missing enveloped transaction bytes for non-deposit transaction"
-        );
-        assert_eq!(
-            OpTransactionError::TokenRatioOutOfRange.to_string(),
-            "token ratio is out of range for u64 gas arithmetic"
         );
         assert_eq!(
             OpTransactionError::TxL1CostOutOfRange.to_string(),
