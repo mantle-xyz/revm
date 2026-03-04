@@ -147,15 +147,18 @@ where
 
             if !cfg.spec().is_enabled_in(OpSpecId::ARSIA) {
                 // if the tx is not a deposit transaction and ARSIA is not enabled, we need to multiply the initial gas by the token ratio
-                let token_ratio = chain.token_ratio;
+                let token_ratio: u64 = chain
+                    .token_ratio
+                    .try_into()
+                    .map_err(|_| OpTransactionError::TokenRatioOutOfRange)?;
                 initial_gas.initial_gas = initial_gas
                     .initial_gas
-                    .checked_mul(token_ratio.try_into().unwrap())
+                    .checked_mul(token_ratio)
                     .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
 
                 initial_gas.floor_gas = initial_gas
                     .floor_gas
-                    .checked_mul(token_ratio.try_into().unwrap())
+                    .checked_mul(token_ratio)
                     .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
             }
 
@@ -377,9 +380,15 @@ where
             // Edge case: if token ratio is zero, set it to 1.
             // This is only possible if the token ratio is not set at all.
             let token_ratio = chain.token_ratio.max(U256::from(1));
+            let token_ratio_u64: u64 = token_ratio
+                .try_into()
+                .map_err(|_| OpTransactionError::TokenRatioOutOfRange)?;
+            let tx_l1_cost_u64: u64 = tx_l1_cost
+                .try_into()
+                .map_err(|_| OpTransactionError::TxL1CostOutOfRange)?;
             gas_limit = gas_limit
-                .wrapping_sub(tx_l1_cost.try_into().unwrap())
-                .wrapping_div(token_ratio.try_into().unwrap());
+                .wrapping_sub(tx_l1_cost_u64)
+                .wrapping_div(token_ratio_u64);
         }
 
         // Create first frame action
@@ -413,12 +422,9 @@ where
         }
 
         let limit = gas.limit();
-        let token_ratio_u64: u64 = chain.token_ratio.try_into().unwrap();
-
-        assert!(
-            token_ratio_u64 <= i64::MAX as u64,
-            "token_ratio {token_ratio_u64} exceeds i64::MAX"
-        );
+        // Keep refund path panic-free even if token_ratio storage is unexpectedly corrupted.
+        let token_ratio_u64 = u64::try_from(chain.token_ratio).unwrap_or(u64::MAX);
+        let token_ratio_i64 = i64::try_from(token_ratio_u64).unwrap_or(i64::MAX);
 
         let is_arsia = cfg.spec().is_enabled_in(OpSpecId::ARSIA);
 
@@ -435,7 +441,7 @@ where
 
             if !is_arsia {
                 // scale refund and remaining by token_ratio, restore limit
-                gas.set_refund(gas.refunded().saturating_mul(token_ratio_u64 as i64));
+                gas.set_refund(gas.refunded().saturating_mul(token_ratio_i64));
                 gas.set_remaining(gas.remaining().saturating_mul(token_ratio_u64));
                 gas.set_limit(limit);
             }
