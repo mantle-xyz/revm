@@ -31,6 +31,8 @@ pub enum OpSpecId {
     INTEROP,
     /// Osaka spec id.
     OSAKA,
+    /// Arsia Spec id.
+    ARSIA,
 }
 
 impl OpSpecId {
@@ -41,7 +43,7 @@ impl OpSpecId {
             Self::CANYON => SpecId::SHANGHAI,
             Self::ECOTONE | Self::FJORD | Self::GRANITE | Self::HOLOCENE => SpecId::CANCUN,
             Self::ISTHMUS | Self::JOVIAN | Self::INTEROP => SpecId::PRAGUE,
-            Self::OSAKA => SpecId::OSAKA,
+            Self::OSAKA | Self::ARSIA => SpecId::OSAKA,
         }
     }
 
@@ -73,6 +75,7 @@ impl FromStr for OpSpecId {
             name::JOVIAN => Ok(OpSpecId::JOVIAN),
             name::INTEROP => Ok(OpSpecId::INTEROP),
             eth_name::OSAKA => Ok(OpSpecId::OSAKA),
+            name::ARSIA => Ok(OpSpecId::ARSIA),
             _ => Err(UnknownHardfork),
         }
     }
@@ -92,6 +95,7 @@ impl From<OpSpecId> for &'static str {
             OpSpecId::JOVIAN => name::JOVIAN,
             OpSpecId::INTEROP => name::INTEROP,
             OpSpecId::OSAKA => eth_name::OSAKA,
+            OpSpecId::ARSIA => name::ARSIA,
         }
     }
 }
@@ -118,6 +122,8 @@ pub mod name {
     pub const JOVIAN: &str = "Jovian";
     /// Interop spec name.
     pub const INTEROP: &str = "Interop";
+    /// Arsia spec name.
+    pub const ARSIA: &str = "Arsia";
 }
 
 #[cfg(test)]
@@ -210,6 +216,26 @@ mod tests {
                     (OpSpecId::FJORD, true),
                     (OpSpecId::HOLOCENE, true),
                     (OpSpecId::ISTHMUS, true),
+                ],
+            ),
+            (
+                OpSpecId::ARSIA,
+                vec![
+                    (SpecId::PRAGUE, true),
+                    (SpecId::SHANGHAI, true),
+                    (SpecId::CANCUN, true),
+                    (SpecId::MERGE, true),
+                    (SpecId::OSAKA, true),
+                ],
+                vec![
+                    (OpSpecId::BEDROCK, true),
+                    (OpSpecId::REGOLITH, true),
+                    (OpSpecId::CANYON, true),
+                    (OpSpecId::ECOTONE, true),
+                    (OpSpecId::FJORD, true),
+                    (OpSpecId::HOLOCENE, true),
+                    (OpSpecId::ISTHMUS, true),
+                    (OpSpecId::OSAKA, true),
                 ],
             ),
         ];

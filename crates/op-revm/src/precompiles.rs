@@ -33,12 +33,14 @@ impl OpPrecompiles {
             | OpSpecId::REGOLITH
             | OpSpecId::CANYON
             | OpSpecId::ECOTONE
-            | OpSpecId::OSAKA) => Precompiles::new(spec.into_eth_spec().into()),
+            | OpSpecId::OSAKA
+            | OpSpecId::ARSIA) => Precompiles::new(spec.into_eth_spec().into()),
             OpSpecId::FJORD => fjord(),
             OpSpecId::GRANITE | OpSpecId::HOLOCENE => granite(),
             OpSpecId::ISTHMUS => isthmus(),
             OpSpecId::INTEROP | OpSpecId::JOVIAN => jovian(),
         };
+
         Self {
             inner: EthPrecompiles {
                 precompiles,

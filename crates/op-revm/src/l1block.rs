@@ -1,14 +1,14 @@
 //! Contains the `[L1BlockInfo]` type and its implementation.
 use crate::{
     constants::{
-        DA_FOOTPRINT_GAS_SCALAR_OFFSET,
-        DA_FOOTPRINT_GAS_SCALAR_SLOT,
-        GAS_ORACLE_CONTRACT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT,
-        L1_SCALAR_SLOT, OPERATOR_FEE_CONSTANT_OFFSET, OPERATOR_FEE_JOVIAN_MULTIPLIER,
-        OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE_SCALAR_DECIMAL, OPERATOR_FEE_SCALAR_OFFSET,
+        BASE_FEE_SCALAR_OFFSET, BLOB_BASE_FEE_SCALAR_OFFSET, DA_FOOTPRINT_GAS_SCALAR_OFFSET,
+        DA_FOOTPRINT_GAS_SCALAR_SLOT, ECOTONE_L1_BLOB_BASE_FEE_SLOT, ECOTONE_L1_FEE_SCALARS_SLOT,
+        EMPTY_SCALARS, GAS_ORACLE_CONTRACT, L1_BASE_FEE_SLOT, L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT,
+        L1_SCALAR_SLOT, NON_ZERO_BYTE_COST, OPERATOR_FEE_CONSTANT_OFFSET,
+        OPERATOR_FEE_JOVIAN_MULTIPLIER, OPERATOR_FEE_SCALARS_SLOT, OPERATOR_FEE_SCALAR_OFFSET,
         TOKEN_RATIO_SLOT,
     },
-    transaction::OpTxTr,
+    transaction::{estimate_tx_compressed_size, estimate_tx_compressed_size_with_delta, OpTxTr},
     OpSpecId,
 };
 use revm::{
@@ -19,6 +19,7 @@ use revm::{
     },
     primitives::U256,
 };
+
 /// L1 block info
 ///
 /// We can extract L1 epoch data from each L2 block, by looking at the `setL1BlockValues`
@@ -42,21 +43,21 @@ pub struct L1BlockInfo {
     /// The current L1 fee scalar.
     pub l1_base_fee_scalar: U256,
     /// The current token ratio.
-    pub token_ratio: Option<U256>,
+    pub token_ratio: U256,
+    /// The current L1 blob base fee. None if Ecotone is not activated, except if `empty_ecotone_scalars` is `true`.
+    pub l1_blob_base_fee: Option<U256>,
+    /// The current L1 blob base fee scalar. None if Ecotone is not activated.
+    pub l1_blob_base_fee_scalar: Option<U256>,
+    /// The current L1 blob base fee. None if Isthmus is not activated, except if `empty_ecotone_scalars` is `true`.
+    pub operator_fee_scalar: Option<U256>,
+    /// The current L1 blob base fee scalar. None if Isthmus is not activated.
+    pub operator_fee_constant: Option<U256>,
+    /// Da footprint gas scalar. Used to set the DA footprint block limit on the L2. Always null prior to the Jovian hardfork.
+    pub da_footprint_gas_scalar: Option<u16>,
+    /// True if Ecotone is activated, but the L1 fee scalars have not yet been set.
+    pub empty_ecotone_scalars: bool,
     /// Last calculated l1 fee cost. Uses as a cache between validation and pre execution stages.
     pub tx_l1_cost: Option<U256>,
-    /// The L1 blob base fee. Introduced in Ecotone.
-    pub l1_blob_base_fee: Option<U256>,
-    /// The L1 blob base fee scalar. Introduced in Ecotone.
-    pub l1_blob_base_fee_scalar: Option<U256>,
-    /// Whether the Ecotone scalars are empty (use Bedrock cost function). Introduced in Ecotone.
-    pub empty_ecotone_scalars: bool,
-    /// The operator fee scalar. Introduced in Isthmus.
-    pub operator_fee_scalar: Option<U256>,
-    /// The operator fee constant. Introduced in Isthmus.
-    pub operator_fee_constant: Option<U256>,
-    /// The DA footprint gas scalar. Introduced in Jovian.
-    pub da_footprint_gas_scalar: Option<u16>,
 }
 
 impl L1BlockInfo {
@@ -104,35 +105,35 @@ impl L1BlockInfo {
         Ok(())
     }
 
-    // /// Try to fetch the L1 block info from the database, post-Ecotone.
-    // fn try_fetch_ecotone<DB: Database>(&mut self, db: &mut DB) -> Result<(), DB::Error> {
-    //     self.l1_blob_base_fee = Some(db.storage(L1_BLOCK_CONTRACT, ECOTONE_L1_BLOB_BASE_FEE_SLOT)?);
+    /// Try to fetch the L1 block info from the database, post-Ecotone.
+    fn try_fetch_ecotone<DB: Database>(&mut self, db: &mut DB) -> Result<(), DB::Error> {
+        self.l1_blob_base_fee = Some(db.storage(L1_BLOCK_CONTRACT, ECOTONE_L1_BLOB_BASE_FEE_SLOT)?);
 
-    //     let l1_fee_scalars = db
-    //         .storage(L1_BLOCK_CONTRACT, ECOTONE_L1_FEE_SCALARS_SLOT)?
-    //         .to_be_bytes::<32>();
+        let l1_fee_scalars = db
+            .storage(L1_BLOCK_CONTRACT, ECOTONE_L1_FEE_SCALARS_SLOT)?
+            .to_be_bytes::<32>();
 
-    //     self.l1_base_fee_scalar = U256::from_be_slice(
-    //         l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BASE_FEE_SCALAR_OFFSET + 4].as_ref(),
-    //     );
+        self.l1_base_fee_scalar = U256::from_be_slice(
+            l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BASE_FEE_SCALAR_OFFSET + 4].as_ref(),
+        );
 
-    //     let l1_blob_base_fee = U256::from_be_slice(
-    //         l1_fee_scalars[BLOB_BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4].as_ref(),
-    //     );
-    //     self.l1_blob_base_fee_scalar = Some(l1_blob_base_fee);
+        let l1_blob_base_fee = U256::from_be_slice(
+            l1_fee_scalars[BLOB_BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4].as_ref(),
+        );
+        self.l1_blob_base_fee_scalar = Some(l1_blob_base_fee);
 
-    //     // Check if the L1 fee scalars are empty. If so, we use the Bedrock cost function.
-    //     // The L1 fee overhead is only necessary if `empty_ecotone_scalars` is true, as it was deprecated in Ecotone.
-    //     self.empty_ecotone_scalars = l1_blob_base_fee.is_zero()
-    //         && l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4]
-    //             == EMPTY_SCALARS;
-    //     self.l1_fee_overhead = self
-    //         .empty_ecotone_scalars
-    //         .then(|| db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT))
-    //         .transpose()?;
+        // Check if the L1 fee scalars are empty. If so, we use the Bedrock cost function.
+        // The L1 fee overhead is only necessary if `empty_ecotone_scalars` is true, as it was deprecated in Ecotone.
+        self.empty_ecotone_scalars = l1_blob_base_fee.is_zero()
+            && l1_fee_scalars[BASE_FEE_SCALAR_OFFSET..BLOB_BASE_FEE_SCALAR_OFFSET + 4]
+                == EMPTY_SCALARS;
+        self.l1_fee_overhead = self
+            .empty_ecotone_scalars
+            .then(|| db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT))
+            .transpose()?;
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 
     /// Try to fetch the L1 block info from the database.
     pub fn try_fetch<DB: Database>(
@@ -142,8 +143,8 @@ impl L1BlockInfo {
     ) -> Result<L1BlockInfo, DB::Error> {
         // Ensure the L1 Block account is loaded into the cache.
         let _ = db.basic(L1_BLOCK_CONTRACT)?;
-
         let _ = db.basic(GAS_ORACLE_CONTRACT)?;
+
         let l1_base_fee = db.storage(L1_BLOCK_CONTRACT, L1_BASE_FEE_SLOT)?;
         let token_ratio = db.storage(GAS_ORACLE_CONTRACT, TOKEN_RATIO_SLOT)?;
 
@@ -152,31 +153,18 @@ impl L1BlockInfo {
 
         let mut out = L1BlockInfo {
             l2_block: Some(l2_block),
-            l1_base_fee,
+            l1_base_fee: l1_base_fee,
+            token_ratio: token_ratio,
             l1_fee_overhead: Some(l1_fee_overhead),
             l1_base_fee_scalar: l1_fee_scalar,
-            token_ratio: Some(token_ratio),
             ..Default::default()
         };
 
-        // For Mantle, [!spec_id.is_enabled_in(OpSpecId::ECOTONE)] is always true. So we don't need to fetch Ecotone.
-        // // Post-Ecotone
-        // if !spec_id.is_enabled_in(OpSpecId::ECOTONE) {
-        //     out.l1_base_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
-        //     out.l1_fee_overhead = Some(db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?);
-
-        //     return Ok(out);
-        // }
-
-        // out.try_fetch_ecotone(db)?;
-
-        // Post-Isthmus L1 block info
-        if spec_id.is_enabled_in(OpSpecId::ISTHMUS) {
+        // Post-Arsia L1 block info
+        // Mantle uses the same L1 block info as Ecotone, Isthmus, and Jovian.
+        if spec_id.is_enabled_in(OpSpecId::ARSIA) {
+            out.try_fetch_ecotone(db)?;
             out.try_fetch_isthmus(db)?;
-        }
-
-        // Pre-Jovian
-        if spec_id.is_enabled_in(OpSpecId::JOVIAN) {
             out.try_fetch_jovian(db)?;
         }
 
@@ -186,17 +174,17 @@ impl L1BlockInfo {
     /// Calculate the operator fee for executing this transaction.
     ///
     /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
-    pub fn operator_fee_charge(&self, input: &[u8], gas_limit: U256, spec_id: OpSpecId) -> U256 {
+    pub fn operator_fee_charge(&self, input: &[u8], gas_limit: U256) -> U256 {
         // If the input is a deposit transaction or empty, the default value is zero.
         if input.is_empty() || input.first() == Some(&0x7E) {
             return U256::ZERO;
         }
 
-        self.operator_fee_charge_inner(gas_limit, spec_id)
+        self.operator_fee_charge_inner(gas_limit)
     }
 
     /// Calculate the operator fee for the given `gas`.
-    fn operator_fee_charge_inner(&self, gas: U256, spec_id: OpSpecId) -> U256 {
+    fn operator_fee_charge_inner(&self, gas: U256) -> U256 {
         let operator_fee_scalar = self
             .operator_fee_scalar
             .expect("Missing operator fee scalar for isthmus L1 Block");
@@ -204,12 +192,9 @@ impl L1BlockInfo {
             .operator_fee_constant
             .expect("Missing operator fee constant for isthmus L1 Block");
 
-        let product = if spec_id.is_enabled_in(OpSpecId::JOVIAN) {
-            gas.saturating_mul(operator_fee_scalar)
-                .saturating_mul(U256::from(OPERATOR_FEE_JOVIAN_MULTIPLIER))
-        } else {
-            gas.saturating_mul(operator_fee_scalar) / U256::from(OPERATOR_FEE_SCALAR_DECIMAL)
-        };
+        let product = gas
+            .saturating_mul(operator_fee_scalar)
+            .saturating_mul(U256::from(OPERATOR_FEE_JOVIAN_MULTIPLIER));
 
         product.saturating_add(operator_fee_constant)
     }
@@ -218,16 +203,14 @@ impl L1BlockInfo {
     ///
     /// Introduced in isthmus. Prior to isthmus, the operator fee is always zero.
     pub fn operator_fee_refund(&self, gas: &Gas, spec_id: OpSpecId) -> U256 {
-        if !spec_id.is_enabled_in(OpSpecId::ISTHMUS) {
+        if !spec_id.is_enabled_in(OpSpecId::ARSIA) {
             return U256::ZERO;
         }
 
-        let operator_cost_gas_limit =
-            self.operator_fee_charge_inner(U256::from(gas.limit()), spec_id);
-        let operator_cost_gas_used = self.operator_fee_charge_inner(
-            U256::from(gas.limit() - (gas.remaining() + gas.refunded() as u64)),
-            spec_id,
-        );
+        let operator_cost_gas_limit = self.operator_fee_charge_inner(U256::from(gas.limit()));
+        let operator_cost_gas_used = self.operator_fee_charge_inner(U256::from(
+            gas.limit() - (gas.remaining() + gas.refunded() as u64),
+        ));
 
         operator_cost_gas_limit.saturating_sub(operator_cost_gas_used)
     }
@@ -235,11 +218,17 @@ impl L1BlockInfo {
     /// Calculate the data gas for posting the transaction on L1. Calldata costs 16 gas per byte
     /// after compression.
     ///
-    /// Prior to fjord, calldata costs 16 gas per non-zero byte and 4 gas per zero byte.
-    ///
     /// Prior to regolith, an extra 68 non-zero bytes were included in the rollup data costs to
     /// account for the empty signature.
     pub fn data_gas(&self, input: &[u8], spec_id: OpSpecId) -> U256 {
+        if spec_id.is_enabled_in(OpSpecId::ARSIA) {
+            let estimated_size = self.tx_estimated_size_fjord(input);
+
+            return estimated_size
+                .saturating_mul(U256::from(NON_ZERO_BYTE_COST))
+                .wrapping_div(U256::from(1_000_000));
+        };
+
         // tokens in calldata where non-zero bytes are priced 4 times higher than zero bytes (Same as in Istanbul).
         let mut tokens_in_transaction_data = get_tokens_in_calldata(input, true);
 
@@ -251,6 +240,13 @@ impl L1BlockInfo {
         U256::from(tokens_in_transaction_data.saturating_mul(STANDARD_TOKEN_COST))
     }
 
+    // Calculate the estimated compressed transaction size in bytes, scaled by 1e6.
+    // This value is computed based on the following formula:
+    // max(minTransactionSize, intercept + fastlzCoef*fastlzSize)
+    fn tx_estimated_size_fjord(&self, input: &[u8]) -> U256 {
+        U256::from(estimate_tx_compressed_size(input))
+    }
+
     /// Clears the cached L1 cost of the transaction.
     pub fn clear_tx_l1_cost(&mut self) {
         self.tx_l1_cost = None;
@@ -259,15 +255,11 @@ impl L1BlockInfo {
     /// Calculate additional transaction cost with OpTxTr.
     ///
     /// Internally calls [`L1BlockInfo::tx_cost`].
-    #[track_caller]
-    pub fn tx_cost_with_tx(&mut self, tx: impl OpTxTr, spec: OpSpecId) -> U256 {
+    pub fn tx_cost_with_tx(&mut self, tx: impl OpTxTr, spec: OpSpecId) -> Option<U256> {
         // account for additional cost of l1 fee and operator fee
-        let enveloped_tx = tx
-            .enveloped_tx()
-            .expect("all not deposit tx have enveloped tx")
-            .clone();
+        let enveloped_tx = tx.enveloped_tx()?;
         let gas_limit = U256::from(tx.gas_limit());
-        self.tx_cost(&enveloped_tx, gas_limit, spec)
+        Some(self.tx_cost(enveloped_tx, gas_limit, spec))
     }
 
     /// Calculate additional transaction cost.
@@ -277,8 +269,8 @@ impl L1BlockInfo {
         let mut additional_cost = self.calculate_tx_l1_cost(enveloped_tx, spec);
 
         // compute operator fee
-        if spec.is_enabled_in(OpSpecId::ISTHMUS) {
-            let operator_fee_charge = self.operator_fee_charge(enveloped_tx, gas_limit, spec);
+        if spec.is_enabled_in(OpSpecId::ARSIA) {
+            let operator_fee_charge = self.operator_fee_charge(enveloped_tx, gas_limit);
             additional_cost = additional_cost.saturating_add(operator_fee_charge);
         }
 
@@ -293,34 +285,84 @@ impl L1BlockInfo {
         // If the input is a deposit transaction or empty, the default value is zero.
         let tx_l1_cost = if input.is_empty() || input.first() == Some(&0x7E) {
             return U256::ZERO;
+        } else if spec_id.is_enabled_in(OpSpecId::ARSIA) {
+            self.calculate_tx_l1_cost_arsia(input)
         } else {
-            self.calculate_tx_l1_cost_bedrock(input, spec_id)
+            self.calculate_tx_l1_cost_before_arsia(input, spec_id)
         };
 
         self.tx_l1_cost = Some(tx_l1_cost);
         tx_l1_cost
     }
 
-    /// Calculate the gas cost of a transaction based on L1 block data posted on L2, pre-Ecotone.
-    fn calculate_tx_l1_cost_bedrock(&self, input: &[u8], spec_id: OpSpecId) -> U256 {
+    /// Calculate the gas cost of a transaction based on L1 block data posted on L2, pre-Arsia.
+    fn calculate_tx_l1_cost_before_arsia(&self, input: &[u8], spec_id: OpSpecId) -> U256 {
         let rollup_data_gas_cost = self.data_gas(input, spec_id);
         rollup_data_gas_cost
             .saturating_add(self.l1_fee_overhead.unwrap_or_default())
             .saturating_mul(self.l1_base_fee)
             .saturating_mul(self.l1_base_fee_scalar)
-            .saturating_mul(self.get_token_ratio())
+            .saturating_mul(self.token_ratio)
             .wrapping_div(U256::from(1_000_000))
     }
 
-    /// Get the token ratio. If the token ratio is not set, return 1.
-    pub fn get_token_ratio(&self) -> U256 {
-        match self.token_ratio {
-            Some(ratio) if ratio > U256::from(0) => ratio,
-            _ => U256::from(1),
+    /// Calculate the gas cost of a transaction based on L1 block data posted on L2, post-Arsia.
+    ///
+    /// [OpSpecId::ARSIA] L1 cost function:
+    /// `estimatedSize*(baseFeeScalar*l1BaseFee*16 + blobFeeScalar*l1BlobBaseFee)/1e12`
+    fn calculate_tx_l1_cost_arsia(&self, input: &[u8]) -> U256 {
+        self.calculate_tx_l1_cost_arsia_with_delta(input, 0)
+    }
+
+    /// Like [`calculate_tx_l1_cost_arsia`] but adds `fastlz_delta` to compressed size (e.g. +80 for geth alignment).
+    /// Uses geth Fjord formula: estimatedDASizeScaled = max(MinTxSizeScaled, intercept + coef*fastLzSize).
+    /// [`estimate_tx_compressed_size_with_delta`] already returns that scaled value; use it directly.
+    fn calculate_tx_l1_cost_arsia_with_delta(&self, input: &[u8], fastlz_delta: u64) -> U256 {
+        let l1_fee_scaled = self.calculate_l1_fee_scaled_ecotone();
+        if l1_fee_scaled.is_zero() {
+            return U256::ZERO;
+        }
+
+        let estimated_size_scaled = estimate_tx_compressed_size_with_delta(input, fastlz_delta);
+
+        U256::from(estimated_size_scaled)
+            .saturating_mul(l1_fee_scaled)
+            .wrapping_div(U256::from(1_000_000_000_000u64))
+            .saturating_mul(self.token_ratio)
+    }
+
+    /// L1 cost for RPC estimate (no cache). Uses `fastlz_delta` in Arsia formula to align with geth (+80).
+    pub fn calculate_tx_l1_cost_for_estimate(
+        &self,
+        input: &[u8],
+        spec_id: OpSpecId,
+        fastlz_delta: u64,
+    ) -> U256 {
+        if input.is_empty() || input.first() == Some(&0x7E) {
+            return U256::ZERO;
+        }
+        if spec_id.is_enabled_in(OpSpecId::ARSIA) {
+            self.calculate_tx_l1_cost_arsia_with_delta(input, fastlz_delta)
+        } else {
+            self.calculate_tx_l1_cost_before_arsia(input, spec_id)
         }
     }
 
-    /// Reset the l2_block to u64::MAX.
+    // l1BaseFee*16*l1BaseFeeScalar + l1BlobBaseFee*l1BlobBaseFeeScalar
+    fn calculate_l1_fee_scaled_ecotone(&self) -> U256 {
+        let calldata_cost_per_byte = self
+            .l1_base_fee
+            .saturating_mul(U256::from(NON_ZERO_BYTE_COST))
+            .saturating_mul(self.l1_base_fee_scalar);
+        let blob_cost_per_byte = self
+            .l1_blob_base_fee
+            .unwrap_or_default()
+            .saturating_mul(self.l1_blob_base_fee_scalar.unwrap_or_default());
+
+        calldata_cost_per_byte.saturating_add(blob_cost_per_byte)
+    }
+
+    /// Reset the l2_block to None.
     pub fn reset_l2_block(&mut self) {
         self.l2_block = None
     }
@@ -330,6 +372,8 @@ impl L1BlockInfo {
 mod tests {
     use super::*;
     use revm::primitives::{bytes, hex};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     #[test]
     fn test_data_gas_non_zero_bytes() {
@@ -337,7 +381,6 @@ mod tests {
             l1_base_fee: U256::from(1_000_000),
             l1_fee_overhead: Some(U256::from(1_000_000)),
             l1_base_fee_scalar: U256::from(1_000_000),
-            token_ratio: Some(U256::from(1_000_000)),
             ..Default::default()
         };
 
@@ -355,6 +398,11 @@ mod tests {
         // gas cost = 3 * 16 = 48
         let regolith_data_gas = l1_block_info.data_gas(&input, OpSpecId::REGOLITH);
         assert_eq!(regolith_data_gas, U256::from(48));
+
+        // Fjord has a minimum compressed size of 100 bytes
+        // gas cost = 100 * 16 = 1600
+        let fjord_data_gas = l1_block_info.data_gas(&input, OpSpecId::ARSIA);
+        assert_eq!(fjord_data_gas, U256::from(1600));
     }
 
     #[test]
@@ -363,7 +411,6 @@ mod tests {
             l1_base_fee: U256::from(1_000_000),
             l1_fee_overhead: Some(U256::from(1_000_000)),
             l1_base_fee_scalar: U256::from(1_000_000),
-            token_ratio: Some(U256::from(1_000_000)),
             ..Default::default()
         };
 
@@ -381,21 +428,33 @@ mod tests {
         // gas cost = 3 * 16 + 2 * 4 = 56
         let regolith_data_gas = l1_block_info.data_gas(&input, OpSpecId::REGOLITH);
         assert_eq!(regolith_data_gas, U256::from(56));
+
+        // Fjord has a minimum compressed size of 100 bytes
+        // gas cost = 100 * 16 = 1600
+        let fjord_data_gas = l1_block_info.data_gas(&input, OpSpecId::ARSIA);
+        assert_eq!(fjord_data_gas, U256::from(1600));
     }
 
     #[test]
     fn test_calculate_tx_l1_cost() {
+        // Generate a random token_ratio for testing (using a simple hash-based approach)
+        // This ensures we test with different values while avoiding rand API compatibility issues
+        let mut hasher = DefaultHasher::new();
+        std::thread::current().id().hash(&mut hasher);
+        let token_ratio = (hasher.finish() % 10_000) + 1;
+
         let mut l1_block_info = L1BlockInfo {
             l1_base_fee: U256::from(1_000),
             l1_fee_overhead: Some(U256::from(1_000)),
             l1_base_fee_scalar: U256::from(1_000),
-            token_ratio: Some(U256::from(1_000)),
+            token_ratio: U256::from(token_ratio),
             ..Default::default()
         };
 
         let input = bytes!("FACADE");
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::REGOLITH);
-        assert_eq!(gas_cost, U256::from(1_048_000));
+        let expected_cost = U256::from(1048).saturating_mul(U256::from(token_ratio));
+        assert_eq!(gas_cost, expected_cost);
         l1_block_info.clear_tx_l1_cost();
 
         // Zero rollup data gas cost should result in zero
@@ -403,6 +462,168 @@ mod tests {
         let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::REGOLITH);
         assert_eq!(gas_cost, U256::ZERO);
         l1_block_info.clear_tx_l1_cost();
+
+        // Deposit transactions with the EIP-2718 type of 0x7E should result in zero
+        let input = bytes!("7EFACADE");
+        let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::REGOLITH);
+        assert_eq!(gas_cost, U256::ZERO);
+    }
+
+    #[test]
+    fn test_calculate_tx_l1_cost_with_token_ratio_fjord() {
+        // Test that token_ratio affects the result in Fjord
+        // Generate a random token_ratio using a simple hash-based approach
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        std::thread::current().id().hash(&mut hasher);
+        std::time::SystemTime::now().hash(&mut hasher);
+        let token_ratio = (hasher.finish() % 10_000) + 1;
+
+        let mut l1_block_info = L1BlockInfo {
+            l1_base_fee: U256::from(1_000),
+            l1_base_fee_scalar: U256::from(1_000),
+            l1_blob_base_fee: Some(U256::from(1_000)),
+            l1_blob_base_fee_scalar: Some(U256::from(1_000)),
+            token_ratio: U256::from(token_ratio),
+            ..Default::default()
+        };
+
+        let input = bytes!("FACADE");
+
+        // Calculate cost with the random token_ratio
+        let gas_cost_with_ratio = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::ARSIA);
+
+        // Calculate expected cost: estimatedSize * l1FeeScaled / 1e12 * token_ratio
+        // l1FeeScaled = baseFeeScalar*l1BaseFee*16 + blobFeeScalar*l1BlobBaseFee
+        //             = 1000 * 1000 * 16 + 1000 * 1000 = 17_000_000
+        // estimatedSize = 100_000_000 (minTransactionSize for small input like "FACADE")
+        // gas_cost = 100_000_000 * 17_000_000 / 1_000_000_000_000 * token_ratio
+        //         = 1_700_000_000_000 / 1_000_000_000_000 * token_ratio
+        //         = 1_700 * token_ratio
+        let base_cost = U256::from(1_700u64);
+        let expected_cost = base_cost.saturating_mul(U256::from(token_ratio));
+
+        assert_eq!(
+            gas_cost_with_ratio, expected_cost,
+            "Gas cost with token_ratio={} should be {}",
+            token_ratio, expected_cost
+        );
+
+        // Verify that different token_ratio values produce proportional results
+        l1_block_info.clear_tx_l1_cost();
+        l1_block_info.token_ratio = U256::from(1);
+        let gas_cost_ratio_1 = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::ARSIA);
+
+        l1_block_info.clear_tx_l1_cost();
+        l1_block_info.token_ratio = U256::from(2);
+        let gas_cost_ratio_2 = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::ARSIA);
+
+        // Cost with ratio=2 should be exactly double of cost with ratio=1
+        assert_eq!(
+            gas_cost_ratio_2,
+            gas_cost_ratio_1.saturating_mul(U256::from(2)),
+            "Gas cost should scale linearly with token_ratio"
+        );
+    }
+
+    #[test]
+    fn test_reset_l2_block() {
+        let mut l1_block_info = L1BlockInfo {
+            l2_block: Some(U256::from(1)),
+            ..Default::default()
+        };
+        l1_block_info.reset_l2_block();
+        assert_eq!(l1_block_info.l2_block, None);
+    }
+
+    #[test]
+    // after arsia
+    fn test_calculate_tx_l1_cost_fjord() {
+        // l1FeeScaled = baseFeeScalar*l1BaseFee*16 + blobFeeScalar*l1BlobBaseFee
+        //             = 1000 * 1000 * 16 + 1000 * 1000
+        //             = 17e6
+        let mut l1_block_info = L1BlockInfo {
+            l1_base_fee: U256::from(1_000),
+            l1_base_fee_scalar: U256::from(1_000),
+            l1_blob_base_fee: Some(U256::from(1_000)),
+            l1_blob_base_fee_scalar: Some(U256::from(1_000)),
+            token_ratio: U256::from(1),
+            ..Default::default()
+        };
+
+        // fastLzSize = 4
+        // estimatedSize = max(minTransactionSize, intercept + fastlzCoef*fastlzSize)
+        //               = max(100e6, 836500*4 - 42585600)
+        //               = 100e6
+        let input = bytes!("FACADE");
+        // l1Cost = estimatedSize * l1FeeScaled / 1e12
+        //        = 100e6 * 17 / 1e6
+        //        = 1700
+        let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::ARSIA);
+        assert_eq!(gas_cost, U256::from(1700));
+        l1_block_info.clear_tx_l1_cost();
+
+        // fastLzSize = 202
+        // estimatedSize = max(minTransactionSize, intercept + fastlzCoef*fastlzSize)
+        //               = max(100e6, 836500*202 - 42585600)
+        //               = 126387400
+        let input = bytes!("02f901550a758302df1483be21b88304743f94f80e51afb613d764fa61751affd3313c190a86bb870151bd62fd12adb8e41ef24f3f000000000000000000000000000000000000000000000000000000000000006e000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831000000000000000000000000000000000000000000000000000000000003c1e5000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000148c89ed219d02f1a5be012c689b4f5b731827bebe000000000000000000000000c001a033fd89cb37c31b2cba46b6466e040c61fc9b2a3675a7f5f493ebd5ad77c497f8a07cdf65680e238392693019b4092f610222e71b7cec06449cb922b93b6a12744e");
+        // l1Cost = estimatedSize * l1FeeScaled / 1e12
+        //        = 126387400 * 17 / 1e6
+        //        = 2148
+        let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::ARSIA);
+        assert_eq!(gas_cost, U256::from(2148));
+        l1_block_info.clear_tx_l1_cost();
+
+        // Zero rollup data gas cost should result in zero
+        let input = bytes!("");
+        let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::ARSIA);
+        assert_eq!(gas_cost, U256::ZERO);
+        l1_block_info.clear_tx_l1_cost();
+
+        // Deposit transactions with the EIP-2718 type of 0x7E should result in zero
+        let input = bytes!("7EFACADE");
+        let gas_cost = l1_block_info.calculate_tx_l1_cost(&input, OpSpecId::ARSIA);
+        assert_eq!(gas_cost, U256::ZERO);
+    }
+
+    #[test]
+    // after arsia
+    fn calculate_tx_l1_cost_fjord() {
+        // rig
+
+        // L1 block info for OP mainnet fjord block 124665056
+        // <https://optimistic.etherscan.io/block/124665056>
+        let l1_block_info = L1BlockInfo {
+            l1_base_fee: U256::from(1055991687),
+            l1_base_fee_scalar: U256::from(5227),
+            l1_blob_base_fee_scalar: Some(U256::from(1014213)),
+            l1_blob_base_fee: Some(U256::from(1)),
+            token_ratio: U256::from(1),
+            ..Default::default() // L1 fee overhead (l1 gas used) deprecated since Fjord
+        };
+
+        // Second tx in OP mainnet Fjord block 124665056
+        // <https://optimistic.etherscan.io/tx/0x1059e8004daff32caa1f1b1ef97fe3a07a8cf40508f5b835b66d9420d87c4a4a>
+        const TX: &[u8] = &hex!("02f904940a8303fba78401d6d2798401db2b6d830493e0943e6f4f7866654c18f536170780344aa8772950b680b904246a761202000000000000000000000000087000a300de7200382b55d40045000000e5d60e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003a0000000000000000000000000000000000000000000000000000000000000022482ad56cb0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000120000000000000000000000000dc6ff44d5d932cbd77b52e5612ba0529dc6226f1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000044095ea7b300000000000000000000000021c4928109acb0659a88ae5329b5374a3024694c0000000000000000000000000000000000000000000000049b9ca9a6943400000000000000000000000000000000000000000000000000000000000000000000000000000000000021c4928109acb0659a88ae5329b5374a3024694c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000024b6b55f250000000000000000000000000000000000000000000000049b9ca9a694340000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000415ec214a3950bea839a7e6fbb0ba1540ac2076acd50820e2d5ef83d0902cdffb24a47aff7de5190290769c4f0a9c6fabf63012986a0d590b1b571547a8c7050ea1b00000000000000000000000000000000000000000000000000000000000000c080a06db770e6e25a617fe9652f0958bd9bd6e49281a53036906386ed39ec48eadf63a07f47cf51a4a40b4494cf26efc686709a9b03939e20ee27e59682f5faa536667e");
+
+        // L1 gas used for tx and L1 fee for tx, from OP mainnet block scanner
+        // https://optimistic.etherscan.io/tx/0x1059e8004daff32caa1f1b1ef97fe3a07a8cf40508f5b835b66d9420d87c4a4a
+        let expected_data_gas = U256::from(4471);
+        let expected_l1_fee = U256::from_be_bytes(hex!(
+            "00000000000000000000000000000000000000000000000000000005bf1ab43d"
+        ));
+
+        // test
+
+        let data_gas = l1_block_info.data_gas(TX, OpSpecId::ARSIA);
+
+        assert_eq!(data_gas, expected_data_gas);
+
+        let l1_fee = l1_block_info.calculate_tx_l1_cost_arsia(TX);
+
+        assert_eq!(l1_fee, expected_l1_fee)
     }
 
     #[test]
@@ -427,7 +648,7 @@ mod tests {
             l1_base_fee_scalar: U256::from_be_bytes(hex!(
                 "0000000000000000000000000000000000000000000000000000000000002710"
             )), // 10,000
-            token_ratio: Some(U256::from(4368)),
+            token_ratio: U256::from(4368),
             ..Default::default()
         };
 
@@ -471,7 +692,7 @@ mod tests {
             l1_base_fee_scalar: U256::from_be_bytes(hex!(
                 "0000000000000000000000000000000000000000000000000000000000002710"
             )), // 10,000
-            token_ratio: Some(U256::from(4359)),
+            token_ratio: U256::from(4359),
             ..Default::default()
         };
 
@@ -496,12 +717,35 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_l2_block() {
-        let mut l1_block_info = L1BlockInfo {
-            l2_block: Some(U256::from(1)),
+    fn test_operator_fee_charge_formulas() {
+        let l1_block_info = L1BlockInfo {
+            operator_fee_scalar: Some(U256::from(1_000u64)),
+            operator_fee_constant: Some(U256::from(10u64)),
             ..Default::default()
         };
-        l1_block_info.reset_l2_block();
-        assert_eq!(l1_block_info.l2_block, None);
+
+        let input = [0x01u8];
+
+        let operator_fee = l1_block_info.operator_fee_charge(&input, U256::from(1_000u64));
+        assert_eq!(operator_fee, U256::from(100_000_010u64));
+    }
+
+    #[test]
+    fn test_operator_fee_refund() {
+        let gas = Gas::new(50000);
+
+        let l1_block_info = L1BlockInfo {
+            l1_base_fee: U256::from(1055991687),
+            l1_base_fee_scalar: U256::from(5227),
+            operator_fee_scalar: Some(U256::from(2000)),
+            operator_fee_constant: Some(U256::from(5)),
+            ..Default::default()
+        };
+
+        let isthmus_refunded = l1_block_info.operator_fee_refund(&gas, OpSpecId::ISTHMUS);
+        assert_eq!(isthmus_refunded, U256::ZERO);
+
+        let arsia_refunded = l1_block_info.operator_fee_refund(&gas, OpSpecId::ARSIA);
+        assert_eq!(arsia_refunded, U256::from(10_000_000_000u64))
     }
 }
