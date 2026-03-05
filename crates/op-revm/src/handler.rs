@@ -54,6 +54,14 @@ impl<EVM, ERROR, FRAME> Default for OpHandler<EVM, ERROR, FRAME> {
     }
 }
 
+/// Scales refund counter by token ratio using geth-like `uint64` arithmetic first,
+/// then maps into revm's signed refund representation.
+fn scale_refund_with_token_ratio(refund: i64, token_ratio_u64: u64) -> i64 {
+    let refund_u64 = u64::try_from(refund).unwrap_or_default();
+    let scaled_u64 = refund_u64.wrapping_mul(token_ratio_u64);
+    i64::try_from(scaled_u64).unwrap_or(i64::MAX)
+}
+
 /// Trait to check if the error is a transaction error.
 ///
 /// Used in cache_error handler to catch deposit transaction that was halted.
@@ -421,7 +429,6 @@ where
         let limit = gas.limit();
         // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to low 64 bits.
         let token_ratio_u64 = chain.token_ratio.as_limbs()[0];
-        let token_ratio_i64 = i64::try_from(token_ratio_u64).unwrap_or(i64::MAX);
 
         let is_arsia = cfg.spec().is_enabled_in(OpSpecId::ARSIA);
 
@@ -438,7 +445,7 @@ where
 
             if !is_arsia {
                 // scale refund and remaining by token_ratio, restore limit
-                gas.set_refund(gas.refunded().saturating_mul(token_ratio_i64));
+                gas.set_refund(scale_refund_with_token_ratio(gas.refunded(), token_ratio_u64));
                 gas.set_remaining(gas.remaining().saturating_mul(token_ratio_u64));
                 gas.set_limit(limit);
             }
@@ -919,6 +926,20 @@ mod tests {
         assert_eq!(gas_huge.remaining(), gas_truncated.remaining());
         assert_eq!(gas_huge.refunded(), gas_truncated.refunded());
         assert_eq!(gas_huge.spent(), gas_truncated.spent());
+    }
+
+    #[test]
+    fn test_scale_refund_with_token_ratio_uses_u64_wrapping_semantics() {
+        let token_ratio = (i64::MAX as u64) + 1;
+        // 2 * 2^63 wraps to 0 in uint64 arithmetic.
+        assert_eq!(scale_refund_with_token_ratio(2, token_ratio), 0);
+    }
+
+    #[test]
+    fn test_scale_refund_with_token_ratio_clamps_non_representable_to_i64_max() {
+        let token_ratio = (i64::MAX as u64) + 1;
+        // 1 * (i64::MAX + 1) is > i64::MAX, so we clamp at the i64 boundary.
+        assert_eq!(scale_refund_with_token_ratio(1, token_ratio), i64::MAX);
     }
 
     #[test]
