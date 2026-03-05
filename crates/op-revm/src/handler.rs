@@ -54,6 +54,14 @@ impl<EVM, ERROR, FRAME> Default for OpHandler<EVM, ERROR, FRAME> {
     }
 }
 
+/// Scales refund counter by token ratio using geth-like `uint64` arithmetic first,
+/// then maps into revm's signed refund representation.
+fn scale_refund_with_token_ratio(refund: i64, token_ratio_u64: u64) -> i64 {
+    let refund_u64 = u64::try_from(refund).unwrap_or_default();
+    let scaled_u64 = refund_u64.wrapping_mul(token_ratio_u64);
+    i64::try_from(scaled_u64).unwrap_or(i64::MAX)
+}
+
 /// Trait to check if the error is a transaction error.
 ///
 /// Used in cache_error handler to catch deposit transaction that was halted.
@@ -147,15 +155,16 @@ where
 
             if !cfg.spec().is_enabled_in(OpSpecId::ARSIA) {
                 // if the tx is not a deposit transaction and ARSIA is not enabled, we need to multiply the initial gas by the token ratio
-                let token_ratio = chain.token_ratio;
+                // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to low 64 bits.
+                let token_ratio = chain.token_ratio.as_limbs()[0];
                 initial_gas.initial_gas = initial_gas
                     .initial_gas
-                    .checked_mul(token_ratio.try_into().unwrap())
+                    .checked_mul(token_ratio)
                     .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
 
                 initial_gas.floor_gas = initial_gas
                     .floor_gas
-                    .checked_mul(token_ratio.try_into().unwrap())
+                    .checked_mul(token_ratio)
                     .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
             }
 
@@ -377,9 +386,14 @@ where
             // Edge case: if token ratio is zero, set it to 1.
             // This is only possible if the token ratio is not set at all.
             let token_ratio = chain.token_ratio.max(U256::from(1));
+            // Keep behavior aligned with op-geth: truncate to low 64 bits and ensure non-zero divisor.
+            let token_ratio_u64 = token_ratio.as_limbs()[0].max(1);
+            let tx_l1_cost_u64: u64 = tx_l1_cost
+                .try_into()
+                .map_err(|_| OpTransactionError::TxL1CostOutOfRange)?;
             gas_limit = gas_limit
-                .wrapping_sub(tx_l1_cost.try_into().unwrap())
-                .wrapping_div(token_ratio.try_into().unwrap());
+                .wrapping_sub(tx_l1_cost_u64)
+                .wrapping_div(token_ratio_u64);
         }
 
         // Create first frame action
@@ -413,12 +427,8 @@ where
         }
 
         let limit = gas.limit();
-        let token_ratio_u64: u64 = chain.token_ratio.try_into().unwrap();
-
-        assert!(
-            token_ratio_u64 <= i64::MAX as u64,
-            "token_ratio {token_ratio_u64} exceeds i64::MAX"
-        );
+        // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to low 64 bits.
+        let token_ratio_u64 = chain.token_ratio.as_limbs()[0];
 
         let is_arsia = cfg.spec().is_enabled_in(OpSpecId::ARSIA);
 
@@ -435,7 +445,7 @@ where
 
             if !is_arsia {
                 // scale refund and remaining by token_ratio, restore limit
-                gas.set_refund(gas.refunded().saturating_mul(token_ratio_u64 as i64));
+                gas.set_refund(scale_refund_with_token_ratio(gas.refunded(), token_ratio_u64));
                 gas.set_remaining(gas.remaining().saturating_mul(token_ratio_u64));
                 gas.set_limit(limit);
             }
@@ -843,6 +853,141 @@ mod tests {
         assert_eq!(gas.remaining(), 90);
         assert_eq!(gas.spent(), 10);
         assert_eq!(gas.refunded(), 0);
+    }
+
+    #[test]
+    fn test_validate_initial_tx_gas_truncates_large_token_ratio_like_geth() {
+        let huge_ratio = (U256::from(1) << 64) + U256::from(3);
+        let truncated_ratio = U256::from(3);
+        let caller = Address::with_last_byte(0x11);
+        let recipient = Address::with_last_byte(0x22);
+        let tx_input = bytes!("FACADE");
+
+        let mk_ctx = |token_ratio: U256| {
+            Context::op()
+                .with_chain(L1BlockInfo {
+                    l2_block: Some(U256::from(1)),
+                    l1_base_fee: U256::from(1),
+                    l1_fee_overhead: Some(U256::ZERO),
+                    l1_base_fee_scalar: U256::from(1),
+                    token_ratio,
+                    ..Default::default()
+                })
+                .with_block(BlockEnv {
+                    number: U256::from(1),
+                    ..Default::default()
+                })
+                .with_tx(regular_tx(caller, recipient, 500_000, &tx_input))
+                .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH)
+        };
+
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        let mut evm_huge = mk_ctx(huge_ratio).build_op();
+        let huge_gas = handler.validate_initial_tx_gas(&mut evm_huge).unwrap();
+
+        let mut evm_truncated = mk_ctx(truncated_ratio).build_op();
+        let truncated_gas = handler.validate_initial_tx_gas(&mut evm_truncated).unwrap();
+
+        assert_eq!(huge_gas.initial_gas, truncated_gas.initial_gas);
+        assert_eq!(huge_gas.floor_gas, truncated_gas.floor_gas);
+    }
+
+    #[test]
+    fn test_refund_path_truncates_large_token_ratio_like_geth() {
+        let huge_ratio = (U256::from(1) << 64) + U256::from(3);
+        let truncated_ratio = U256::from(3);
+
+        let mk_ctx = |token_ratio: U256| {
+            Context::op()
+                .with_tx(
+                    OpTransaction::builder()
+                        .base(TxEnv::builder().gas_limit(100))
+                        .source_hash(B256::ZERO)
+                        .enveloped_tx(Some(bytes!("FACADE")))
+                        .build()
+                        .unwrap(),
+                )
+                .with_chain(L1BlockInfo {
+                    token_ratio,
+                    ..Default::default()
+                })
+                .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH)
+        };
+
+        let mut ret_gas = Gas::new(10);
+        ret_gas.record_refund(20);
+
+        let gas_huge = call_last_frame_return(mk_ctx(huge_ratio), InstructionResult::Stop, ret_gas);
+        let gas_truncated =
+            call_last_frame_return(mk_ctx(truncated_ratio), InstructionResult::Stop, ret_gas);
+
+        assert_eq!(gas_huge.remaining(), gas_truncated.remaining());
+        assert_eq!(gas_huge.refunded(), gas_truncated.refunded());
+        assert_eq!(gas_huge.spent(), gas_truncated.spent());
+    }
+
+    #[test]
+    fn test_scale_refund_with_token_ratio_uses_u64_wrapping_semantics() {
+        let token_ratio = (i64::MAX as u64) + 1;
+        // 2 * 2^63 wraps to 0 in uint64 arithmetic.
+        assert_eq!(scale_refund_with_token_ratio(2, token_ratio), 0);
+    }
+
+    #[test]
+    fn test_scale_refund_with_token_ratio_clamps_non_representable_to_i64_max() {
+        let token_ratio = (i64::MAX as u64) + 1;
+        // 1 * (i64::MAX + 1) is > i64::MAX, so we clamp at the i64 boundary.
+        assert_eq!(scale_refund_with_token_ratio(1, token_ratio), i64::MAX);
+    }
+
+    #[test]
+    fn test_execution_uses_divisor_one_when_token_ratio_low64_is_zero() {
+        let caller = Address::with_last_byte(0x31);
+        let recipient = Address::with_last_byte(0x32);
+        let tx_input = bytes!("FACADE");
+
+        let run = |token_ratio: U256| {
+            let ctx = Context::op()
+                .with_chain(L1BlockInfo {
+                    l2_block: Some(U256::from(1)),
+                    l1_base_fee: U256::from(1),
+                    l1_fee_overhead: Some(U256::ZERO),
+                    l1_base_fee_scalar: U256::from(1),
+                    token_ratio,
+                    ..Default::default()
+                })
+                .with_block(BlockEnv {
+                    number: U256::from(1),
+                    basefee: 1,
+                    ..Default::default()
+                })
+                .with_tx(regular_tx(caller, recipient, 1_000_000, &tx_input))
+                .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+            let mut evm = ctx.build_op();
+            let mut handler =
+                OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+            let init = handler.validate_initial_tx_gas(&mut evm)?;
+            handler.execution(&mut evm, &init)
+        };
+
+        // low 64 bits are 0, so execution path should clamp divisor to 1.
+        let low64_zero_ratio: U256 = U256::from(1u64) << 64u32;
+        assert_eq!(low64_zero_ratio.as_limbs()[0], 0);
+        assert_eq!(low64_zero_ratio.as_limbs()[0].max(1), 1);
+
+        // The main assertion here is "no panic" in execution path with low64 == 0.
+        let zero_low64_result = run(low64_zero_ratio)
+            .map(|frame| frame.interpreter_result().result)
+            .map_err(|err| err.to_string());
+        if let Err(msg) = zero_low64_result {
+            assert!(
+                !msg.to_ascii_lowercase().contains("divide"),
+                "unexpected divide-by-zero style error: {msg}"
+            );
+        }
     }
 
     #[test]
