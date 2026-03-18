@@ -166,7 +166,7 @@ impl L1BlockInfo {
         };
 
         eprintln!(
-            "[DEBUG try_fetch-out] l2_block={} spec={:?} l1_base_fee={} token_ratio={} l1_fee_overhead={} l1_base_fee_scalar={:?} spec_id.is_enabled_in(OpSpecId::ARSIA)={}",
+            "[DEBUG try_fetch-out] l2_block={:?} spec={:?} l1_base_fee={} token_ratio={} l1_fee_overhead={:?} l1_base_fee_scalar={} spec_id.is_enabled_in(OpSpecId::ARSIA)={}",
             out.l2_block, spec_id, out.l1_base_fee, out.token_ratio, out.l1_fee_overhead, out.l1_base_fee_scalar, spec_id.is_enabled_in(OpSpecId::ARSIA)
         );
 
