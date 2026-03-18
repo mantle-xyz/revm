@@ -6,6 +6,7 @@ use alloy_provider::{
     Network, Provider,
 };
 use alloy_transport::TransportError;
+use bytecode::BytecodeDecodeError;
 use core::error::Error;
 use database_interface::{async_db::DatabaseAsyncRef, DBErrorMarker};
 use primitives::{Address, StorageKey, StorageValue, B256};
@@ -14,13 +15,27 @@ use std::fmt::Display;
 
 /// Error type for transport-related database operations.
 #[derive(Debug)]
-pub struct DBTransportError(pub TransportError);
+pub enum DBTransportError {
+    /// Error returned by the underlying transport/provider.
+    Transport(TransportError),
+    /// Provider returned malformed bytecode that cannot be decoded safely.
+    InvalidBytecode(BytecodeDecodeError),
+    /// Requested block was not returned by provider.
+    MissingBlock(u64),
+    /// An internal design constraint was violated (e.g. a method that should never be called was called).
+    Internal(String),
+}
 
 impl DBErrorMarker for DBTransportError {}
 
 impl Display for DBTransportError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Transport error: {}", self.0)
+        match self {
+            Self::Transport(err) => write!(f, "Transport error: {err}"),
+            Self::InvalidBytecode(err) => write!(f, "Invalid bytecode from provider: {err}"),
+            Self::MissingBlock(number) => write!(f, "Missing block for number: {number}"),
+            Self::Internal(msg) => write!(f, "Internal AlloyDB error: {msg}"),
+        }
     }
 }
 
@@ -28,7 +43,7 @@ impl Error for DBTransportError {}
 
 impl From<TransportError> for DBTransportError {
     fn from(e: TransportError) -> Self {
-        Self(e)
+        Self::Transport(e)
     }
 }
 
@@ -80,7 +95,8 @@ impl<N: Network, P: Provider<N>> DatabaseAsyncRef for AlloyDB<N, P> {
         let (nonce, balance, code) = tokio::join!(nonce, balance, code,);
 
         let balance = balance?;
-        let code = Bytecode::new_raw(code?.0.into());
+        let code =
+            Bytecode::new_raw_checked(code?.0.into()).map_err(DBTransportError::InvalidBytecode)?;
         let code_hash = code.hash_slow();
         let nonce = nonce?;
 
@@ -93,13 +109,16 @@ impl<N: Network, P: Provider<N>> DatabaseAsyncRef for AlloyDB<N, P> {
             // SAFETY: We know number <= u64::MAX, so we can safely convert it to u64
             .get_block_by_number(number.into())
             .await?;
-        // SAFETY: If the number is given, the block is supposed to be finalized, so unwrapping is safe.
-        Ok(B256::new(*block.unwrap().header().hash()))
+        let block = block.ok_or(DBTransportError::MissingBlock(number))?;
+        Ok(B256::new(*block.header().hash()))
     }
 
     async fn code_by_hash_async_ref(&self, _code_hash: B256) -> Result<Bytecode, Self::Error> {
-        panic!("This should not be called, as the code is already loaded");
-        // This is not needed, as the code is already loaded with basic_ref
+        // Code is already loaded as part of basic_async_ref; this method should never be called.
+        Err(DBTransportError::Internal(
+            "code_by_hash_async_ref should not be called: code is loaded with basic_async_ref"
+                .into(),
+        ))
     }
 
     async fn storage_async_ref(

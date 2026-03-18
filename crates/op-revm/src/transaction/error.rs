@@ -144,7 +144,6 @@ pub fn db_error<E: Display>(error: E) -> OpTransactionError {
     OpTransactionError::BvmEth(BvmEthError::DBError(error.to_string()))
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;

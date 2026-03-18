@@ -25,9 +25,9 @@ use revm::{
     primitives::{TxKind, KECCAK_EMPTY},
     Context, ExecuteCommitEvm,
 };
-use std::time::Instant;
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -64,14 +64,22 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "false".to_string())
         .to_lowercase()
         == "true";
-    
+
     if export_cache_db {
         println!("⚠️  EXPORT_CACHE_DB is enabled - cache_db will be exported");
     }
 
     for i in start_block..=end_block {
         println!("Processing block number: {i}");
-        process_block(i, chain_id, spec, state_verify, export_cache_db, client.clone()).await?;
+        process_block(
+            i,
+            chain_id,
+            spec,
+            state_verify,
+            export_cache_db,
+            client.clone(),
+        )
+        .await?;
     }
 
     Ok(())
@@ -200,7 +208,13 @@ async fn process_block(
 
 /// Export cache_db data to JSON file
 async fn export_cache_db_data<P: alloy_provider::Provider<op_alloy_network::Optimism> + Clone>(
-    state: &revm::database::State<revm::database::CacheDB<revm::database_interface::WrapDatabaseAsync<revm::database::AlloyDB<op_alloy_network::Optimism, P>>>>,
+    state: &revm::database::State<
+        revm::database::CacheDB<
+            revm::database_interface::WrapDatabaseAsync<
+                revm::database::AlloyDB<op_alloy_network::Optimism, P>,
+            >,
+        >,
+    >,
     block_number: u64,
 ) -> anyhow::Result<()> {
     // Create output directory if it doesn't exist
@@ -213,13 +227,13 @@ async fn export_cache_db_data<P: alloy_provider::Provider<op_alloy_network::Opti
     // Cache already supports serde serialization when serde feature is enabled
     // Serialize the cache to JSON
     let json = serde_json::to_string_pretty(&state.database.cache)?;
-    
+
     // Write to file
     let file_path = output_dir.join(format!("block_{}.json", block_number));
     fs::write(&file_path, json)?;
-    
+
     println!("Exported cache_db data to: {}", file_path.display());
-    
+
     Ok(())
 }
 
@@ -390,24 +404,34 @@ async fn verify_storage_with_proof<DB>(
                     // Verify basic account information
                     if proof.balance != account.info.balance {
                         balance_mismatches += 1;
-                        println!("  ❌ Balance mismatch for {}: remote={}, local={}", 
-                            address, proof.balance, account.info.balance);
+                        println!(
+                            "  ❌ Balance mismatch for {}: remote={}, local={}",
+                            address, proof.balance, account.info.balance
+                        );
                     }
                     if proof.nonce != account.info.nonce {
                         nonce_mismatches += 1;
-                        println!("  ❌ Nonce mismatch for {}: remote={}, local={}", 
-                            address, proof.nonce, account.info.nonce);
+                        println!(
+                            "  ❌ Nonce mismatch for {}: remote={}, local={}",
+                            address, proof.nonce, account.info.nonce
+                        );
                     }
-                    
+
                     // Compare code_hash with compatibility for empty code representations
                     // Both KECCAK_EMPTY and zero hash represent "no code"
-                    let remote_is_empty = proof.code_hash == KECCAK_EMPTY || proof.code_hash == B256::ZERO;
-                    let local_is_empty = account.info.code_hash == KECCAK_EMPTY || account.info.code_hash == B256::ZERO;
-                    
-                    if !(remote_is_empty && local_is_empty) && proof.code_hash != account.info.code_hash {
+                    let remote_is_empty =
+                        proof.code_hash == KECCAK_EMPTY || proof.code_hash == B256::ZERO;
+                    let local_is_empty = account.info.code_hash == KECCAK_EMPTY
+                        || account.info.code_hash == B256::ZERO;
+
+                    if !(remote_is_empty && local_is_empty)
+                        && proof.code_hash != account.info.code_hash
+                    {
                         code_hash_mismatches += 1;
-                        println!("  ❌ Code hash mismatch for {}: remote={}, local={}", 
-                            address, proof.code_hash, account.info.code_hash);
+                        println!(
+                            "  ❌ Code hash mismatch for {}: remote={}, local={}",
+                            address, proof.code_hash, account.info.code_hash
+                        );
                     }
 
                     // Verify each storage slot (if any)
@@ -440,7 +464,10 @@ async fn verify_storage_with_proof<DB>(
     }
 
     // Print concise verification result (similar to gas used verification)
-    let all_match = total_failed == 0 && balance_mismatches == 0 && nonce_mismatches == 0 && code_hash_mismatches == 0;
+    let all_match = total_failed == 0
+        && balance_mismatches == 0
+        && nonce_mismatches == 0
+        && code_hash_mismatches == 0;
 
     if all_match {
         println!("--- State verification: passed✅");
