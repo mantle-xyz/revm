@@ -5,7 +5,7 @@
 
 use alloy_consensus::{transaction::SignerRecoverable, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
 use alloy_eips::{BlockId, Decodable2718, Typed2718};
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{logs_bloom, Address, Bytes, B256, U256};
 use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
 use alloy_rpc_types::eth::EIP1186AccountProofResponse;
 use dotenv::dotenv;
@@ -25,9 +25,9 @@ use revm::{
     primitives::{TxKind, KECCAK_EMPTY},
     Context, ExecuteCommitEvm,
 };
-use std::time::Instant;
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -149,27 +149,63 @@ async fn process_block(
         let is_deposit = tx.is_deposit();
         println!("is_deposit: {is_deposit}");
 
-        let res = evm.replay_commit();
-
-        if let Err(ref res) = res {
-            println!("Got error: {res:?}");
-        }
-
-        let expected_gas_used = client
+        let rpc_receipt = client
             .clone()
             .get_transaction_receipt(*tx_hash)
             .await
             .unwrap()
-            .unwrap()
-            .inner
-            .gas_used;
+            .unwrap();
 
-        let actual_gas_used = res.unwrap().gas_used();
-        println!("Expected gas used: {expected_gas_used}, Actual gas used: {actual_gas_used}");
-        if expected_gas_used == actual_gas_used {
+        let expected_status = rpc_receipt.inner.inner.status();
+        let expected_gas_used = rpc_receipt.inner.gas_used;
+        let expected_cumulative_gas_used = rpc_receipt.inner.inner.cumulative_gas_used();
+        let expected_logs = rpc_receipt.inner.inner.logs();
+        let expected_logs_len = expected_logs.len();
+        let expected_logs_bloom = rpc_receipt.inner.inner.logs_bloom();
+
+        println!(
+            "[rpc] tx_hash={tx_hash} status={expected_status} cumulative_gas={expected_cumulative_gas_used} gas_used={expected_gas_used} logs={expected_logs_len} logs_bloom={expected_logs_bloom}"
+        );
+        if !expected_logs.is_empty() {
+            println!("[rpc] tx_hash={tx_hash} logs={:?}", summarize_debug_logs(expected_logs));
+        }
+
+        let execution_result = match evm.replay_commit() {
+            Ok(result) => result,
+            Err(err) => {
+                println!("Got error: {err:?}");
+                println!("--- failed❌");
+                continue;
+            }
+        };
+
+        let actual_success = execution_result.is_success();
+        let actual_gas_used = execution_result.gas_used();
+        let actual_logs = execution_result.logs();
+        let actual_logs_len = actual_logs.len();
+        let actual_logs_bloom = logs_bloom(actual_logs.iter());
+
+        println!(
+            "[revm] tx_hash={tx_hash} status={actual_success} gas_used={actual_gas_used} logs={actual_logs_len} logs_bloom={actual_logs_bloom}"
+        );
+        if !actual_logs.is_empty() {
+            println!("[revm] tx_hash={tx_hash} logs={:?}", summarize_debug_logs(actual_logs));
+        }
+
+        let gas_match = expected_gas_used == actual_gas_used;
+        let status_match = expected_status == actual_success;
+        let logs_len_match = expected_logs_len == actual_logs_len;
+        let logs_bloom_match = *expected_logs_bloom == actual_logs_bloom;
+        println!(
+            "Comparison => gas_match={gas_match} status_match={status_match} logs_len_match={logs_len_match} logs_bloom_match={logs_bloom_match}"
+        );
+
+        if gas_match && status_match && logs_len_match && logs_bloom_match {
             println!("--- passed✅");
         } else {
             println!("--- failed❌");
+            println!("[rpc] full_logs={:?}", summarize_debug_logs(expected_logs));
+            println!("[revm] full_logs={:?}", summarize_debug_logs(actual_logs));
         }
     }
 
@@ -196,6 +232,10 @@ async fn process_block(
     );
 
     Ok(())
+}
+
+fn summarize_debug_logs<L: core::fmt::Debug>(logs: &[L]) -> Vec<String> {
+    logs.iter().enumerate().map(|(idx, log)| format!("idx={idx} log={log:?}")).collect()
 }
 
 /// Export cache_db data to JSON file

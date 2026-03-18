@@ -157,6 +157,17 @@ where
                 // if the tx is not a deposit transaction and ARSIA is not enabled, we need to multiply the initial gas by the token ratio
                 // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to low 64 bits.
                 let token_ratio = chain.token_ratio.as_limbs()[0];
+                eprintln!(
+                    "[DEBUG validate_initial_tx_gas] block={} spec={:?} token_ratio={} (raw U256={}) l1_base_fee={} l1_base_fee_scalar={} l1_fee_overhead={:?} initial_gas_before={}",
+                    block.number(),
+                    cfg.spec(),
+                    token_ratio,
+                    chain.token_ratio,
+                    chain.l1_base_fee,
+                    chain.l1_base_fee_scalar,
+                    chain.l1_fee_overhead,
+                    initial_gas.initial_gas,
+                );
                 initial_gas.initial_gas = initial_gas
                     .initial_gas
                     .checked_mul(token_ratio)

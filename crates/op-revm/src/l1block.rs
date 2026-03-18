@@ -151,6 +151,11 @@ impl L1BlockInfo {
         let l1_fee_overhead = db.storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)?;
         let l1_fee_scalar = db.storage(L1_BLOCK_CONTRACT, L1_SCALAR_SLOT)?;
 
+        eprintln!(
+            "[DEBUG try_fetch] l2_block={} spec={:?} l1_base_fee={} token_ratio={} l1_fee_overhead={} l1_fee_scalar={}",
+            l2_block, spec_id, l1_base_fee, token_ratio, l1_fee_overhead, l1_fee_scalar
+        );
+
         let mut out = L1BlockInfo {
             l2_block: Some(l2_block),
             l1_base_fee: l1_base_fee,
@@ -159,6 +164,11 @@ impl L1BlockInfo {
             l1_base_fee_scalar: l1_fee_scalar,
             ..Default::default()
         };
+
+        eprintln!(
+            "[DEBUG try_fetch-out] l2_block={} spec={:?} l1_base_fee={} token_ratio={} l1_fee_overhead={} l1_fee_scalar={} spec_id.is_enabled_in(OpSpecId::ARSIA)={}",
+            out.l2_block, spec_id, out.l1_base_fee, out.token_ratio, out.l1_fee_overhead, out.l1_fee_scalar, spec_id.is_enabled_in(OpSpecId::ARSIA)
+        );
 
         // Post-Arsia L1 block info
         // Mantle uses the same L1 block info as Ecotone, Isthmus, and Jovian.
