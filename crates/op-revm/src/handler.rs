@@ -548,8 +548,8 @@ where
             post_execution::output(evm.ctx(), frame_result).map_haltreason(OpHaltReason::Base);
 
         eprintln!("[DEBUG handler::execution_result] execution_result gas_used={}", exec_result.gas_used());
-        if let ExecutionResult::Success { gas_used, gas_refunded, .. } = &exec_result {
-            eprintln!("[DEBUG handler::execution_result Success] execution_result gas_used={} gas_refunded={}", gas_used, gas_refunded);
+        if let ExecutionResult::Success { gas_used, gas_refunded, logs, .. } = &exec_result {
+            eprintln!("[DEBUG handler::execution_result Success] execution_result gas_used={} gas_refunded={} logs={:?}", gas_used, gas_refunded, logs);
         }
 
         if exec_result.is_halt() {
