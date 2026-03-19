@@ -393,15 +393,19 @@ where
                     },
                 )));
             }
+            eprintln!("[DEBUG op-revm::handler::execution] tx_l1_cost={} gas_limit={}", tx_l1_cost, gas_limit);
 
             // Edge case: if token ratio is zero, set it to 1.
             // This is only possible if the token ratio is not set at all.
             let token_ratio = chain.token_ratio.max(U256::from(1));
+            eprintln!("[DEBUG op-revm::handler::execution] token_ratio={}", token_ratio);
             // Keep behavior aligned with op-geth: truncate to low 64 bits and ensure non-zero divisor.
             let token_ratio_u64 = token_ratio.as_limbs()[0].max(1);
+            eprintln!("[DEBUG op-revm::handler::execution] token_ratio_u64={}", token_ratio_u64);
             let tx_l1_cost_u64: u64 = tx_l1_cost
                 .try_into()
                 .map_err(|_| OpTransactionError::TxL1CostOutOfRange)?;
+            eprintln!("[DEBUG op-revm::handler::execution] tx_l1_cost_u64={}", tx_l1_cost_u64);
             gas_limit = gas_limit
                 .wrapping_sub(tx_l1_cost_u64)
                 .wrapping_div(token_ratio_u64);
@@ -412,7 +416,7 @@ where
 
         // Run execution loop
         let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
-
+        eprintln!("[DEBUG op-revm::handler::execution] run_exec_loop gas_used={} gas_limit={}", frame_result.gas().used(), gas_limit);
         // Handle last frame result
         self.last_frame_result(evm, &mut frame_result)?;
         Ok(frame_result)
@@ -539,8 +543,14 @@ where
             Ok(_) => (),
         }
 
+        eprintln!("[DEBUG op-revm::handler::execution_result] output");
         let exec_result =
             post_execution::output(evm.ctx(), frame_result).map_haltreason(OpHaltReason::Base);
+
+        eprintln!("[DEBUG handler::execution_result] execution_result gas_used={}", exec_result.gas_used());
+        if let ExecutionResult::Success { gas_used, gas_refunded, .. } = &exec_result {
+            eprintln!("[DEBUG handler::execution_result Success] execution_result gas_used={} gas_refunded={}", gas_used, gas_refunded);
+        }
 
         if exec_result.is_halt() {
             // Post-regolith, if the transaction is a deposit transaction and it halts,

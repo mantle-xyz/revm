@@ -69,6 +69,7 @@ pub trait ExecuteEvm {
         &mut self,
         tx: Self::Tx,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        eprintln!("[DEBUG handler::transact] transact");
         let output_or_error = self.transact_one(tx);
         // finalize will clear the journal
         let state = self.finalize();

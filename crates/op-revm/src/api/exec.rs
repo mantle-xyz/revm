@@ -63,6 +63,7 @@ where
     }
 
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        eprintln!("[DEBUG op-revm::api::exec] transact_one");
         self.0.ctx.set_tx(tx);
         let mut h = OpHandler::<_, _, EthFrame<EthInterpreter>>::new();
         h.run(self)

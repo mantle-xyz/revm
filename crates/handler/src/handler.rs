@@ -145,11 +145,15 @@ pub trait Handler {
         &mut self,
         evm: &mut Self::Evm,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        eprintln!("[DEBUG handler::run_without_catch_error] run_without_catch_error");
         let init_and_floor_gas = self.validate(evm)?;
+        eprintln!("[DEBUG handler::run_without_catch_error] validate");
         let eip7702_refund = self.pre_execution(evm)? as i64;
+        eprintln!("[DEBUG handler::run_without_catch_error] pre_execution");
         let mut exec_result = self.execution(evm, &init_and_floor_gas)?;
+        eprintln!("[DEBUG handler::run_without_catch_error] execution");
         self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
-
+        eprintln!("[DEBUG handler::run_without_catch_error] post_execution");
         // Prepare the output
         self.execution_result(evm, exec_result)
     }
