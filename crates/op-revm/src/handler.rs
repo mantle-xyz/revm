@@ -437,17 +437,24 @@ where
             gas.set_remaining(gas.remaining().saturating_sub(BVM_ETH_MINT_GAS_COMPENSATION));
         }
 
-        let limit = gas.limit();
+
+        eprintln!("[Debug refund]token_ratio={} gas.limit={} tx.gas_limit={}", chain.token_ratio, gas.limit(), tx.gas_limit());
         // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to low 64 bits.
         let token_ratio_u64 = chain.token_ratio.as_limbs()[0];
+        // Save the original tx gas limit (G). Used to restore gas.limit() after scaling so that
+        // gas.used() = G - (remaining + refund) * T, matching op-geth's:
+        //   gasUsed = initialGas - gasRemaining = G - (r + refund) * T
+        let tx_gas_limit = tx.gas_limit();
 
         let is_arsia = cfg.spec().is_enabled_in(OpSpecId::ARSIA);
 
         if !is_system && !is_deposit {
             if !is_arsia {
-                //  adjust limit temporarily for refund calculation
+                // Temporarily set limit to G/T for refund cap calculation, matching op-geth's
+                // originalGasUsed(tokenRatio) = initialGas/tokenRatio - gasRemaining = G/T - r
+                // where refundCap = originalGasUsed / 5
                 if token_ratio_u64 > 0 {
-                    gas.set_limit(gas.limit().saturating_div(token_ratio_u64));
+                    gas.set_limit(tx_gas_limit.saturating_div(token_ratio_u64));
                 }
             }
 
@@ -455,10 +462,13 @@ where
             gas.set_final_refund(is_london);
 
             if !is_arsia {
-                // scale refund and remaining by token_ratio, restore limit
+                // Scale refund and remaining by token_ratio, then restore limit to the original tx
+                // gas limit G. With limit=G and remaining=r*T:
+                //   gas.spent() = G - r*T  (positive, no underflow)
+                //   gas.used()  = G - r*T - refund*T = G - (r+refund)*T  (matches op-geth)
                 gas.set_refund(scale_refund_with_token_ratio(gas.refunded(), token_ratio_u64));
                 gas.set_remaining(gas.remaining().saturating_mul(token_ratio_u64));
-                gas.set_limit(limit);
+                gas.set_limit(tx_gas_limit);
             }
         } else {
             // Deposit and system transactions: no refunds
