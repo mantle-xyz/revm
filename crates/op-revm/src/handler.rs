@@ -587,6 +587,13 @@ where
 
             match nonce_mint_result {
                 Ok(()) => {
+                    // Commit nonce bump and mint balance immediately.
+                    // Per the OP deposit spec, these MUST persist even when
+                    // subsequent operations (e.g. BVM_ETH minting) fail.
+                    // Committing here moves them out of the journal so a later
+                    // discard_tx() cannot revert them.
+                    evm.ctx().journal_mut().commit_tx();
+
                     // Mint BVM_ETH tokens for the failed deposit (no transfer).
                     match BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from) {
                         Ok(()) => {
@@ -2517,14 +2524,31 @@ mod tests {
         // Verify BVM_ETH was minted.
         // We calculate the storage slot for the caller's balance in the BvmEth contract
         let slot = BvmEth::get_balance_slot(caller);
-        let balance = evm
+        let bvm_balance = evm
             .ctx()
             .journal_mut()
             .sload(BvmEth::ADDRESS, slot)
             .unwrap()
             .data;
 
-        assert_eq!(balance, U256::from(mint_amount));
+        assert_eq!(bvm_balance, U256::from(mint_amount));
+
+        // Verify caller nonce was bumped and mint balance was credited.
+        // Per the OP deposit spec, these must persist even on deposit failure.
+        let caller_acc = evm
+            .ctx()
+            .journal_mut()
+            .load_account(caller)
+            .unwrap();
+        assert_eq!(
+            caller_acc.info.nonce, 1,
+            "Caller nonce must be bumped for failed deposits"
+        );
+        assert_eq!(
+            caller_acc.info.balance,
+            U256::from(mint_amount),
+            "Caller balance must include mint for failed deposits"
+        );
     }
 
     #[test]
