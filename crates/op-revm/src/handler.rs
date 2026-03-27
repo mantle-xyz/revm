@@ -420,8 +420,14 @@ where
         let gas = frame_result.gas_mut();
         let is_system = tx.is_system_transaction();
 
-        // Apply gas compensation when BVM_ETH operations (mint or transfer) warm the account
-        // and there's subsequent EVM execution that might access BVM_ETH
+        // Apply gas compensation when BVM_ETH was warmed by pre-EVM mint/transfer and
+        // EVM code will execute. REVM's journal-based mint/transfer warms BVM_ETH account
+        // and storage slots, while op-geth's st.state.SetState() does not affect the EVM
+        // access list. When subsequent EVM execution touches BVM_ETH — either by a direct
+        // call or an internal call through the bridge — the warm/cold access cost
+        // difference (2500 account + 2000 storage = 4500) needs compensation.
+        // The condition guards against false positives: without eth_value/eth_tx_value no
+        // BVM_ETH warming occurs, and without input no contract code executes.
         if (tx.eth_value().is_some() || tx.eth_tx_value().is_some()) && !tx.input().is_empty() {
             gas.set_remaining(gas.remaining().saturating_sub(BVM_ETH_MINT_GAS_COMPENSATION));
         }
@@ -552,11 +558,12 @@ where
             let mint = tx.mint();
             let is_system_tx = tx.is_system_transaction();
             let gas_limit = tx.gas_limit();
-            let journal = evm.ctx().journal_mut();
 
-            // discard all changes of this transaction
+            // Revert all transaction changes first.
             // Default JournalCheckpoint is the first checkpoint and will wipe all changes.
-            journal.checkpoint_revert(JournalCheckpoint::default());
+            evm.ctx()
+                .journal_mut()
+                .checkpoint_revert(JournalCheckpoint::default());
 
             // If the transaction is a deposit transaction and it failed
             // for any reason, the caller nonce must be bumped, and the
@@ -564,38 +571,64 @@ where
             // also returned as a special Halt variant so that consumers can more
             // easily distinguish between a failed deposit and a failed
             // normal transaction.
-
+            //
             // Increment sender nonce and account balance for the mint amount. Deposits
             // always persist the mint amount, even if the transaction fails.
-            let mut acc = journal.load_account_mut(caller)?;
-            acc.bump_nonce();
-            acc.incr_balance(U256::from(mint.unwrap_or_default()));
-
-            // We can now commit the changes.
-            journal.commit_tx();
-
-            // If the transaction failed, we only mint the BVM_ETH tokens.
-            // We do not transfer the BVM_ETH tokens.
-            BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from)?;
-
-            // The gas used of a failed deposit post-regolith is the gas
-            // limit of the transaction. pre-regolith, it is the gas limit
-            // of the transaction for non system transactions and 0 for system
-            // transactions.
-            let gas_used = if spec.is_enabled_in(OpSpecId::REGOLITH) || !is_system_tx {
-                gas_limit
-            } else {
-                0
+            //
+            // All fallible operations use match (not ?) so errors flow to the
+            // unified cleanup at the bottom instead of bypassing it.
+            let nonce_mint_result = {
+                let journal = evm.ctx().journal_mut();
+                journal.load_account_mut(caller).map(|mut acc| {
+                    acc.bump_nonce();
+                    acc.incr_balance(U256::from(mint.unwrap_or_default()));
+                })
             };
-            // clear the journal
-            Ok(ExecutionResult::Halt {
-                reason: OpHaltReason::FailedDeposit,
-                gas_used,
-            })
+
+            match nonce_mint_result {
+                Ok(()) => {
+                    // Commit nonce bump and mint balance immediately.
+                    // Per the OP deposit spec, these MUST persist even when
+                    // subsequent operations (e.g. BVM_ETH minting) fail.
+                    // Committing here moves them out of the journal so a later
+                    // discard_tx() cannot revert them.
+                    evm.ctx().journal_mut().commit_tx();
+
+                    // Mint BVM_ETH tokens for the failed deposit (no transfer).
+                    match BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from) {
+                        Ok(()) => {
+                            evm.ctx().journal_mut().commit_tx();
+
+                            // The gas used of a failed deposit post-regolith is the gas
+                            // limit of the transaction. pre-regolith, it is the gas limit
+                            // of the transaction for non system transactions and 0 for
+                            // system transactions.
+                            let gas_used =
+                                if spec.is_enabled_in(OpSpecId::REGOLITH) || !is_system_tx {
+                                    gas_limit
+                                } else {
+                                    0
+                                };
+                            Ok(ExecutionResult::Halt {
+                                reason: OpHaltReason::FailedDeposit,
+                                gas_used,
+                            })
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                Err(e) => Err(e.into()),
+            }
         } else {
             Err(error)
         };
-        // do the cleanup
+
+        // Unified cleanup for all exit paths.
+        // discard_tx() on error ensures no partial state (nonce bump, balance credit,
+        // BVM_ETH mint) leaks into the next transaction.
+        if output.is_err() {
+            evm.ctx().journal_mut().discard_tx();
+        }
         evm.ctx().chain_mut().clear_tx_l1_cost();
         evm.ctx().local_mut().clear();
         evm.frame_stack().clear();
@@ -2491,14 +2524,31 @@ mod tests {
         // Verify BVM_ETH was minted.
         // We calculate the storage slot for the caller's balance in the BvmEth contract
         let slot = BvmEth::get_balance_slot(caller);
-        let balance = evm
+        let bvm_balance = evm
             .ctx()
             .journal_mut()
             .sload(BvmEth::ADDRESS, slot)
             .unwrap()
             .data;
 
-        assert_eq!(balance, U256::from(mint_amount));
+        assert_eq!(bvm_balance, U256::from(mint_amount));
+
+        // Verify caller nonce was bumped and mint balance was credited.
+        // Per the OP deposit spec, these must persist even on deposit failure.
+        let caller_acc = evm
+            .ctx()
+            .journal_mut()
+            .load_account(caller)
+            .unwrap();
+        assert_eq!(
+            caller_acc.info.nonce, 1,
+            "Caller nonce must be bumped for failed deposits"
+        );
+        assert_eq!(
+            caller_acc.info.balance,
+            U256::from(mint_amount),
+            "Caller balance must include mint for failed deposits"
+        );
     }
 
     #[test]
@@ -2895,9 +2945,9 @@ mod tests {
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
-        
+
         // Gas compensation (4500) should be subtracted from remaining gas
-        // Since remaining_gas (5000) > BVM_ETH_MINT_GAS_COMPENSATION (4500), 
+        // Since remaining_gas (5000) > BVM_ETH_MINT_GAS_COMPENSATION (4500),
         // remaining should be 5000 - 4500 = 500
         assert_eq!(
             gas.remaining(),
@@ -3055,7 +3105,7 @@ mod tests {
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
-        
+
         // Gas compensation should use saturating_sub, so remaining should be 0 (not negative)
         assert_eq!(
             gas.remaining(),
@@ -3134,6 +3184,273 @@ mod tests {
             gas.remaining(),
             remaining_gas - BVM_ETH_MINT_GAS_COMPENSATION,
             "Gas compensation should be applied when only eth_tx_value exists and input is not empty"
+        );
+    }
+
+    #[test]
+    fn test_bvm_eth_gas_compensation_applied_bridge_target() {
+        // Gas compensation must also apply when tx targets the bridge (or any contract),
+        // because the bridge internally accesses BVM_ETH. The pre-EVM mint/transfer warms
+        // BVM_ETH in REVM but not in op-geth, so the compensation is needed regardless
+        // of whether the direct target is BVM_ETH.
+        let eth_value = 1_000_000_000_000_000_000u128; // 1 ETH
+        let initial_gas = 10000u64;
+        let remaining_gas = 5000u64;
+        // L2StandardBridge address
+        let bridge = Address::from([0x42; 20]);
+
+        let ctx = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .kind(revm::primitives::TxKind::Call(bridge))
+                            .data(Bytes::from(vec![0x12, 0x34])),
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_tx_chained(|tx| {
+                tx.deposit.eth_value = Some(eth_value);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+
+        let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
+        assert_eq!(
+            gas.remaining(),
+            remaining_gas - BVM_ETH_MINT_GAS_COMPENSATION,
+            "Gas compensation should be applied even when target is not BVM_ETH (e.g., bridge)"
+        );
+    }
+
+    #[test]
+    fn test_bvm_eth_gas_compensation_real_l2_standard_bridge() {
+        // Real L2StandardBridge address used by Mantle deposit transactions.
+        // Deposits with eth_value routed through the bridge internally access
+        // BVM_ETH, so gas compensation must apply.
+        let eth_value = 1_000_000_000_000_000_000u128; // 1 ETH
+        let initial_gas = 10000u64;
+        let remaining_gas = 5000u64;
+        let l2_standard_bridge =
+            Address::from_str("0x4200000000000000000000000000000000000007").unwrap();
+
+        let ctx = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .kind(revm::primitives::TxKind::Call(l2_standard_bridge))
+                            .data(Bytes::from(vec![0xd7, 0x64, 0xad, 0x0b])), // finalizeDeposit selector
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_tx_chained(|tx| {
+                tx.deposit.eth_value = Some(eth_value);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+
+        let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
+        assert_eq!(
+            gas.remaining(),
+            remaining_gas - BVM_ETH_MINT_GAS_COMPENSATION,
+            "Gas compensation must apply for L2StandardBridge deposits with eth_value"
+        );
+    }
+
+    #[test]
+    fn test_bvm_eth_gas_compensation_deposit_to_arbitrary_contract() {
+        // Edge case: deposit with eth_value targeting an arbitrary contract
+        // that may not touch BVM_ETH. Compensation still applies because:
+        // 1. Deposit txs are constructed by L1 system, not arbitrary user input
+        // 2. gasPrice=0 for deposits, so over-reporting 4500 gas is negligible
+        // 3. Restricting to specific targets broke real block gas alignment
+        let eth_value = 500_000_000u128;
+        let initial_gas = 10000u64;
+        let remaining_gas = 5000u64;
+        let arbitrary_contract = Address::from([0xAB; 20]);
+
+        let ctx = Context::op()
+            .with_tx(
+                OpTransaction::builder()
+                    .base(
+                        TxEnv::builder()
+                            .gas_limit(initial_gas)
+                            .kind(revm::primitives::TxKind::Call(arbitrary_contract))
+                            .data(Bytes::from(vec![0xCA, 0xFE])),
+                    )
+                    .source_hash(B256::from([1u8; 32]))
+                    .build_fill(),
+            )
+            .modify_tx_chained(|tx| {
+                tx.deposit.eth_value = Some(eth_value);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+
+        let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
+        assert_eq!(
+            gas.remaining(),
+            remaining_gas - BVM_ETH_MINT_GAS_COMPENSATION,
+            "Gas compensation applies to all deposits with eth_value and input, regardless of target"
+        );
+    }
+
+    #[test]
+    fn test_catch_error_deposit_cleanup_always_runs() {
+        // Verify that catch_error always performs cleanup (clear_tx_l1_cost,
+        // clear local, clear frame_stack) regardless of the error path taken.
+        let caller = Address::from([0x02; 20]);
+        let mint_amount = 200u64;
+
+        let ctx = Context::op()
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.mint = Some(mint_amount.into());
+                tx.deposit.eth_value = Some(mint_amount.into());
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        // Set a cached L1 cost to verify it gets cleared by catch_error.
+        evm.ctx().chain.tx_l1_cost = Some(U256::from(12345));
+
+        let error = EVMError::Transaction(OpTransactionError::HaltedDepositPostRegolith);
+        let result = handler.catch_error(&mut evm, error);
+
+        assert!(result.is_ok(), "Failed deposit should return Ok(FailedDeposit)");
+
+        // Verify cleanup was performed.
+        assert_eq!(
+            evm.ctx().chain.tx_l1_cost, None,
+            "clear_tx_l1_cost must be called after catch_error"
+        );
+    }
+
+    #[test]
+    fn test_catch_error_non_deposit_reverts_all_state() {
+        // For non-deposit transaction errors, catch_error must discard_tx()
+        // to revert all uncommitted state changes.
+        let caller = Address::from([0x03; 20]);
+        let initial_balance = U256::from(1_000_000u64);
+
+        let ctx = Context::op()
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                // No source_hash → not a deposit transaction
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        // Pre-load caller with balance and touch the account (simulating
+        // validate_against_state_and_deduct_caller partial execution).
+        {
+            let journal = evm.ctx().journal_mut();
+            journal.balance_incr(caller, initial_balance).unwrap();
+            let mut acc = journal.load_account_mut(caller).unwrap();
+            acc.bump_nonce();
+        }
+
+        // Verify state was modified before catch_error.
+        let nonce_before = evm
+            .ctx()
+            .journal_mut()
+            .load_account(caller)
+            .unwrap()
+            .info
+            .nonce;
+        assert_eq!(nonce_before, 1, "Nonce should be 1 before catch_error");
+
+        // catch_error for non-deposit should return Err and call discard_tx().
+        let error = EVMError::Transaction(
+            OpTransactionError::Base(InvalidTransaction::NonceTooLow {
+                tx: 0,
+                state: 1,
+            }),
+        );
+        let result = handler.catch_error(&mut evm, error);
+
+        assert!(result.is_err(), "Non-deposit error should propagate as Err");
+
+        // After discard_tx(), the nonce bump should be reverted.
+        let nonce_after = evm
+            .ctx()
+            .journal_mut()
+            .load_account(caller)
+            .unwrap()
+            .info
+            .nonce;
+        assert_eq!(
+            nonce_after, 0,
+            "discard_tx must revert nonce bump for non-deposit errors"
+        );
+    }
+
+    #[test]
+    fn test_catch_error_deposit_nonce_mint_persist_across_next_tx() {
+        // Verify that after catch_error processes a failed deposit, the committed
+        // nonce/mint are not reverted by a subsequent discard_tx() (simulating
+        // a follow-up transaction that also fails).
+        let caller = Address::from([0x04; 20]);
+        let mint_amount = 500u64;
+
+        let ctx = Context::op()
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.mint = Some(mint_amount.into());
+                tx.deposit.eth_value = Some(mint_amount.into());
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        // Process the failed deposit.
+        let error = EVMError::Transaction(OpTransactionError::HaltedDepositPostRegolith);
+        let result = handler.catch_error(&mut evm, error);
+        assert!(result.is_ok());
+
+        // Now simulate a subsequent transaction failure by calling discard_tx().
+        // This must NOT revert the previously committed nonce/mint.
+        evm.ctx().journal_mut().discard_tx();
+
+        let caller_acc = evm
+            .ctx()
+            .journal_mut()
+            .load_account(caller)
+            .unwrap();
+        assert_eq!(
+            caller_acc.info.nonce, 1,
+            "Committed nonce must survive subsequent discard_tx"
+        );
+        assert_eq!(
+            caller_acc.info.balance,
+            U256::from(mint_amount),
+            "Committed mint balance must survive subsequent discard_tx"
+        );
+
+        // BVM_ETH state should also survive.
+        let slot = BvmEth::get_balance_slot(caller);
+        let bvm_balance = evm
+            .ctx()
+            .journal_mut()
+            .sload(BvmEth::ADDRESS, slot)
+            .unwrap()
+            .data;
+        assert_eq!(
+            bvm_balance,
+            U256::from(mint_amount),
+            "Committed BVM_ETH balance must survive subsequent discard_tx"
         );
     }
 }
