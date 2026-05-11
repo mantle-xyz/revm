@@ -12,8 +12,7 @@ use revm::{
     context::TxEnv,
     database::{CacheDB, BENCH_CALLER},
     database_interface::EmptyDB,
-    primitives::{hex, keccak256, Address, Bytes, TxKind, B256, U256},
-    primitives::{StorageKey, StorageValue},
+    primitives::{hex, keccak256, Address, Bytes, StorageKey, StorageValue, TxKind, B256, U256},
     state::{AccountInfo, Bytecode},
     Context, ExecuteEvm, MainBuilder, MainContext,
 };
@@ -38,13 +37,16 @@ pub fn run(criterion: &mut Criterion) {
 
     let mut evm = Context::mainnet()
         .with_db(db)
-        .modify_cfg_chained(|c| c.disable_nonce_check = true)
+        .modify_cfg_chained(|c| {
+            c.disable_nonce_check = true;
+            c.tx_gas_limit_cap = Some(u64::MAX);
+        })
         .build_mainnet();
 
     let tx = TxEnv::builder()
         .caller(BENCH_CALLER)
         .kind(TxKind::Call(BURNTPIX_MAIN_ADDRESS))
-        .data(run_call_data.clone().into())
+        .data(run_call_data.into())
         .gas_limit(u64::MAX)
         .build()
         .unwrap();
@@ -103,9 +105,12 @@ pub fn svg(filename: String, svg_data: &[u8]) -> Result<(), Box<dyn Error>> {
 const DEFAULT_SEED: &str = "0";
 const DEFAULT_ITERATIONS: &str = "0x4E20"; // 20_000 iterations
 fn try_init_env_vars() -> Result<(u32, U256), Box<dyn Error>> {
-    let seed_from_env = std::env::var("SEED").unwrap_or(DEFAULT_SEED.to_string());
+    // Use lazy default to avoid unnecessary allocation when env is set
+    let seed_from_env = std::env::var("SEED").unwrap_or_else(|_| DEFAULT_SEED.to_string());
     let seed: u32 = try_from_hex_to_u32(&seed_from_env)?;
-    let iterations_from_env = std::env::var("ITERATIONS").unwrap_or(DEFAULT_ITERATIONS.to_string());
+    // Use lazy default to avoid unnecessary allocation when env is set
+    let iterations_from_env =
+        std::env::var("ITERATIONS").unwrap_or_else(|_| DEFAULT_ITERATIONS.to_string());
     let iterations = U256::from_str(&iterations_from_env)?;
     Ok((seed, iterations))
 }

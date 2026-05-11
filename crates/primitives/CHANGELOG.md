@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [23.0.0](https://github.com/bluealloy/revm/compare/revm-primitives-v22.1.0...revm-primitives-v23.0.0) - 2026-04-10
+
+### Added
+
+- Part of amsterdam devnet3 EIP updates ([#3438](https://github.com/bluealloy/revm/pull/3438))
+
+## [22.1.0](https://github.com/bluealloy/revm/compare/revm-primitives-v22.0.0...revm-primitives-v22.1.0) - 2026-03-02
+
+### Added
+
+- Implement EIP-7708 ETH transfers emit a log ([#3334](https://github.com/bluealloy/revm/pull/3334))
+
+### Fixed
+
+- *(journal)* emit EIP-7708 log for selfdestructed accounts with remaining balance ([#3394](https://github.com/bluealloy/revm/pull/3394))
+
+### Other
+
+- remove GPL mention and update gmp feature comments ([#3383](https://github.com/bluealloy/revm/pull/3383))
+- use fixed bytes hashmaps from alloy-core ([#3358](https://github.com/bluealloy/revm/pull/3358))
+- update default hardfork to Osaka (Ethereum) and Jovian (Optimism) ([#3326](https://github.com/bluealloy/revm/pull/3326))
+
+## [21.1.0](https://github.com/bluealloy/revm/compare/revm-primitives-v21.0.2...revm-primitives-v21.1.0) - 2026-01-15
+
+### Added
+
+- BAL EIP-7928 ([#3070](https://github.com/bluealloy/revm/pull/3070))
+- JournaledAccount sload/sstore ([#3201](https://github.com/bluealloy/revm/pull/3201))
+
+### Other
+
+- fix typos, grammar errors, and improve documentation consistency ([#3294](https://github.com/bluealloy/revm/pull/3294))
+- happy new year, 2026 licence ([#3272](https://github.com/bluealloy/revm/pull/3272))
+- *(database)* use fixed hashmaps in cache db ([#3231](https://github.com/bluealloy/revm/pull/3231))
+- *(fmt)* merge all imports ([#3184](https://github.com/bluealloy/revm/pull/3184))
+
 ## [21.0.2](https://github.com/bluealloy/revm/compare/revm-primitives-v21.0.1...revm-primitives-v21.0.2) - 2025-11-07
 
 ### Other
@@ -249,12 +285,6 @@ Stable version
 ### Other
 
 - *(deps)* bump alloy-primitives from 0.8.0 to 0.8.2 ([#1761](https://github.com/bluealloy/revm/pull/1761))
-
-## [9.0.1](https://github.com/bluealloy/revm/compare/revm-primitives-v9.0.0...revm-primitives-v9.0.1) - 2024-08-30
-
-### Other
-- Bump new logo ([#1735](https://github.com/bluealloy/revm/pull/1735))
-- bump kzg-rs version ([#1734](https://github.com/bluealloy/revm/pull/1734))
 
 ## [9.0.1](https://github.com/bluealloy/revm/compare/revm-primitives-v9.0.0...revm-primitives-v9.0.1) - 2024-08-30
 

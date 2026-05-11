@@ -1,5 +1,8 @@
 use crate::{Inspector, InspectorEvmTr, JournalExt};
-use context::{result::ExecutionResult, ContextTr, JournalEntry, Transaction};
+use context::{
+    result::{ExecutionResult, ResultGas},
+    Cfg, ContextTr, JournalEntry, JournalTr, Transaction,
+};
 use handler::{evm::FrameTr, EvmTr, FrameResult, Handler, ItemOrResult};
 use interpreter::{
     instructions::InstructionTable,
@@ -55,11 +58,19 @@ where
         &mut self,
         evm: &mut Self::Evm,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        let init_and_floor_gas = self.validate(evm)?;
-        let eip7702_refund = self.pre_execution(evm)? as i64;
+        let mut init_and_floor_gas = self.validate(evm)?;
+        // pre_execution now applies the EIP-7702 state gas refund split to init_and_floor_gas
+        // and returns the regular refund portion
+        let eip7702_regular_refund = self.pre_execution(evm, &mut init_and_floor_gas)? as i64;
+
         let mut frame_result = self.inspect_execution(evm, &init_and_floor_gas)?;
-        self.post_execution(evm, &mut frame_result, init_and_floor_gas, eip7702_refund)?;
-        self.execution_result(evm, frame_result)
+        let result_gas = self.post_execution(
+            evm,
+            &mut frame_result,
+            init_and_floor_gas,
+            eip7702_regular_refund,
+        )?;
+        self.execution_result(evm, frame_result, result_gas)
     }
 
     /// Run execution loop with inspection support
@@ -70,9 +81,13 @@ where
         evm: &mut Self::Evm,
         init_and_floor_gas: &InitialAndFloorGas,
     ) -> Result<FrameResult, Self::Error> {
-        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
-        // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        // Compute the regular gas budget and EIP-8037 reservoir for the first frame.
+        let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
+            evm.ctx().tx().gas_limit(),
+            evm.ctx().cfg().tx_gas_limit_cap(),
+            evm.ctx().cfg().is_amsterdam_eip8037_enabled(),
+        );
+        let first_frame_input = self.first_frame_input(evm, gas_limit, reservoir)?;
 
         // Run execution loop
         let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
@@ -139,8 +154,15 @@ where
         // call execution with inspection and then output.
         match self
             .inspect_execution(evm, &init_and_floor_gas)
-            .and_then(|exec_result| self.execution_result(evm, exec_result))
-        {
+            .and_then(|exec_result| {
+                // System calls have no intrinsic gas; build ResultGas from frame result.
+                let gas = exec_result.gas();
+                let result_gas = ResultGas::default()
+                    .with_total_gas_spent(gas.total_gas_spent())
+                    .with_refunded(gas.refunded() as u64)
+                    .with_state_gas_spent(gas.state_gas_spent());
+                self.execution_result(evm, exec_result, result_gas)
+            }) {
             out @ Ok(_) => out,
             Err(e) => self.catch_error(evm, e),
         }
@@ -150,9 +172,14 @@ where
 /// Handles the start of a frame by calling the appropriate inspector method.
 pub fn frame_start<CTX, INTR: InterpreterTypes>(
     context: &mut CTX,
-    inspector: &mut impl Inspector<CTX, INTR>,
+    inspector: &mut impl Inspector<CTX, INTR, FrameInput, FrameResult>,
     frame_input: &mut FrameInput,
 ) -> Option<FrameResult> {
+    // Generic hook before variant dispatch
+    if let Some(result) = inspector.frame_start(context, frame_input) {
+        return Some(result);
+    }
+    // Variant-specific dispatch
     match frame_input {
         FrameInput::Call(i) => {
             if let Some(output) = inspector.call(context, i) {
@@ -172,10 +199,11 @@ pub fn frame_start<CTX, INTR: InterpreterTypes>(
 /// Handles the end of a frame by calling the appropriate inspector method.
 pub fn frame_end<CTX, INTR: InterpreterTypes>(
     context: &mut CTX,
-    inspector: &mut impl Inspector<CTX, INTR>,
+    inspector: &mut impl Inspector<CTX, INTR, FrameInput, FrameResult>,
     frame_input: &FrameInput,
     frame_output: &mut FrameResult,
 ) {
+    // Variant-specific dispatch first
     match frame_output {
         FrameResult::Call(outcome) => {
             let FrameInput::Call(i) = frame_input else {
@@ -190,6 +218,8 @@ pub fn frame_end<CTX, INTR: InterpreterTypes>(
             inspector.create_end(context, i, outcome);
         }
     }
+    // Generic hook after variant dispatch
+    inspector.frame_end(context, frame_input, frame_output);
 }
 
 /// Run Interpreter loop with inspection support.
@@ -260,7 +290,7 @@ fn inspect_log<CTX, IT>(
     }
 
     let log = context.journal_mut().logs().last().unwrap().clone();
-    inspector.log(interpreter, context, log);
+    inspector.log_full(interpreter, context, log);
 }
 
 #[inline(never)]

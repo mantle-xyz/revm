@@ -725,13 +725,13 @@ mod tests {
         // Verify transaction succeeds
         let logs = match &result {
             ExecutionResult::Success { logs, .. } => logs,
-            ExecutionResult::Halt { reason, gas_used } => {
+            ExecutionResult::Halt { reason, gas: gas_used, ..} => {
                 panic!(
                     "Transaction halted with reason: {:?}, gas_used: {}",
                     reason, gas_used
                 );
             }
-            ExecutionResult::Revert { output, gas_used } => {
+            ExecutionResult::Revert { output, gas: gas_used, ..} => {
                 panic!(
                     "Transaction reverted with output: {:?}, gas_used: {}",
                     output, gas_used

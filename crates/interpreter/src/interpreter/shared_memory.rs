@@ -1,4 +1,6 @@
 use super::MemoryTr;
+use crate::InstructionResult;
+use context_interface::cfg::GasParams;
 use core::{
     cell::{Ref, RefCell, RefMut},
     cmp::min,
@@ -114,11 +116,7 @@ impl MemoryTr for SharedMemory {
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     fn global_slice(&self, range: Range<usize>) -> Ref<'_, [u8]> {
-        let buffer = self.buffer_ref();
-        Ref::map(buffer, |b| match b.get(range) {
-            Some(slice) => slice,
-            None => debug_unreachable!("slice OOB: range; len: {}", self.len()),
-        })
+        self.global_slice_range(range)
     }
 
     fn resize(&mut self, new_size: usize) -> bool {
@@ -222,6 +220,20 @@ impl SharedMemory {
         self.buffer().dbg_borrow_mut()
     }
 
+    /// Returns a byte slice of the backing buffer, applying `base` to `range`.
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn slice_range_with_base(&self, range: Range<usize>, base: usize) -> Ref<'_, [u8]> {
+        let buffer = self.buffer_ref();
+        Ref::map(buffer, |b| {
+            let range = range.start + base..range.end + base;
+            match b.get(range.clone()) {
+                Some(slice) => slice,
+                None => debug_unreachable!("slice OOB: {range:?}; len: {}", self.len()),
+            }
+        })
+    }
+
     /// Prepares the shared memory for a new child context.
     ///
     /// # Panics
@@ -304,13 +316,7 @@ impl SharedMemory {
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn slice_range(&self, range: Range<usize>) -> Ref<'_, [u8]> {
-        let buffer = self.buffer_ref();
-        Ref::map(buffer, |b| {
-            match b.get(range.start + self.my_checkpoint..range.end + self.my_checkpoint) {
-                Some(slice) => slice,
-                None => debug_unreachable!("slice OOB: range; len: {}", self.len()),
-            }
-        })
+        self.slice_range_with_base(range, self.my_checkpoint)
     }
 
     /// Returns a byte slice of the memory region at the given offset.
@@ -326,11 +332,7 @@ impl SharedMemory {
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn global_slice_range(&self, range: Range<usize>) -> Ref<'_, [u8]> {
-        let buffer = self.buffer_ref();
-        Ref::map(buffer, |b| match b.get(range) {
-            Some(slice) => slice,
-            None => debug_unreachable!("slice OOB: range; len: {}", self.len()),
-        })
+        self.slice_range_with_base(range, 0)
     }
 
     /// Returns a byte slice of the memory region at the given offset.
@@ -556,24 +558,29 @@ unsafe fn set_data(dst: &mut [u8], src: &[u8], dst_offset: usize, src_offset: us
 /// i.e. it rounds up the number bytes to number of words.
 #[inline]
 pub const fn num_words(len: usize) -> usize {
-    len.saturating_add(31) / 32
+    len.div_ceil(32)
 }
 
 /// Performs EVM memory resize.
 #[inline]
-#[must_use]
 pub fn resize_memory<Memory: MemoryTr>(
     gas: &mut crate::Gas,
     memory: &mut Memory,
+    gas_table: &GasParams,
     offset: usize,
     len: usize,
-) -> bool {
+) -> Result<(), InstructionResult> {
+    #[cfg(feature = "memory_limit")]
+    if memory.limit_reached(offset, len) {
+        return Err(InstructionResult::MemoryLimitOOG);
+    }
+
     let new_num_words = num_words(offset.saturating_add(len));
     if new_num_words > gas.memory().words_num {
-        resize_memory_cold(gas, memory, new_num_words)
-    } else {
-        true
+        return resize_memory_cold(gas, memory, gas_table, new_num_words);
     }
+
+    Ok(())
 }
 
 #[cold]
@@ -581,18 +588,21 @@ pub fn resize_memory<Memory: MemoryTr>(
 fn resize_memory_cold<Memory: MemoryTr>(
     gas: &mut crate::Gas,
     memory: &mut Memory,
+    gas_table: &GasParams,
     new_num_words: usize,
-) -> bool {
+) -> Result<(), InstructionResult> {
+    let cost = gas_table.memory_cost(new_num_words);
     let cost = unsafe {
         gas.memory_mut()
-            .record_new_len(new_num_words)
+            .set_words_num(new_num_words, cost)
             .unwrap_unchecked()
     };
-    if !gas.record_cost(cost) {
-        return false;
+
+    if !gas.record_regular_cost(cost) {
+        return Err(InstructionResult::MemoryOOG);
     }
     memory.resize(new_num_words * 32);
-    true
+    Ok(())
 }
 
 #[cfg(test)]
@@ -609,7 +619,9 @@ mod tests {
         assert_eq!(num_words(63), 2);
         assert_eq!(num_words(64), 2);
         assert_eq!(num_words(65), 3);
-        assert_eq!(num_words(usize::MAX), usize::MAX / 32);
+        assert_eq!(num_words(usize::MAX - 31), usize::MAX / 32);
+        assert_eq!(num_words(usize::MAX - 30), (usize::MAX / 32) + 1);
+        assert_eq!(num_words(usize::MAX), (usize::MAX / 32) + 1);
     }
 
     #[test]

@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [34.0.0](https://github.com/bluealloy/revm/compare/revm-precompile-v33.0.0...revm-precompile-v34.0.0) - 2026-04-17
+
+### Fixed
+
+- re-add PrecompileOutput::gas_refunded ([#3574](https://github.com/bluealloy/revm/pull/3574))
+
+## [33.0.0](https://github.com/bluealloy/revm/compare/revm-precompile-v32.1.0...revm-precompile-v33.0.0) - 2026-04-10
+
+### Added
+
+- add EIP-8037 / TIP-1016 state gas support ([#3406](https://github.com/bluealloy/revm/pull/3406))
+- add crate-level re-exports for all revm-* dependencies ([#3507](https://github.com/bluealloy/revm/pull/3507))
+
+### Other
+
+- move EIP-8037 gas cap validation into validate_initial_tx_gas ([#3552](https://github.com/bluealloy/revm/pull/3552))
+- *(precompile)* take large array args by reference ([#3524](https://github.com/bluealloy/revm/pull/3524))
+- add secp256r1 (P256) precompile benchmark ([#3525](https://github.com/bluealloy/revm/pull/3525))
+- use AnyError for PrecompileError::Fatal and EVMError::Custom ([#3502](https://github.com/bluealloy/revm/pull/3502))
+- clarify PrecompileError::Fatal vs Other and EVMError::Custom ([#3496](https://github.com/bluealloy/revm/pull/3496))
+
+## [32.1.0](https://github.com/bluealloy/revm/compare/revm-precompile-v32.0.0...revm-precompile-v32.1.0) - 2026-03-02
+
+### Added
+
+- *(precompile)* add aws-lc-rs as alternative backend for secp256r1 ([#3451](https://github.com/bluealloy/revm/pull/3451))
+
+### Fixed
+
+- *(precompile)* use big-endian resize for modexp output padding ([#3432](https://github.com/bluealloy/revm/pull/3432))
+
+### Other
+
+- remove GPL mention and update gmp feature comments ([#3383](https://github.com/bluealloy/revm/pull/3383))
+- *(precompile)* zero-copy scalar conversion in BLS12-381 MSM ([#3359](https://github.com/bluealloy/revm/pull/3359))
+- use fixed bytes hashmaps from alloy-core ([#3358](https://github.com/bluealloy/revm/pull/3358))
+- *(precompiles)* cache trusted setup G2 for kzg ([#3322](https://github.com/bluealloy/revm/pull/3322))
+- rename misleading calc_linear_cost_u32 function ([#3318](https://github.com/bluealloy/revm/pull/3318))
+
+## [32.0.0](https://github.com/bluealloy/revm/compare/revm-precompile-v31.0.0...revm-precompile-v32.0.0) - 2026-01-15
+
+### Added
+
+- rm gmp use-system-libs ([#3253](https://github.com/bluealloy/revm/pull/3253))
+- dynamically link gmp ([#3250](https://github.com/bluealloy/revm/pull/3250))
+
+### Other
+
+- *(precompile)* extract common pairing_check_bytes logic in bls12_381 ([#3301](https://github.com/bluealloy/revm/pull/3301))
+- apply improvements from ai-bot labeled PRs ([#3297](https://github.com/bluealloy/revm/pull/3297))
+- fix typos, grammar errors, and improve documentation consistency ([#3294](https://github.com/bluealloy/revm/pull/3294))
+- happy new year, 2026 licence ([#3272](https://github.com/bluealloy/revm/pull/3272))
+- optimize vector initialization using size hints ([#3200](https://github.com/bluealloy/revm/pull/3200))
+- optimize precompile `extend()` ([#3192](https://github.com/bluealloy/revm/pull/3192))
+- optimize vector initialization with size hints in state and precompile modules ([#3191](https://github.com/bluealloy/revm/pull/3191))
+- *(fmt)* merge all imports ([#3184](https://github.com/bluealloy/revm/pull/3184))
+
+## [31.0.0](https://github.com/bluealloy/revm/compare/revm-precompile-v29.0.1...revm-precompile-v31.0.0) - 2025-11-10
+
+### Added
+
+- *(precompiles)* add performant PrecompileError::OtherCowStr variant ([#3144](https://github.com/bluealloy/revm/pull/3144))
+- add gas refund to PrecompileOutput ([#3152](https://github.com/bluealloy/revm/pull/3152))
+
+### Other
+
+- merge v98 versions bumps ([#3155](https://github.com/bluealloy/revm/pull/3155))
+
 ## [29.0.1](https://github.com/bluealloy/revm/compare/revm-precompile-v29.0.0...revm-precompile-v29.0.1) - 2025-11-07
 
 ### Other

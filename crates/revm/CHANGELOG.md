@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [38.0.0](https://github.com/bluealloy/revm/compare/revm-v37.0.0...revm-v38.0.0) - 2026-04-17
+
+### Other
+
+- updated the following local packages: revm-state, revm-context-interface, revm-interpreter, revm-precompile, revm-handler, revm-inspector, revm-database-interface, revm-context, revm-database, revm-statetest-types
+
+## [37.0.0](https://github.com/bluealloy/revm/compare/revm-v36.0.0...revm-v37.0.0) - 2026-04-10
+
+### Other
+
+- updated the following local packages: revm-primitives, revm-bytecode, revm-database-interface, revm-context-interface, revm-context, revm-database, revm-interpreter, revm-precompile, revm-handler, revm-inspector, revm-statetest-types, revm-state
+
+## [36.0.0](https://github.com/bluealloy/revm/compare/revm-v35.0.0...revm-v36.0.0) - 2026-03-04
+
+### Other
+
+- bump revm-database-interface to v10.0.0
+
+## [35.0.0](https://github.com/bluealloy/revm/compare/revm-v34.0.0...revm-v35.0.0) - 2026-03-02
+
+### Added
+
+- *(precompile)* add aws-lc-rs as alternative backend for secp256r1 ([#3451](https://github.com/bluealloy/revm/pull/3451))
+
+### Other
+
+- remove GPL mention and update gmp feature comments ([#3383](https://github.com/bluealloy/revm/pull/3383))
+
+## [34.0.0](https://github.com/bluealloy/revm/compare/revm-v33.1.0...revm-v34.0.0) - 2026-01-15
+
+### Added
+
+- Propagate `map-foldhash` Feature Through Dependency Chain ([#3252](https://github.com/bluealloy/revm/pull/3252))
+- dynamically link gmp ([#3250](https://github.com/bluealloy/revm/pull/3250))
+
+### Other
+
+- fix typos, grammar errors, and improve documentation consistency ([#3294](https://github.com/bluealloy/revm/pull/3294))
+- happy new year, 2026 licence ([#3272](https://github.com/bluealloy/revm/pull/3272))
+- re-export statetest-types from revm crate behind test-types feature ([#3247](https://github.com/bluealloy/revm/pull/3247))
+- *(fmt)* merge all imports ([#3184](https://github.com/bluealloy/revm/pull/3184))
+
+## [33.1.0](https://github.com/bluealloy/revm/compare/revm-v33.0.0...revm-v33.1.0) - 2025-11-14
+
+### Fixed
+
+- expose optional_priority_fee_check feature from context crate ([#3159](https://github.com/bluealloy/revm/pull/3159))
+
+## [33.0.0](https://github.com/bluealloy/revm/compare/revm-v31.0.2...revm-v33.0.0) - 2025-11-10
+
+### Other
+
+- updated the following local packages: revm-context-interface, revm-context, revm-interpreter, revm-precompile, revm-handler, revm-inspector
+
 ## [31.0.2](https://github.com/bluealloy/revm/compare/revm-v31.0.1...revm-v31.0.2) - 2025-11-10
 
 ### Other

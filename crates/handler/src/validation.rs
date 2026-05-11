@@ -4,7 +4,7 @@ use context_interface::{
     Block, Cfg, ContextTr,
 };
 use core::cmp;
-use interpreter::gas::{self, InitialAndFloorGas};
+use interpreter::{instructions::calculate_initial_tx_gas_for_tx, InitialAndFloorGas};
 use primitives::{eip4844, hardfork::SpecId, B256};
 
 /// Validates the execution environment including block and transaction parameters.
@@ -61,6 +61,21 @@ pub fn validate_priority_fee_tx(
     Ok(())
 }
 
+/// Validate priority fee for transactions that support EIP-1559 (Eip1559, Eip4844, Eip7702).
+#[inline]
+fn validate_priority_fee_for_tx<TX: Transaction>(
+    tx: TX,
+    base_fee: Option<u128>,
+    disable_priority_fee_check: bool,
+) -> Result<(), InvalidTransaction> {
+    validate_priority_fee_tx(
+        tx.max_fee_per_gas(),
+        tx.max_priority_fee_per_gas().unwrap_or_default(),
+        base_fee,
+        disable_priority_fee_check,
+    )
+}
+
 /// Validate EIP-4844 transaction.
 pub fn validate_eip4844_tx(
     blobs: &[B256],
@@ -107,8 +122,8 @@ pub fn validate_tx_env<CTX: ContextTr>(
     spec_id: SpecId,
 ) -> Result<(), InvalidTransaction> {
     // Check if the transaction's chain id is correct
-    let tx_type = context.tx().tx_type();
     let tx = context.tx();
+    let tx_type = tx.tx_type();
 
     let base_fee = if context.cfg().is_base_fee_check_disabled() {
         None
@@ -131,13 +146,16 @@ pub fn validate_tx_env<CTX: ContextTr>(
         }
     }
 
-    // EIP-7825: Transaction Gas Limit Cap
-    let cap = context.cfg().tx_gas_limit_cap();
-    if tx.gas_limit() > cap {
-        return Err(InvalidTransaction::TxGasLimitGreaterThanCap {
-            gas_limit: tx.gas_limit(),
-            cap,
-        });
+    // tx gas cap is not enforced if state gas is enabled.
+    if !context.cfg().is_amsterdam_eip8037_enabled() {
+        // EIP-7825: Transaction Gas Limit Cap
+        let cap = context.cfg().tx_gas_limit_cap();
+        if tx.gas_limit() > cap {
+            return Err(InvalidTransaction::TxGasLimitGreaterThanCap {
+                gas_limit: tx.gas_limit(),
+                cap,
+            });
+        }
     }
 
     let disable_priority_fee_check = context.cfg().is_priority_fee_check_disabled();
@@ -157,24 +175,14 @@ pub fn validate_tx_env<CTX: ContextTr>(
             if !spec_id.is_enabled_in(SpecId::LONDON) {
                 return Err(InvalidTransaction::Eip1559NotSupported);
             }
-            validate_priority_fee_tx(
-                tx.max_fee_per_gas(),
-                tx.max_priority_fee_per_gas().unwrap_or_default(),
-                base_fee,
-                disable_priority_fee_check,
-            )?;
+            validate_priority_fee_for_tx(tx, base_fee, disable_priority_fee_check)?;
         }
         TransactionType::Eip4844 => {
             if !spec_id.is_enabled_in(SpecId::CANCUN) {
                 return Err(InvalidTransaction::Eip4844NotSupported);
             }
 
-            validate_priority_fee_tx(
-                tx.max_fee_per_gas(),
-                tx.max_priority_fee_per_gas().unwrap_or_default(),
-                base_fee,
-                disable_priority_fee_check,
-            )?;
+            validate_priority_fee_for_tx(tx, base_fee, disable_priority_fee_check)?;
 
             validate_eip4844_tx(
                 tx.blob_versioned_hashes(),
@@ -189,12 +197,7 @@ pub fn validate_tx_env<CTX: ContextTr>(
                 return Err(InvalidTransaction::Eip7702NotSupported);
             }
 
-            validate_priority_fee_tx(
-                tx.max_fee_per_gas(),
-                tx.max_priority_fee_per_gas().unwrap_or_default(),
-                base_fee,
-                disable_priority_fee_check,
-            )?;
+            validate_priority_fee_for_tx(tx, base_fee, disable_priority_fee_check)?;
 
             let auth_list_len = tx.authorization_list_len();
             // The transaction is considered invalid if the length of authorization_list is zero.
@@ -208,6 +211,8 @@ pub fn validate_tx_env<CTX: ContextTr>(
     };
 
     // Check if gas_limit is more than block_gas_limit
+    // TODO(eip8037) should we enforce to `min(tx.gas_limit(), 16M) < block.gas_limit`?
+    // This would enforce that regular gas is constrained.
     if !context.cfg().is_block_gas_limit_disabled() && tx.gas_limit() > context.block().gas_limit()
     {
         return Err(InvalidTransaction::CallerGasLimitMoreThanBlock);
@@ -216,9 +221,15 @@ pub fn validate_tx_env<CTX: ContextTr>(
     // EIP-3860: Limit and meter initcode. Still valid with EIP-7907 and increase of initcode size.
     if spec_id.is_enabled_in(SpecId::SHANGHAI)
         && tx.kind().is_create()
-        && context.tx().input().len() > context.cfg().max_initcode_size()
+        && tx.input().len() > context.cfg().max_initcode_size()
     {
         return Err(InvalidTransaction::CreateInitCodeSizeLimit);
+    }
+
+    // Check that the transaction's nonce is not at the maximum value.
+    // Incrementing the nonce would overflow. Can't happen in the real world.
+    if tx.nonce() == u64::MAX {
+        return Err(InvalidTransaction::NonceOverflowInTransaction);
     }
 
     Ok(())
@@ -229,18 +240,20 @@ pub fn validate_initial_tx_gas(
     tx: impl Transaction,
     spec: SpecId,
     is_eip7623_disabled: bool,
+    is_amsterdam_eip8037_enabled: bool,
+    tx_gas_limit_cap: u64,
 ) -> Result<InitialAndFloorGas, InvalidTransaction> {
-    let mut gas = gas::calculate_initial_tx_gas_for_tx(&tx, spec);
+    let mut gas = calculate_initial_tx_gas_for_tx(&tx, spec);
 
     if is_eip7623_disabled {
         gas.floor_gas = 0
     }
 
     // Additional check to see if limit is big enough to cover initial gas.
-    if gas.initial_gas > tx.gas_limit() {
+    if gas.initial_total_gas > tx.gas_limit() {
         return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
             gas_limit: tx.gas_limit(),
-            initial_gas: gas.initial_gas,
+            initial_gas: gas.initial_total_gas,
         });
     }
 
@@ -252,6 +265,19 @@ pub fn validate_initial_tx_gas(
             gas_limit: tx.gas_limit(),
         });
     };
+
+    // EIP-8037: Regular gas is capped at TX_MAX_GAS_LIMIT.
+    // Validate that both intrinsic regular gas and floor gas fit within the cap.
+    // State gas is excluded — it uses its own reservoir.
+    if is_amsterdam_eip8037_enabled && tx.gas_limit() > tx_gas_limit_cap {
+        let min_regular_gas = gas.initial_regular_gas().max(gas.floor_gas);
+        if min_regular_gas > tx_gas_limit_cap {
+            return Err(InvalidTransaction::GasFloorMoreThanGasLimit {
+                gas_floor: min_regular_gas,
+                gas_limit: tx_gas_limit_cap,
+            });
+        }
+    }
 
     Ok(gas)
 }
@@ -265,7 +291,7 @@ mod tests {
         Context, ContextTr, TxEnv,
     };
     use database::{CacheDB, EmptyDB};
-    use primitives::{address, eip3860, eip7907, hardfork::SpecId, Bytes, TxKind, B256};
+    use primitives::{address, eip3860, eip7954, hardfork::SpecId, Bytes, TxKind, B256};
     use state::{AccountInfo, Bytecode};
 
     fn deploy_contract(
@@ -275,7 +301,7 @@ mod tests {
         let ctx = Context::mainnet()
             .modify_cfg_chained(|c| {
                 if let Some(spec_id) = spec_id {
-                    c.spec = spec_id;
+                    c.set_spec_and_mainnet_gas_params(spec_id);
                 }
             })
             .with_db(CacheDB::<EmptyDB>::default());
@@ -312,10 +338,10 @@ mod tests {
     }
 
     #[test]
-    fn test_eip7907_initcode_size_limit_failure_osaka() {
-        let large_bytecode = vec![opcode::STOP; eip7907::MAX_INITCODE_SIZE + 1];
+    fn test_eip7954_initcode_size_limit_failure_amsterdam() {
+        let large_bytecode = vec![opcode::STOP; eip7954::MAX_INITCODE_SIZE + 1];
         let bytecode: Bytes = large_bytecode.into();
-        let result = deploy_contract(bytecode, Some(SpecId::OSAKA));
+        let result = deploy_contract(bytecode, Some(SpecId::AMSTERDAM));
         assert!(matches!(
             result,
             Err(EVMError::Transaction(
@@ -325,19 +351,50 @@ mod tests {
     }
 
     #[test]
-    fn test_eip7907_code_size_limit_failure() {
-        // EIP-7907: MAX_CODE_SIZE = 0x40000
-        // use the simplest method to return a contract code size greater than 0x40000
-        // PUSH3 0x40001 (greater than 0x40000) - return size
+    fn test_eip7954_initcode_size_limit_success_amsterdam() {
+        let large_bytecode = vec![opcode::STOP; eip7954::MAX_INITCODE_SIZE];
+        let bytecode: Bytes = large_bytecode.into();
+        let result = deploy_contract(bytecode, Some(SpecId::AMSTERDAM));
+        assert!(matches!(result, Ok(ExecutionResult::Success { .. })));
+    }
+
+    #[test]
+    fn test_eip7954_initcode_between_old_and_new_limit() {
+        // Size between old limit (0xC000) and new limit (0x10000):
+        // should fail pre-Amsterdam, succeed at Amsterdam
+        let size = eip3860::MAX_INITCODE_SIZE + 1; // 0xC001
+        let large_bytecode = vec![opcode::STOP; size];
+
+        // Pre-Amsterdam (Prague): should fail
+        let bytecode: Bytes = large_bytecode.clone().into();
+        let result = deploy_contract(bytecode, Some(SpecId::PRAGUE));
+        assert!(matches!(
+            result,
+            Err(EVMError::Transaction(
+                InvalidTransaction::CreateInitCodeSizeLimit
+            ))
+        ));
+
+        // Amsterdam: should succeed
+        let bytecode: Bytes = large_bytecode.into();
+        let result = deploy_contract(bytecode, Some(SpecId::AMSTERDAM));
+        assert!(matches!(result, Ok(ExecutionResult::Success { .. })));
+    }
+
+    #[test]
+    fn test_eip7954_code_size_limit_failure() {
+        // EIP-7954: MAX_CODE_SIZE = 0x8000
+        // use the simplest method to return a contract code size greater than 0x8000
+        // PUSH3 0x8001 (greater than 0x8000) - return size
         // PUSH1 0x00 - memory position 0
         // RETURN - return uninitialized memory, will be filled with 0
         let init_code = vec![
-            0x62, 0x04, 0x00, 0x01, // PUSH3 0x40001 (greater than 0x40000)
+            0x62, 0x00, 0x80, 0x01, // PUSH3 0x8001 (greater than 0x8000)
             0x60, 0x00, // PUSH1 0
             0xf3, // RETURN
         ];
         let bytecode: Bytes = init_code.into();
-        let result = deploy_contract(bytecode, Some(SpecId::OSAKA));
+        let result = deploy_contract(bytecode, Some(SpecId::AMSTERDAM));
         assert!(
             matches!(
                 result,

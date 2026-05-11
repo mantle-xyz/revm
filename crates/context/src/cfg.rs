@@ -1,12 +1,26 @@
 //! This module contains [`CfgEnv`] and implements [`Cfg`] trait for it.
 pub use context_interface::Cfg;
 
-use primitives::{eip170, eip3860, hardfork::SpecId};
+use context_interface::cfg::GasParams;
+use primitives::{eip170, eip3860, eip7954, hardfork::SpecId};
+
 /// EVM configuration
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct CfgEnv<SPEC = SpecId> {
+    /// Specification for EVM represent the hardfork
+    ///
+    /// [`CfgEnv::new_with_spec`] is going to set both gas params and spec.
+    ///
+    /// As GasParams is spec dependent, it is recommended to use one of following function to set both of them.
+    /// [`CfgEnv::set_spec_and_mainnet_gas_params`], [`CfgEnv::with_mainnet_gas_params`], [`CfgEnv::with_mainnet_gas_params`]
+    pub spec: SPEC,
+
+    /// Gas params for the EVM. Use [`CfgEnv::set_gas_params`] to set the gas params.
+    /// If gas_params was not set it will be set to the default gas params for the spec.
+    pub gas_params: GasParams,
+
     /// Chain ID of the EVM. Used in CHAINID opcode and transaction's chain ID check.
     ///
     /// Chain ID is introduced EIP-155.
@@ -17,11 +31,9 @@ pub struct CfgEnv<SPEC = SpecId> {
     /// If set to `false`, the transaction's chain ID check will be skipped.
     pub tx_chain_id_check: bool,
 
-    /// Specification for EVM represent the hardfork
-    pub spec: SPEC,
     /// Contract code size limit override.
     ///
-    /// If None, the limit will be determined by the SpecId (EIP-170 or EIP-7907) at runtime.
+    /// If None, the limit will be determined by the SpecId (EIP-170 or EIP-7954) at runtime.
     /// If Some, this specific limit will be used regardless of SpecId.
     ///
     /// Useful to increase this because of tests.
@@ -30,7 +42,7 @@ pub struct CfgEnv<SPEC = SpecId> {
     ///
     /// If None, the limit will check if `limit_contract_code_size` is set.
     /// If it is set, it will double it for a limit.
-    /// If it is not set, the limit will be determined by the SpecId (EIP-170 or EIP-7907) at runtime.
+    /// If it is not set, the limit will be determined by the SpecId (EIP-170 or EIP-7954) at runtime.
     ///
     /// Useful to increase this because of tests.
     pub limit_contract_initcode_size: Option<usize>,
@@ -118,6 +130,29 @@ pub struct CfgEnv<SPEC = SpecId> {
     /// By default, it is set to `false`.
     #[cfg(feature = "optional_fee_charge")]
     pub disable_fee_charge: bool,
+    /// Enables EIP-8037 (Amsterdam) state creation gas cost increase.
+    ///
+    /// EIP-8037 introduces dual gas limits: regular gas for execution and state gas
+    /// for storage creation. State gas is tracked via a reservoir model.
+    /// It specifies concrete gas values based on `cost_per_state_byte` and adds
+    /// a hash cost for deployed bytecode.
+    ///
+    /// By default, it is set to `false`.
+    pub enable_amsterdam_eip8037: bool,
+    /// Disables EIP-7708 (ETH transfers emit logs).
+    ///
+    /// By default, it is set to `false`.
+    pub amsterdam_eip7708_disabled: bool,
+    /// Disables EIP-7708 delayed burn logging.
+    ///
+    /// When enabled, revm tracks all self-destructed addresses and emits logs for
+    /// accounts that still have remaining balance at the end of the transaction.
+    /// This can be disabled for performance reasons as it requires storing and
+    /// iterating over all self-destructed accounts. When disabled, the logging
+    /// can be done outside of revm when applying accounts to database state.
+    ///
+    /// By default, it is set to `false`.
+    pub amsterdam_eip7708_delayed_burn_disabled: bool,
 }
 
 impl CfgEnv {
@@ -127,63 +162,37 @@ impl CfgEnv {
     }
 }
 
-impl<SPEC: Into<SpecId> + Copy> CfgEnv<SPEC> {
-    /// Returns the blob base fee update fraction from [CfgEnv::blob_base_fee_update_fraction].
-    ///
-    /// If this field is not set, return the default value for the spec.
-    ///
-    /// Default values for Cancun is [`primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN`]
-    /// and for Prague is [`primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE`].
-    pub fn blob_base_fee_update_fraction(&mut self) -> u64 {
-        self.blob_base_fee_update_fraction.unwrap_or_else(|| {
-            let spec: SpecId = self.spec.into();
-            if spec.is_enabled_in(SpecId::PRAGUE) {
-                primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE
-            } else {
-                primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN
-            }
-        })
-    }
-}
-
 impl<SPEC> CfgEnv<SPEC> {
-    /// Create new `CfgEnv` with default values and specified spec.
-    pub fn new_with_spec(spec: SPEC) -> Self {
-        Self {
-            chain_id: 1,
-            tx_chain_id_check: true,
-            limit_contract_code_size: None,
-            limit_contract_initcode_size: None,
-            spec,
-            disable_nonce_check: false,
-            max_blobs_per_tx: None,
-            tx_gas_limit_cap: None,
-            blob_base_fee_update_fraction: None,
-            #[cfg(feature = "memory_limit")]
-            memory_limit: (1 << 32) - 1,
-            #[cfg(feature = "optional_balance_check")]
-            disable_balance_check: false,
-            #[cfg(feature = "optional_block_gas_limit")]
-            disable_block_gas_limit: false,
-            #[cfg(feature = "optional_eip3541")]
-            disable_eip3541: false,
-            #[cfg(feature = "optional_eip3607")]
-            disable_eip3607: false,
-            #[cfg(feature = "optional_eip7623")]
-            disable_eip7623: false,
-            #[cfg(feature = "optional_no_base_fee")]
-            disable_base_fee: false,
-            #[cfg(feature = "optional_priority_fee_check")]
-            disable_priority_fee_check: false,
-            #[cfg(feature = "optional_fee_charge")]
-            disable_fee_charge: false,
-        }
+    /// Returns the spec for the `CfgEnv`.
+    #[inline]
+    pub fn spec(&self) -> &SPEC {
+        &self.spec
     }
 
     /// Consumes `self` and returns a new `CfgEnv` with the specified chain ID.
     pub fn with_chain_id(mut self, chain_id: u64) -> Self {
         self.chain_id = chain_id;
         self
+    }
+
+    /// Sets the gas params for the `CfgEnv`.
+    #[inline]
+    pub fn with_gas_params(mut self, gas_params: GasParams) -> Self {
+        self.set_gas_params(gas_params);
+        self
+    }
+
+    /// Sets the spec for the `CfgEnv`.
+    #[inline]
+    #[deprecated(note = "Use [`CfgEnv::set_spec_and_mainnet_gas_params`] instead")]
+    pub fn set_spec(&mut self, spec: SPEC) {
+        self.spec = spec;
+    }
+
+    /// Sets the gas params for the `CfgEnv`.
+    #[inline]
+    pub fn set_gas_params(&mut self, gas_params: GasParams) {
+        self.gas_params = gas_params;
     }
 
     /// Enables the transaction's chain ID check.
@@ -198,8 +207,36 @@ impl<SPEC> CfgEnv<SPEC> {
         self
     }
 
+    /// Sets the spec for the `CfgEnv`.
+    #[inline]
+    #[deprecated(note = "Use [`CfgEnv::with_spec_and_mainnet_gas_params`] instead")]
+    pub fn with_spec(mut self, spec: SPEC) -> Self {
+        self.spec = spec;
+        self
+    }
+
+    /// Sets the spec for the `CfgEnv` and the gas params to the mainnet gas params.
+    ///
+    /// Automatically enables EIP-8037 for AMSTERDAM and later.
+    pub fn with_spec_and_mainnet_gas_params<OSPEC: Into<SpecId> + Clone>(
+        self,
+        spec: OSPEC,
+    ) -> CfgEnv<OSPEC> {
+        let is_amsterdam = spec.clone().into().is_enabled_in(SpecId::AMSTERDAM);
+        let enable_amsterdam_eip8037 = self.enable_amsterdam_eip8037 || is_amsterdam;
+        let mut cfg = self.with_spec_and_gas_params(spec.clone(), GasParams::new_spec(spec.into()));
+        cfg.enable_amsterdam_eip8037 = enable_amsterdam_eip8037;
+        cfg
+    }
+
     /// Consumes `self` and returns a new `CfgEnv` with the specified spec.
-    pub fn with_spec<OSPEC: Into<SpecId>>(self, spec: OSPEC) -> CfgEnv<OSPEC> {
+    ///
+    /// Resets the gas params override function as it is generic over SPEC.
+    pub fn with_spec_and_gas_params<OSPEC: Into<SpecId> + Clone>(
+        self,
+        spec: OSPEC,
+        gas_params: GasParams,
+    ) -> CfgEnv<OSPEC> {
         CfgEnv {
             chain_id: self.chain_id,
             tx_chain_id_check: self.tx_chain_id_check,
@@ -210,6 +247,7 @@ impl<SPEC> CfgEnv<SPEC> {
             tx_gas_limit_cap: self.tx_gas_limit_cap,
             max_blobs_per_tx: self.max_blobs_per_tx,
             blob_base_fee_update_fraction: self.blob_base_fee_update_fraction,
+            gas_params,
             #[cfg(feature = "memory_limit")]
             memory_limit: self.memory_limit,
             #[cfg(feature = "optional_balance_check")]
@@ -228,6 +266,9 @@ impl<SPEC> CfgEnv<SPEC> {
             disable_priority_fee_check: self.disable_priority_fee_check,
             #[cfg(feature = "optional_fee_charge")]
             disable_fee_charge: self.disable_fee_charge,
+            enable_amsterdam_eip8037: self.enable_amsterdam_eip8037,
+            amsterdam_eip7708_disabled: self.amsterdam_eip7708_disabled,
+            amsterdam_eip7708_delayed_burn_disabled: self.amsterdam_eip7708_delayed_burn_disabled,
         }
     }
 
@@ -267,9 +308,101 @@ impl<SPEC> CfgEnv<SPEC> {
         self.disable_eip7623 = disable;
         self
     }
+
+    /// Sets the enable EIP-8037 (Amsterdam) state creation gas cost flag.
+    pub fn with_enable_amsterdam_eip8037(mut self, enable: bool) -> Self {
+        self.enable_amsterdam_eip8037 = enable;
+        self
+    }
 }
 
-impl<SPEC: Into<SpecId> + Copy> Cfg for CfgEnv<SPEC> {
+impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
+    /// Create new `CfgEnv` with default values and specified spec.
+    pub fn new_with_spec_and_gas_params(spec: SPEC, gas_params: GasParams) -> Self {
+        let is_amsterdam = spec.clone().into().is_enabled_in(SpecId::AMSTERDAM);
+        Self {
+            chain_id: 1,
+            tx_chain_id_check: true,
+            limit_contract_code_size: None,
+            limit_contract_initcode_size: None,
+            spec,
+            disable_nonce_check: false,
+            max_blobs_per_tx: None,
+            tx_gas_limit_cap: None,
+            blob_base_fee_update_fraction: None,
+            gas_params,
+            #[cfg(feature = "memory_limit")]
+            memory_limit: (1 << 32) - 1,
+            #[cfg(feature = "optional_balance_check")]
+            disable_balance_check: false,
+            #[cfg(feature = "optional_block_gas_limit")]
+            disable_block_gas_limit: false,
+            #[cfg(feature = "optional_eip3541")]
+            disable_eip3541: false,
+            #[cfg(feature = "optional_eip3607")]
+            disable_eip3607: false,
+            #[cfg(feature = "optional_eip7623")]
+            disable_eip7623: false,
+            #[cfg(feature = "optional_no_base_fee")]
+            disable_base_fee: false,
+            #[cfg(feature = "optional_priority_fee_check")]
+            disable_priority_fee_check: false,
+            #[cfg(feature = "optional_fee_charge")]
+            disable_fee_charge: false,
+            enable_amsterdam_eip8037: is_amsterdam,
+            amsterdam_eip7708_disabled: false,
+            amsterdam_eip7708_delayed_burn_disabled: false,
+        }
+    }
+
+    /// Returns the blob base fee update fraction from [CfgEnv::blob_base_fee_update_fraction].
+    ///
+    /// If this field is not set, return the default value for the spec.
+    ///
+    /// Default values for Cancun is [`primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN`]
+    /// and for Prague is [`primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE`].
+    pub fn blob_base_fee_update_fraction(&mut self) -> u64 {
+        self.blob_base_fee_update_fraction.unwrap_or_else(|| {
+            let spec: SpecId = self.spec.clone().into();
+            if spec.is_enabled_in(SpecId::PRAGUE) {
+                primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE
+            } else {
+                primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN
+            }
+        })
+    }
+
+    /// Create new `CfgEnv` with default values and specified spec.
+    /// It will create a new gas params based on mainnet spec.
+    ///
+    /// Internally it will call [`CfgEnv::new_with_spec_and_gas_params`] with the mainnet gas params.
+    pub fn new_with_spec(spec: SPEC) -> Self {
+        Self::new_with_spec_and_gas_params(spec.clone(), GasParams::new_spec(spec.into()))
+    }
+
+    /// Sets the gas params for the `CfgEnv` to the mainnet gas params.
+    ///
+    /// If spec gets changed, calling this function would use this spec to set the mainnetF gas params.
+    pub fn with_mainnet_gas_params(mut self) -> Self {
+        self.set_gas_params(GasParams::new_spec(self.spec.clone().into()));
+        self
+    }
+
+    /// Sets the spec for the `CfgEnv` and the gas params to the mainnet gas params.
+    ///
+    /// Automatically enables EIP-8037 for AMSTERDAM and later.
+    #[inline]
+    pub fn set_spec_and_mainnet_gas_params(&mut self, spec: SPEC) {
+        self.spec = spec.clone();
+        self.set_gas_params(GasParams::new_spec(spec.clone().into()));
+        // EIP-8037: Enable EIP-8037 for AMSTERDAM and later
+        if spec.into().is_enabled_in(SpecId::AMSTERDAM) {
+            self.enable_amsterdam_eip8037 = true;
+        }
+    }
+}
+
+impl<SPEC: Into<SpecId> + Clone> Cfg for CfgEnv<SPEC> {
     type Spec = SPEC;
 
     #[inline]
@@ -279,7 +412,7 @@ impl<SPEC: Into<SpecId> + Copy> Cfg for CfgEnv<SPEC> {
 
     #[inline]
     fn spec(&self) -> Self::Spec {
-        self.spec
+        self.spec.clone()
     }
 
     #[inline]
@@ -299,8 +432,13 @@ impl<SPEC: Into<SpecId> + Copy> Cfg for CfgEnv<SPEC> {
     }
 
     fn max_code_size(&self) -> usize {
-        self.limit_contract_code_size
-            .unwrap_or(eip170::MAX_CODE_SIZE)
+        self.limit_contract_code_size.unwrap_or(
+            if self.spec.clone().into().is_enabled_in(SpecId::AMSTERDAM) {
+                eip7954::MAX_CODE_SIZE
+            } else {
+                eip170::MAX_CODE_SIZE
+            },
+        )
     }
 
     fn max_initcode_size(&self) -> usize {
@@ -309,7 +447,13 @@ impl<SPEC: Into<SpecId> + Copy> Cfg for CfgEnv<SPEC> {
                 self.limit_contract_code_size
                     .map(|size| size.saturating_mul(2))
             })
-            .unwrap_or(eip3860::MAX_INITCODE_SIZE)
+            .unwrap_or(
+                if self.spec.clone().into().is_enabled_in(SpecId::AMSTERDAM) {
+                    eip7954::MAX_INITCODE_SIZE
+                } else {
+                    eip3860::MAX_INITCODE_SIZE
+                },
+            )
     }
 
     fn is_eip3541_disabled(&self) -> bool {
@@ -397,6 +541,14 @@ impl<SPEC: Into<SpecId> + Copy> Cfg for CfgEnv<SPEC> {
         }
     }
 
+    fn is_eip7708_disabled(&self) -> bool {
+        self.amsterdam_eip7708_disabled
+    }
+
+    fn is_eip7708_delayed_burn_disabled(&self) -> bool {
+        self.amsterdam_eip7708_delayed_burn_disabled
+    }
+
     fn memory_limit(&self) -> u64 {
         cfg_if::cfg_if! {
             if #[cfg(feature = "memory_limit")] {
@@ -406,11 +558,23 @@ impl<SPEC: Into<SpecId> + Copy> Cfg for CfgEnv<SPEC> {
             }
         }
     }
+
+    #[inline]
+    fn gas_params(&self) -> &GasParams {
+        &self.gas_params
+    }
+
+    fn is_amsterdam_eip8037_enabled(&self) -> bool {
+        self.enable_amsterdam_eip8037
+    }
 }
 
-impl<SPEC: Default> Default for CfgEnv<SPEC> {
+impl<SPEC: Default + Into<SpecId> + Clone> Default for CfgEnv<SPEC> {
     fn default() -> Self {
-        Self::new_with_spec(SPEC::default())
+        Self::new_with_spec_and_gas_params(
+            SPEC::default(),
+            GasParams::new_spec(SPEC::default().into()),
+        )
     }
 }
 

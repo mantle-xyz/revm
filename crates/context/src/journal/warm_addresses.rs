@@ -3,7 +3,10 @@
 //! It is used to optimize access to precompile addresses.
 
 use bitvec::{bitvec, vec::BitVec};
-use primitives::{short_address, Address, HashMap, HashSet, StorageKey, SHORT_ADDRESS_CAP};
+use context_interface::journaled_state::JournalLoadError;
+use primitives::{
+    short_address, Address, AddressMap, AddressSet, HashSet, StorageKey, SHORT_ADDRESS_CAP,
+};
 
 /// Stores addresses that are warm loaded. Contains precompiles and coinbase address.
 ///
@@ -18,7 +21,7 @@ use primitives::{short_address, Address, HashMap, HashSet, StorageKey, SHORT_ADD
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WarmAddresses {
     /// Set of warm loaded precompile addresses.
-    precompile_set: HashSet<Address>,
+    precompile_set: AddressSet,
     /// Bit vector of precompile short addresses. If address is shorter than [`SHORT_ADDRESS_CAP`] it
     /// will be stored in this bit vector for faster access.
     precompile_short_addresses: BitVec,
@@ -27,7 +30,7 @@ pub struct WarmAddresses {
     /// Coinbase address.
     coinbase: Option<Address>,
     /// Access list
-    access_list: HashMap<Address, HashSet<StorageKey>>,
+    access_list: AddressMap<HashSet<StorageKey>>,
 }
 
 impl Default for WarmAddresses {
@@ -41,17 +44,17 @@ impl WarmAddresses {
     #[inline]
     pub fn new() -> Self {
         Self {
-            precompile_set: HashSet::default(),
+            precompile_set: AddressSet::default(),
             precompile_short_addresses: bitvec![0; SHORT_ADDRESS_CAP],
             precompile_all_short_addresses: true,
             coinbase: None,
-            access_list: HashMap::default(),
+            access_list: AddressMap::default(),
         }
     }
 
     /// Returns the precompile addresses.
     #[inline]
-    pub fn precompiles(&self) -> &HashSet<Address> {
+    pub fn precompiles(&self) -> &AddressSet {
         &self.precompile_set
     }
 
@@ -63,7 +66,7 @@ impl WarmAddresses {
 
     /// Set the precompile addresses and short addresses.
     #[inline]
-    pub fn set_precompile_addresses(&mut self, addresses: HashSet<Address>) {
+    pub fn set_precompile_addresses(&mut self, addresses: AddressSet) {
         self.precompile_short_addresses.fill(false);
 
         let mut all_short_addresses = true;
@@ -87,8 +90,14 @@ impl WarmAddresses {
 
     /// Set the access list.
     #[inline]
-    pub fn set_access_list(&mut self, access_list: HashMap<Address, HashSet<StorageKey>>) {
+    pub fn set_access_list(&mut self, access_list: AddressMap<HashSet<StorageKey>>) {
         self.access_list = access_list;
+    }
+
+    /// Returns the access list.
+    #[inline]
+    pub fn access_list(&self) -> &AddressMap<HashSet<StorageKey>> {
+        &self.access_list
     }
 
     /// Clear the coinbase address.
@@ -149,6 +158,22 @@ impl WarmAddresses {
     #[inline]
     pub fn is_cold(&self, address: &Address) -> bool {
         !self.is_warm(address)
+    }
+
+    /// Checks if the address is cold loaded and returns an error if it is and skip_cold_load is true.
+    #[inline(never)]
+    pub fn check_is_cold<E>(
+        &self,
+        address: &Address,
+        skip_cold_load: bool,
+    ) -> Result<bool, JournalLoadError<E>> {
+        let is_cold = self.is_cold(address);
+
+        if is_cold && skip_cold_load {
+            return Err(JournalLoadError::ColdLoadSkipped);
+        }
+
+        Ok(is_cold)
     }
 }
 

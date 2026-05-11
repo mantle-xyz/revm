@@ -9,6 +9,7 @@ mod runtime_flags;
 mod shared_memory;
 mod stack;
 
+use context_interface::cfg::GasParams;
 // re-exports
 pub use ext_bytecode::ExtBytecode;
 pub use input::InputsImpl;
@@ -114,6 +115,7 @@ impl<EXT: Default> Interpreter<EthInterpreter<EXT>> {
 
     /// Clears and reinitializes the interpreter with new parameters.
     #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     pub fn clear(
         &mut self,
         memory: SharedMemory,
@@ -122,6 +124,7 @@ impl<EXT: Default> Interpreter<EthInterpreter<EXT>> {
         is_static: bool,
         spec_id: SpecId,
         gas_limit: u64,
+        reservoir_remaining_gas: u64,
     ) {
         let Self {
             bytecode: bytecode_ref,
@@ -134,7 +137,7 @@ impl<EXT: Default> Interpreter<EthInterpreter<EXT>> {
             extend,
         } = self;
         *bytecode_ref = bytecode;
-        *gas = Gas::new(gas_limit);
+        *gas = Gas::new_with_regular_gas_and_reservoir(gas_limit, reservoir_remaining_gas);
         if stack.data().capacity() == 0 {
             *stack = Stack::new();
         } else {
@@ -151,11 +154,6 @@ impl<EXT: Default> Interpreter<EthInterpreter<EXT>> {
     pub fn with_bytecode(mut self, bytecode: Bytecode) -> Self {
         self.bytecode = ExtBytecode::new(bytecode);
         self
-    }
-
-    /// Sets the specid for the interpreter.
-    pub fn set_spec_id(&mut self, spec_id: SpecId) {
-        self.runtime_flag.spec_id = spec_id;
     }
 }
 
@@ -186,8 +184,13 @@ impl<IW: InterpreterTypes> Interpreter<IW> {
     /// Performs EVM memory resize.
     #[inline]
     #[must_use]
-    pub fn resize_memory(&mut self, offset: usize, len: usize) -> bool {
-        resize_memory(&mut self.gas, &mut self.memory, offset, len)
+    pub fn resize_memory(&mut self, gas_params: &GasParams, offset: usize, len: usize) -> bool {
+        if let Err(result) = resize_memory(&mut self.gas, &mut self.memory, gas_params, offset, len)
+        {
+            self.halt(result);
+            return false;
+        }
+        true
     }
 
     /// Takes the next action from the control and returns it.
@@ -311,7 +314,7 @@ impl<IW: InterpreterTypes> Interpreter<IW> {
     /// This uses dummy Host.
     #[inline]
     pub fn step_dummy(&mut self, instruction_table: &InstructionTable<IW, DummyHost>) {
-        self.step(instruction_table, &mut DummyHost);
+        self.step(instruction_table, &mut DummyHost::default());
     }
 
     /// Executes the interpreter until it returns or stops.
@@ -365,6 +368,15 @@ impl InterpreterResult {
             result,
             output,
             gas,
+        }
+    }
+
+    /// Returns a new `InterpreterResult` for an out-of-gas error with the given gas limit.
+    pub fn new_oog(gas_limit: u64) -> Self {
+        Self {
+            result: InstructionResult::OutOfGas,
+            output: Bytes::default(),
+            gas: Gas::new_spent(gas_limit),
         }
     }
 
@@ -466,7 +478,7 @@ fn test_mstore_big_offset_memory_oog() {
     );
 
     let table = instruction_table::<EthInterpreter, DummyHost>();
-    let mut host = DummyHost;
+    let mut host = DummyHost::default();
     let action = interpreter.run_plain(&table, &mut host);
 
     assert!(action.is_return());
@@ -504,7 +516,7 @@ fn test_mstore_big_offset_memory_limit_oog() {
     );
 
     let table = instruction_table::<EthInterpreter, DummyHost>();
-    let mut host = DummyHost;
+    let mut host = DummyHost::default();
     let action = interpreter.run_plain(&table, &mut host);
 
     assert!(action.is_return());

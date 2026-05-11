@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [19.0.0](https://github.com/bluealloy/revm/compare/op-revm-v18.0.0...op-revm-v19.0.0) - 2026-04-17
+
+### Other
+
+- updated the following local packages: revm
+
+## [18.0.0](https://github.com/bluealloy/revm/compare/op-revm-v17.0.0...op-revm-v18.0.0) - 2026-04-10
+
+### Added
+
+- add EIP-8037 / TIP-1016 state gas support ([#3406](https://github.com/bluealloy/revm/pull/3406))
+- add crate-level re-exports for all revm-* dependencies ([#3507](https://github.com/bluealloy/revm/pull/3507))
+
+### Other
+
+- move EIP-8037 gas cap validation into validate_initial_tx_gas ([#3552](https://github.com/bluealloy/revm/pull/3552))
+- *(op-revm)* use typed error for missing enveloped tx in all paths ([#3509](https://github.com/bluealloy/revm/pull/3509))
+
+## [17.0.0](https://github.com/bluealloy/revm/compare/op-revm-v16.0.0...op-revm-v17.0.0) - 2026-03-04
+
+### Other
+
+- bump revm-database-interface to v10.0.0
+
+## [16.0.0](https://github.com/bluealloy/revm/compare/op-revm-v15.0.0...op-revm-v16.0.0) - 2026-03-02
+
+### Other
+
+- *(op-revm)* remove unnecessary enveloped_tx clone in reward_beneficiary ([#3455](https://github.com/bluealloy/revm/pull/3455))
+- *(op-revm)* fix operator fee field doc comments ([#3457](https://github.com/bluealloy/revm/pull/3457))
+- [**breaking**] add logs to Revert and Halt variants of ExecutionResult ([#3424](https://github.com/bluealloy/revm/pull/3424))
+- [**breaking**] add ResultGas struct to ExecutionResult ([#3413](https://github.com/bluealloy/revm/pull/3413))
+- remove GPL mention and update gmp feature comments ([#3383](https://github.com/bluealloy/revm/pull/3383))
+- *(handler)* extract duplicate ContextError handling ([#3312](https://github.com/bluealloy/revm/pull/3312))
+- update default hardfork to Osaka (Ethereum) and Jovian (Optimism) ([#3326](https://github.com/bluealloy/revm/pull/3326))
+
+## [15.0.0](https://github.com/bluealloy/revm/compare/op-revm-v14.1.0...op-revm-v15.0.0) - 2026-01-15
+
+### Added
+
+- new gas params, tx initial gas and codedeposit ([#3260](https://github.com/bluealloy/revm/pull/3260))
+- move GasParams to Cfg ([#3229](https://github.com/bluealloy/revm/pull/3229))
+- BAL EIP-7928 ([#3070](https://github.com/bluealloy/revm/pull/3070))
+- early return if the l1 fee scalar is zero ([#3213](https://github.com/bluealloy/revm/pull/3213))
+- Restrict Database::Error. JournaledAccountTr ([#3199](https://github.com/bluealloy/revm/pull/3199))
+
+### Other
+
+- fix typos, grammar errors, and improve documentation consistency ([#3294](https://github.com/bluealloy/revm/pull/3294))
+- happy new year, 2026 licence ([#3272](https://github.com/bluealloy/revm/pull/3272))
+- Remove redundant tx fetch in Optimism handler gas accounting ([#3220](https://github.com/bluealloy/revm/pull/3220))
+- *(fmt)* merge all imports ([#3184](https://github.com/bluealloy/revm/pull/3184))
+
+## [14.1.0](https://github.com/bluealloy/revm/compare/op-revm-v14.0.0...op-revm-v14.1.0) - 2025-11-14
+
+### Fixed
+
+- *(op-revm)* return error when enveloped_tx is missing ([#3143](https://github.com/bluealloy/revm/pull/3143))
+
+## [14.0.0](https://github.com/bluealloy/revm/compare/op-revm-v12.0.2...op-revm-v14.0.0) - 2025-11-10
+
+### Added
+
+- *(precompiles)* add performant PrecompileError::OtherCowStr variant ([#3144](https://github.com/bluealloy/revm/pull/3144))
+- process precompile logs to inspector ([#3148](https://github.com/bluealloy/revm/pull/3148))
+
 ## [12.0.2](https://github.com/bluealloy/revm/compare/op-revm-v12.0.1...op-revm-v12.0.2) - 2025-11-10
 
 ### Fixed

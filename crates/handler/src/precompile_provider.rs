@@ -1,12 +1,13 @@
 use auto_impl::auto_impl;
 use context::{Cfg, LocalContextTr};
 use context_interface::{ContextTr, JournalTr};
-use interpreter::{CallInput, CallInputs, Gas, InstructionResult, InterpreterResult};
-use precompile::PrecompileError;
-use precompile::{PrecompileSpecId, Precompiles};
+use interpreter::{CallInputs, Gas, InstructionResult, InterpreterResult};
+use precompile::{PrecompileOutput, PrecompileSpecId, PrecompileStatus, Precompiles};
 use primitives::{hardfork::SpecId, Address, Bytes};
-use std::boxed::Box;
-use std::string::{String, ToString};
+use std::{
+    boxed::Box,
+    string::{String, ToString},
+};
 
 /// Provider for precompiled contracts in the EVM.
 #[auto_impl(&mut, Box)]
@@ -43,6 +44,14 @@ pub struct EthPrecompiles {
 }
 
 impl EthPrecompiles {
+    /// Create a new precompile provider with the given spec.
+    pub fn new(spec: SpecId) -> Self {
+        Self {
+            precompiles: Precompiles::new(PrecompileSpecId::from_spec_id(spec)),
+            spec,
+        }
+    }
+
     /// Returns addresses of the precompiles.
     pub fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
         Box::new(self.precompiles.addresses().cloned())
@@ -63,14 +72,55 @@ impl Clone for EthPrecompiles {
     }
 }
 
-impl Default for EthPrecompiles {
-    fn default() -> Self {
-        let spec = SpecId::default();
-        Self {
-            precompiles: Precompiles::new(PrecompileSpecId::from_spec_id(spec)),
-            spec,
-        }
+/// Converts a [`PrecompileOutput`] into an [`InterpreterResult`].
+///
+/// Maps precompile status to the corresponding instruction result:
+/// - `Success` → `InstructionResult::Return`
+/// - `Revert` → `InstructionResult::Revert`
+/// - `Halt(OOG)` → `InstructionResult::PrecompileOOG`
+/// - `Halt(other)` → `InstructionResult::PrecompileError`
+pub fn precompile_output_to_interpreter_result(
+    output: PrecompileOutput,
+    gas_limit: u64,
+) -> InterpreterResult {
+    // set output bytes
+    let bytes = if output.status.is_success_or_revert() {
+        output.bytes
+    } else {
+        Bytes::new()
+    };
+
+    let mut result = InterpreterResult {
+        result: InstructionResult::Return,
+        gas: Gas::new_with_regular_gas_and_reservoir(gas_limit, output.reservoir),
+        output: bytes,
+    };
+
+    // set state gas, reservoir is already set in the Gas constructor
+    result.gas.set_state_gas_spent(output.state_gas_used);
+    result.gas.record_refund(output.gas_refunded);
+
+    // spend used gas.
+    if output.status.is_success_or_revert() {
+        let _ = result.gas.record_regular_cost(output.gas_used);
+    } else {
+        result.gas.spend_all();
     }
+
+    // set result
+    result.result = match output.status {
+        PrecompileStatus::Success => InstructionResult::Return,
+        PrecompileStatus::Revert => InstructionResult::Revert,
+        PrecompileStatus::Halt(halt_reason) => {
+            if halt_reason.is_oog() {
+                InstructionResult::PrecompileOOG
+            } else {
+                InstructionResult::PrecompileError
+            }
+        }
+    };
+
+    result
 }
 
 impl<CTX: ContextTr> PrecompileProvider<CTX> for EthPrecompiles {
@@ -96,56 +146,26 @@ impl<CTX: ContextTr> PrecompileProvider<CTX> for EthPrecompiles {
             return Ok(None);
         };
 
-        let mut result = InterpreterResult {
-            result: InstructionResult::Return,
-            gas: Gas::new(inputs.gas_limit),
-            output: Bytes::new(),
-        };
+        let output = precompile
+            .execute(
+                &inputs.input.as_bytes(context),
+                inputs.gas_limit,
+                inputs.reservoir,
+            )
+            .map_err(|e| e.to_string())?;
 
-        let exec_result = {
-            let r;
-            let input_bytes = match &inputs.input {
-                CallInput::SharedBuffer(range) => {
-                    if let Some(slice) = context.local().shared_memory_buffer_slice(range.clone()) {
-                        r = slice;
-                        r.as_ref()
-                    } else {
-                        &[]
-                    }
-                }
-                CallInput::Bytes(bytes) => bytes.0.iter().as_slice(),
-            };
-            precompile.execute(input_bytes, inputs.gas_limit)
-        };
-
-        match exec_result {
-            Ok(output) => {
-                let underflow = result.gas.record_cost(output.gas_used);
-                assert!(underflow, "Gas underflow is not possible");
-                result.result = if output.reverted {
-                    InstructionResult::Revert
-                } else {
-                    InstructionResult::Return
-                };
-                result.output = output.bytes;
-            }
-            Err(PrecompileError::Fatal(e)) => return Err(e),
-            Err(e) => {
-                result.result = if e.is_oog() {
-                    InstructionResult::PrecompileOOG
-                } else {
-                    InstructionResult::PrecompileError
-                };
-                // If this is a top-level precompile call (depth == 1), persist the error message
-                // into the local context so it can be returned as output in the final result.
-                // Only do this for non-OOG errors (OOG is a distinct halt reason without output).
-                if !e.is_oog() && context.journal().depth() == 1 {
-                    context
-                        .local_mut()
-                        .set_precompile_error_context(e.to_string());
-                }
+        // If this is a top-level precompile call (depth == 1), persist the error message
+        // into the local context so it can be returned as output in the final result.
+        // Only do this for non-OOG halt errors.
+        if let Some(halt_reason) = output.halt_reason() {
+            if !halt_reason.is_oog() && context.journal().depth() == 1 {
+                context
+                    .local_mut()
+                    .set_precompile_error_context(halt_reason.to_string());
             }
         }
+
+        let result = precompile_output_to_interpreter_result(output, inputs.gas_limit);
         Ok(Some(result))
     }
 

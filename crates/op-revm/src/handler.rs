@@ -9,10 +9,14 @@ use crate::{
     BvmEth, L1BlockInfo, OpHaltReason, OpSpecId,
 };
 use revm::{
-    context::{journaled_state::JournalCheckpoint, result::InvalidTransaction, LocalContextTr},
+    context::{
+        journaled_state::{account::JournaledAccountTr, JournalCheckpoint},
+        result::InvalidTransaction,
+        LocalContextTr,
+    },
     context_interface::{
-        context::ContextError,
-        result::{EVMError, ExecutionResult, FromStringError},
+        context::take_error,
+        result::{EVMError, ExecutionResult, FromStringError, ResultGas},
         Block, Cfg, ContextTr, JournalTr, Transaction,
     },
     handler::{
@@ -29,7 +33,7 @@ use revm::{
     },
     primitives::{hardfork::SpecId, U256},
 };
-use std::{boxed::Box, vec};
+use std::{boxed::Box, vec::Vec};
 
 /// Optimism handler extends the [`Handler`] with Optimism specific logic.
 #[derive(Debug, Clone)]
@@ -157,8 +161,8 @@ where
                 // if the tx is not a deposit transaction and ARSIA is not enabled, we need to multiply the initial gas by the token ratio
                 // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to low 64 bits.
                 let token_ratio = chain.token_ratio.as_limbs()[0];
-                initial_gas.initial_gas = initial_gas
-                    .initial_gas
+                initial_gas.initial_total_gas = initial_gas
+                    .initial_total_gas
                     .checked_mul(token_ratio)
                     .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
 
@@ -175,6 +179,7 @@ where
     fn validate_against_state_and_deduct_caller(
         &self,
         evm: &mut Self::Evm,
+        _init_and_floor_gas: &mut InitialAndFloorGas,
     ) -> Result<(), Self::Error> {
         let ctx = evm.ctx();
         let is_deposit = ctx.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
@@ -223,17 +228,15 @@ where
         let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
 
         // validates account nonce and code
-        validate_account_nonce_and_code_with_components(&caller_account.info, tx, cfg)?;
+        validate_account_nonce_and_code_with_components(&caller_account.account().info, tx, cfg)?;
 
         // check additional cost and deduct it from the caller's balances
-        let mut balance = caller_account.info.balance;
+        let mut balance = caller_account.account().info.balance;
 
-        // if ARSIA is enabled, we need to calculate the additional cost and deduct it from the caller's balances
+        // [MANTLE] - if ARSIA is enabled, we need to calculate the additional cost and deduct it from the caller's balances
         if !cfg.is_fee_charge_disabled() && cfg.spec().is_enabled_in(OpSpecId::ARSIA) {
             let Some(additional_cost) = chain.tx_cost_with_tx(tx, spec) else {
-                return Err(ERROR::from_string(
-                    "[OPTIMISM] Failed to load enveloped transaction.".into(),
-                ));
+                return Err(OpTransactionError::MissingEnvelopedTx.into());
             };
             let Some(new_balance) = balance.checked_sub(additional_cost) else {
                 return Err(InvalidTransaction::LackOfFundForMaxFee {
@@ -271,6 +274,8 @@ where
         let gas = frame_result.gas_mut();
         let remaining = gas.remaining();
         let refunded = gas.refunded();
+        let reservoir = gas.reservoir();
+        let state_gas_spent = gas.state_gas_spent();
 
         // Spend the gas limit. Gas is reimbursed when the tx returns successfully.
         *gas = Gas::new_spent(tx_gas_limit);
@@ -290,17 +295,13 @@ where
             //     enabled.
             //   - Regular transactions report their gas used as normal.
             if !is_deposit || is_regolith {
-                // For regular transactions prior to Regolith and all transactions after
-                // Regolith, gas is reported as normal.
+                // Return unused regular gas and unused reservoir gas.
                 gas.erase_cost(remaining);
                 gas.record_refund(refunded);
-            } else if is_deposit {
-                let tx = ctx.tx();
-                if tx.is_system_transaction() {
-                    // System transactions were a special type of deposit transaction in
-                    // the Bedrock hardfork that did not incur any gas costs.
-                    gas.erase_cost(tx_gas_limit);
-                }
+            } else if is_deposit && tx.is_system_transaction() {
+                // System transactions were a special type of deposit transaction in
+                // the Bedrock hardfork that did not incur any gas costs.
+                gas.erase_cost(tx_gas_limit);
             }
         } else if instruction_result.is_revert() {
             // On Optimism, deposit transactions report gas usage uniquely to other
@@ -316,9 +317,15 @@ where
             //     gas used on failure. Refunds on remaining gas enabled.
             //   - Regular transactions receive a refund on remaining gas as normal.
             if !is_deposit || is_regolith {
+                // Return unused regular gas.
                 gas.erase_cost(remaining);
             }
         }
+
+        // Restore state_gas_spent on all paths (lost by Gas::new_spent overwrite).
+        gas.set_state_gas_spent(state_gas_spent);
+        gas.set_reservoir(reservoir);
+
         Ok(())
     }
 
@@ -354,7 +361,7 @@ where
         }
 
         let is_deposit = tx.tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let mut gas_limit = tx.gas_limit() - init_and_floor_gas.initial_gas;
+        let mut gas_limit = tx.gas_limit() - init_and_floor_gas.initial_total_gas;
 
         // l1cost = l1cost / effective_gas_price
         // gas_limit = gas_limit - l1cost
@@ -377,7 +384,7 @@ where
             if tx_l1_cost.gt(&U256::from(gas_limit)) {
                 return Err(ERROR::from(OpTransactionError::Base(
                     InvalidTransaction::CallGasCostMoreThanGasLimit {
-                        initial_gas: init_and_floor_gas.initial_gas,
+                        initial_gas: init_and_floor_gas.initial_total_gas,
                         gas_limit,
                     },
                 )));
@@ -397,7 +404,7 @@ where
         }
 
         // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let first_frame_input = self.first_frame_input(evm, gas_limit, 0)?;
 
         // Run execution loop
         let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
@@ -479,26 +486,30 @@ where
 
         // If the transaction is not a deposit transaction, fees are paid out
         // to both the Base Fee Vault as well as the L1 Fee Vault.
-        let ctx = evm.ctx();
-        let enveloped = ctx.tx().enveloped_tx().cloned();
-        let spec = ctx.cfg().spec();
-        let l1_block_info = ctx.chain_mut();
+        // Use all_mut() to simultaneously borrow tx (immutable) and chain (mutable),
+        // avoiding an unnecessary clone of the enveloped transaction bytes.
+        let (_, tx, cfg, journal, l1_block_info, _) = evm.ctx().all_mut();
+        let spec = cfg.spec();
 
-        let Some(enveloped_tx) = &enveloped else {
-            return Err(ERROR::from_string(
-                "[OPTIMISM] Failed to load enveloped transaction.".into(),
-            ));
+        let Some(enveloped_tx) = tx.enveloped_tx() else {
+            return Err(OpTransactionError::MissingEnvelopedTx.into());
         };
 
         let l1_cost = l1_block_info.calculate_tx_l1_cost(enveloped_tx, spec);
+        // Exclude reservoir gas (EIP-8037) from used gas — reservoir is unused and reimbursed.
+        let effective_used = frame_result
+            .gas()
+            .used()
+            .saturating_sub(frame_result.gas().reservoir());
+        // [MANTLE] - operator_fee_cost enable after arsia
         let operator_fee_cost = if spec.is_enabled_in(OpSpecId::ARSIA) {
-            l1_block_info.operator_fee_charge(enveloped_tx, U256::from(frame_result.gas().used()))
+            l1_block_info.operator_fee_charge(enveloped_tx, U256::from(effective_used))
         } else {
             U256::ZERO
         };
-        let base_fee_amount = U256::from(basefee.saturating_mul(frame_result.gas().used() as u128));
+        let base_fee_amount = U256::from(basefee.saturating_mul(effective_used as u128));
 
-        // Send fees to their respective recipients
+        // [MANTLE] - Send fees to their respective recipients
         let mut recipients = vec![(BASE_FEE_RECIPIENT, base_fee_amount)];
         if spec.is_enabled_in(OpSpecId::ARSIA) {
             recipients.extend([
@@ -507,7 +518,7 @@ where
             ]);
         }
         for (recipient, amount) in recipients {
-            ctx.journal_mut().balance_incr(recipient, amount)?;
+            journal.balance_incr(recipient, amount)?;
         }
 
         Ok(())
@@ -517,15 +528,12 @@ where
         &mut self,
         evm: &mut Self::Evm,
         frame_result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        match core::mem::replace(evm.ctx().error(), Ok(())) {
-            Err(ContextError::Db(e)) => return Err(e.into()),
-            Err(ContextError::Custom(e)) => return Err(Self::Error::from_string(e)),
-            Ok(_) => (),
-        }
+        take_error::<Self::Error, _>(evm.ctx().error())?;
 
-        let exec_result =
-            post_execution::output(evm.ctx(), frame_result).map_haltreason(OpHaltReason::Base);
+        let exec_result = post_execution::output(evm.ctx(), frame_result, result_gas)
+            .map_haltreason(OpHaltReason::Base);
 
         if exec_result.is_halt() {
             // Post-regolith, if the transaction is a deposit transaction and it halts,
@@ -550,7 +558,10 @@ where
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let output = if error.is_tx_error() && is_deposit {
+        let is_tx_error = error.is_tx_error();
+
+        // Deposit transaction can't fail so we manually handle it here.
+        let output = if is_tx_error && is_deposit {
             let ctx = evm.ctx();
             let spec = ctx.cfg().spec();
             let tx = ctx.tx();
@@ -565,6 +576,7 @@ where
                 .journal_mut()
                 .checkpoint_revert(JournalCheckpoint::default());
 
+            // [MANTLE] - BVM_ETH
             // If the transaction is a deposit transaction and it failed
             // for any reason, the caller nonce must be bumped, and the
             // gas reported must be altered depending on the Hardfork. This is
@@ -582,6 +594,8 @@ where
                 journal.load_account_mut(caller).map(|mut acc| {
                     acc.bump_nonce();
                     acc.incr_balance(U256::from(mint.unwrap_or_default()));
+
+                    // drop(acc); // Drop acc to avoid borrow checker issues.
                 })
             };
 
@@ -611,7 +625,8 @@ where
                                 };
                             Ok(ExecutionResult::Halt {
                                 reason: OpHaltReason::FailedDeposit,
-                                gas_used,
+                                gas: ResultGas::default().with_total_gas_spent(gas_used),
+                                logs: Vec::new(),
                             })
                         }
                         Err(e) => Err(e),
@@ -663,7 +678,7 @@ mod tests {
     };
     use alloy_primitives::uint;
     use revm::{
-        context::{BlockEnv, Context, TxEnv},
+        context::{BlockEnv, CfgEnv, Context, TxEnv},
         context_interface::result::InvalidTransaction,
         database::InMemoryDB,
         database_interface::EmptyDB,
@@ -817,7 +832,7 @@ mod tests {
                     .base(TxEnv::builder().gas_limit(100))
                     .build_fill(),
             )
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::BEDROCK);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::BEDROCK));
 
         let gas = call_last_frame_return(ctx, InstructionResult::Revert, Gas::new(90));
         assert_eq!(gas.remaining(), 0);
@@ -836,7 +851,7 @@ mod tests {
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
         let gas = call_last_frame_return(ctx, InstructionResult::Revert, Gas::new(90));
         assert_eq!(gas.remaining(), 90);
-        assert_eq!(gas.spent(), 10);
+        assert_eq!(gas.total_gas_spent(), 10);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -848,11 +863,11 @@ mod tests {
                     .base(TxEnv::builder().gas_limit(100))
                     .build_fill(),
             )
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA));
 
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(90));
         assert_eq!(gas.remaining(), 90);
-        assert_eq!(gas.spent(), 10);
+        assert_eq!(gas.total_gas_spent(), 10);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -872,19 +887,19 @@ mod tests {
                 token_ratio: U256::from(1),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut ret_gas = Gas::new(90);
         ret_gas.record_refund(20);
 
         let gas = call_last_frame_return(ctx.clone(), InstructionResult::Stop, ret_gas);
         assert_eq!(gas.remaining(), 90);
-        assert_eq!(gas.spent(), 10);
+        assert_eq!(gas.total_gas_spent(), 10);
         assert_eq!(gas.refunded(), 2); // min(20, 10/5)
 
         let gas = call_last_frame_return(ctx, InstructionResult::Revert, ret_gas);
         assert_eq!(gas.remaining(), 90);
-        assert_eq!(gas.spent(), 10);
+        assert_eq!(gas.total_gas_spent(), 10);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -923,7 +938,7 @@ mod tests {
         let mut evm_truncated = mk_ctx(truncated_ratio).build_op();
         let truncated_gas = handler.validate_initial_tx_gas(&mut evm_truncated).unwrap();
 
-        assert_eq!(huge_gas.initial_gas, truncated_gas.initial_gas);
+        assert_eq!(huge_gas.initial_total_gas, truncated_gas.initial_total_gas);
         assert_eq!(huge_gas.floor_gas, truncated_gas.floor_gas);
     }
 
@@ -1032,10 +1047,10 @@ mod tests {
                     .source_hash(B256::from([1u8; 32]))
                     .build_fill(),
             )
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::BEDROCK);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::BEDROCK));
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(90));
         assert_eq!(gas.remaining(), 0);
-        assert_eq!(gas.spent(), 100);
+        assert_eq!(gas.total_gas_spent(), 100);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -1049,10 +1064,10 @@ mod tests {
                     .is_system_transaction()
                     .build_fill(),
             )
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::BEDROCK);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::BEDROCK));
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(90));
         assert_eq!(gas.remaining(), 100);
-        assert_eq!(gas.spent(), 0);
+        assert_eq!(gas.total_gas_spent(), 0);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -1076,7 +1091,7 @@ mod tests {
                 l1_base_fee_scalar: U256::from(1_000),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
         ctx.modify_tx(|tx| {
             tx.deposit.source_hash = B256::from([1u8; 32]);
             tx.deposit.mint = Some(10);
@@ -1087,7 +1102,7 @@ mod tests {
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         // Check the account balance is updated.
@@ -1135,7 +1150,7 @@ mod tests {
                 token_ratio: U256::from(1),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA))
             .with_tx(
                 OpTransaction::builder()
                     .base(TxEnv::builder().gas_limit(100))
@@ -1150,7 +1165,7 @@ mod tests {
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         // Check the account balance is updated.
@@ -1188,7 +1203,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ISTHMUS));
 
         let mut evm = ctx.build_op();
 
@@ -1199,7 +1214,7 @@ mod tests {
         // Call validate_initial_tx_gas first to load L1BlockInfo
         handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert_eq!(
@@ -1272,7 +1287,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA))
             // set the operator fee to a low value
             .with_tx(
                 OpTransaction::builder()
@@ -1290,7 +1305,7 @@ mod tests {
         // Call validate_initial_tx_gas first to load L1BlockInfo
         handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert_eq!(
@@ -1351,7 +1366,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut evm = ctx.build_op();
         assert_ne!(evm.ctx().chain().l2_block, Some(BLOCK_NUM));
@@ -1361,7 +1376,7 @@ mod tests {
         // Call validate_initial_tx_gas first to load L1BlockInfo
         handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert_eq!(
@@ -1421,7 +1436,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ECOTONE);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ECOTONE));
 
         let mut evm = ctx.build_op();
         assert_ne!(evm.ctx().chain().l2_block, Some(BLOCK_NUM));
@@ -1431,7 +1446,7 @@ mod tests {
         // Call validate_initial_tx_gas first to load L1BlockInfo
         handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert_eq!(
@@ -1477,7 +1492,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ISTHMUS));
 
         let mut evm = ctx.build_op();
 
@@ -1488,7 +1503,7 @@ mod tests {
         // Call validate_initial_tx_gas first to load L1BlockInfo
         handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert_eq!(
@@ -1545,7 +1560,7 @@ mod tests {
                 token_ratio: U256::from(1),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA))
             .with_tx(
                 OpTransaction::builder()
                     .base(TxEnv::builder().gas_limit(100))
@@ -1561,7 +1576,7 @@ mod tests {
 
         // l1block cost is 1600 fee.
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         // Check the account balance is updated.
@@ -1588,7 +1603,7 @@ mod tests {
                 l2_block: Some(U256::from(0)),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ISTHMUS))
             .with_tx(
                 OpTransaction::builder()
                     .base(TxEnv::builder().gas_limit(10))
@@ -1603,7 +1618,7 @@ mod tests {
         // Under Isthmus the operator fee cost is operator_fee_scalar * gas_limit / 1e6 + operator_fee_constant
         // 10_000_000 * 10 / 1_000_000 + 50 = 150
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         // Check the account balance is updated.
@@ -1630,7 +1645,7 @@ mod tests {
                 l2_block: Some(U256::from(0)),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA))
             .with_tx(
                 OpTransaction::builder()
                     .base(TxEnv::builder().gas_limit(10))
@@ -1645,7 +1660,7 @@ mod tests {
         // Under Jovian the operator fee cost is operator_fee_scalar * gas_limit * 100 + operator_fee_constant
         // 2 * 10 * 100 + 50 = 2_050
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         let account = evm.ctx().journal_mut().load_account(caller).unwrap();
@@ -1692,7 +1707,7 @@ mod tests {
                 token_ratio: U256::from(1),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA))
             .modify_tx_chained(|tx| {
                 tx.enveloped_tx = Some(bytes!("FACADE"));
             });
@@ -1704,7 +1719,7 @@ mod tests {
 
         // l1block cost is 1600 fee.
         assert_eq!(
-            handler.validate_against_state_and_deduct_caller(&mut evm),
+            handler.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default()),
             Err(EVMError::Transaction(
                 InvalidTransaction::LackOfFundForMaxFee {
                     fee: Box::new(U256::from(1600)),
@@ -1723,7 +1738,7 @@ mod tests {
                 tx.deposit.source_hash = B256::from([1u8; 32]);
                 tx.deposit.is_system_transaction = true;
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut evm = ctx.build_op();
         let handler =
@@ -1736,7 +1751,11 @@ mod tests {
             ))
         );
 
-        evm.ctx().modify_cfg(|cfg| cfg.spec = OpSpecId::BEDROCK);
+        // With BEDROCK spec.
+        let ctx = evm.into_context();
+        let mut evm = ctx
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::BEDROCK))
+            .build_op();
 
         // Pre-regolith system transactions should be allowed.
         assert!(handler.validate_env(&mut evm).is_ok());
@@ -1749,7 +1768,7 @@ mod tests {
             .modify_tx_chained(|tx| {
                 tx.deposit.source_hash = B256::from([1u8; 32]);
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut evm = ctx.build_op();
         let handler =
@@ -1765,7 +1784,7 @@ mod tests {
             .modify_tx_chained(|tx| {
                 tx.deposit.source_hash = B256::from([1u8; 32]);
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut evm = ctx.build_op();
         let handler =
@@ -1782,7 +1801,7 @@ mod tests {
                 // Set up as deposit transaction by having a deposit with source_hash
                 tx.deposit.source_hash = B256::from([1u8; 32]);
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut evm = ctx.build_op();
         let mut handler =
@@ -1791,14 +1810,15 @@ mod tests {
         assert_eq!(
             handler.execution_result(
                 &mut evm,
-                FrameResult::Call(CallOutcome {
-                    result: InterpreterResult {
+                FrameResult::Call(CallOutcome::new(
+                    InterpreterResult {
                         result: InstructionResult::OutOfGas,
                         output: Default::default(),
                         gas: Default::default(),
                     },
-                    memory_offset: Default::default(),
-                })
+                    Default::default()
+                )),
+                ResultGas::default(),
             ),
             Err(EVMError::Transaction(
                 OpTransactionError::HaltedDepositPostRegolith
@@ -1824,7 +1844,7 @@ mod tests {
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
 
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert!(evm
@@ -1865,7 +1885,7 @@ mod tests {
                     })
                     .build_fill(),
             )
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA));
 
         let mut evm = ctx.build_op();
         let handler =
@@ -1975,7 +1995,7 @@ mod tests {
             )
             .build_op();
         let initial_gas1 = handler.validate_initial_tx_gas(&mut evm1).unwrap();
-        assert_eq!(initial_gas1.initial_gas, 21000);
+        assert_eq!(initial_gas1.initial_total_gas, 21000);
 
         if spec.is_enabled_in(OpSpecId::ARSIA) {
             let l1_block_contract = evm1
@@ -2149,7 +2169,7 @@ mod tests {
         assert_eq!(evm2.ctx().chain().token_ratio, U256::from(OLD_TOKEN_RATIO));
         assert_eq!(evm2.ctx().chain().l2_block, None);
         if !spec.is_enabled_in(OpSpecId::ARSIA) {
-            assert_eq!(initial_gas2.initial_gas % OLD_TOKEN_RATIO, 0);
+            assert_eq!(initial_gas2.initial_total_gas % OLD_TOKEN_RATIO, 0);
         }
         evm2.ctx()
             .journal_mut()
@@ -2190,7 +2210,7 @@ mod tests {
         assert_eq!(evm3.ctx().chain().token_ratio, U256::from(NEW_TOKEN_RATIO));
         assert_eq!(evm3.ctx().chain().l2_block, Some(BLOCK_NUM));
         if !spec.is_enabled_in(OpSpecId::ARSIA) {
-            assert_eq!(initial_gas3.initial_gas % NEW_TOKEN_RATIO, 0);
+            assert_eq!(initial_gas3.initial_total_gas % NEW_TOKEN_RATIO, 0);
         }
 
         let mut tx3_chain = evm3.ctx().chain().clone();
@@ -2280,7 +2300,7 @@ mod tests {
             )
             .build_op();
         let initial_gas1 = handler.validate_initial_tx_gas(&mut evm1).unwrap();
-        assert_eq!(initial_gas1.initial_gas, 21000);
+        assert_eq!(initial_gas1.initial_total_gas, 21000);
 
         if spec.is_enabled_in(OpSpecId::ARSIA) {
             let l1_block_contract = evm1
@@ -2370,7 +2390,7 @@ mod tests {
         assert_eq!(evm3.ctx().chain().l2_block, None);
         assert_eq!(evm3.ctx().chain().l1_base_fee, U256::from(NEW_L1_BASE_FEE));
         if !spec.is_enabled_in(OpSpecId::ARSIA) {
-            assert_eq!(initial_gas3.initial_gas % OLD_TOKEN_RATIO, 0);
+            assert_eq!(initial_gas3.initial_total_gas % OLD_TOKEN_RATIO, 0);
         }
         evm3.ctx()
             .journal_mut()
@@ -2412,7 +2432,7 @@ mod tests {
         assert_eq!(evm4.ctx().chain().l2_block, Some(BLOCK_NUM));
         assert_eq!(evm4.ctx().chain().l1_base_fee, U256::from(NEW_L1_BASE_FEE));
         if !spec.is_enabled_in(OpSpecId::ARSIA) {
-            assert_eq!(initial_gas4.initial_gas % NEW_TOKEN_RATIO, 0);
+            assert_eq!(initial_gas4.initial_total_gas % NEW_TOKEN_RATIO, 0);
         }
 
         let mut tx4_chain = evm4.ctx().chain().clone();
@@ -2444,7 +2464,8 @@ mod tests {
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
 
-        let result = handler.validate_against_state_and_deduct_caller(&mut evm);
+        let result =
+            handler.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
 
         assert!(matches!(
             result.err().unwrap(),
@@ -2675,7 +2696,7 @@ mod tests {
         let initial_gas1 = handler.validate_initial_tx_gas(&mut evm1).unwrap();
         // Deposit tx should not multiply by token ratio
         assert_eq!(
-            initial_gas1.initial_gas, 21000,
+            initial_gas1.initial_total_gas, 21000,
             "Deposit transaction should not multiply by token ratio"
         );
 
@@ -2730,22 +2751,22 @@ mod tests {
 
         // Calculate expected gas with old token ratio (3045)
         // The base gas (before multiplying by token_ratio) should be consistent
-        let base_gas_before = initial_gas2.initial_gas / INITIAL_TOKEN_RATIO;
+        let base_gas_before = initial_gas2.initial_total_gas / INITIAL_TOKEN_RATIO;
         let expected_gas_before = base_gas_before * INITIAL_TOKEN_RATIO;
 
         // Should use old token ratio (3045) before the reset
         assert_eq!(
-            initial_gas2.initial_gas,
+            initial_gas2.initial_total_gas,
             expected_gas_before,
             "Transaction 4 should use old token ratio (3045) before reset. Gas: {}, Base: {}, Token ratio: {}",
-            initial_gas2.initial_gas,
+            initial_gas2.initial_total_gas,
             base_gas_before,
             INITIAL_TOKEN_RATIO
         );
 
         // Verify the gas calculation uses INITIAL_TOKEN_RATIO
         assert_eq!(
-            initial_gas2.initial_gas % INITIAL_TOKEN_RATIO,
+            initial_gas2.initial_total_gas % INITIAL_TOKEN_RATIO,
             0,
             "Gas should be divisible by INITIAL_TOKEN_RATIO"
         );
@@ -2815,15 +2836,15 @@ mod tests {
         // Calculate expected gas with new token ratio (3040)
         // The base gas (before multiplying by token_ratio) should be the same as before
         // Only the token_ratio multiplier changes from 3045 to 3040
-        let base_gas_after = initial_gas3.initial_gas / NEW_TOKEN_RATIO;
+        let base_gas_after = initial_gas3.initial_total_gas / NEW_TOKEN_RATIO;
         let expected_gas_after = base_gas_after * NEW_TOKEN_RATIO;
 
         // Should use new token ratio (3040) after reload
         assert_eq!(
-            initial_gas3.initial_gas,
+            initial_gas3.initial_total_gas,
             expected_gas_after,
             "Transaction 5 should use new token ratio (3040) after reload. Gas: {}, Base: {}, Token ratio: {}",
-            initial_gas3.initial_gas,
+            initial_gas3.initial_total_gas,
             base_gas_after,
             NEW_TOKEN_RATIO
         );
@@ -2831,20 +2852,20 @@ mod tests {
         // Verify that gas calculation changed due to token ratio change
         // Since token_ratio decreased from 3045 to 3040, gas should decrease
         assert!(
-            initial_gas3.initial_gas < initial_gas2.initial_gas,
+            initial_gas3.initial_total_gas < initial_gas2.initial_total_gas,
             "Gas should decrease after token ratio change: {} (with ratio {}) -> {} (with ratio {})",
-            initial_gas2.initial_gas,
+            initial_gas2.initial_total_gas,
             INITIAL_TOKEN_RATIO,
-            initial_gas3.initial_gas,
+            initial_gas3.initial_total_gas,
             NEW_TOKEN_RATIO
         );
 
         // Verify the base gas calculation and token ratio multiplier
-        let base_gas_before = initial_gas2.initial_gas / INITIAL_TOKEN_RATIO;
-        let base_gas_after = initial_gas3.initial_gas / NEW_TOKEN_RATIO;
+        let base_gas_before = initial_gas2.initial_total_gas / INITIAL_TOKEN_RATIO;
+        let base_gas_after = initial_gas3.initial_total_gas / NEW_TOKEN_RATIO;
 
         // Calculate the actual difference due to token ratio change
-        let gas_diff = initial_gas2.initial_gas - initial_gas3.initial_gas;
+        let gas_diff = initial_gas2.initial_total_gas - initial_gas3.initial_total_gas;
         let ratio_diff = INITIAL_TOKEN_RATIO - NEW_TOKEN_RATIO;
 
         // Verify that the gas difference is consistent with token ratio difference
@@ -2861,12 +2882,12 @@ mod tests {
 
         // Verify token ratio multiplier is correctly applied
         assert_eq!(
-            initial_gas2.initial_gas % INITIAL_TOKEN_RATIO,
+            initial_gas2.initial_total_gas % INITIAL_TOKEN_RATIO,
             0,
             "Gas should be divisible by INITIAL_TOKEN_RATIO"
         );
         assert_eq!(
-            initial_gas3.initial_gas % NEW_TOKEN_RATIO,
+            initial_gas3.initial_total_gas % NEW_TOKEN_RATIO,
             0,
             "Gas should be divisible by NEW_TOKEN_RATIO"
         );

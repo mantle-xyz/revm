@@ -12,11 +12,9 @@ use crate::{
     OpSpecId,
 };
 use revm::{
+    context_interface::cfg::gas::{NON_ZERO_BYTE_MULTIPLIER_ISTANBUL, STANDARD_TOKEN_COST},
     database_interface::Database,
-    interpreter::{
-        gas::{get_tokens_in_calldata, NON_ZERO_BYTE_MULTIPLIER_ISTANBUL, STANDARD_TOKEN_COST},
-        Gas,
-    },
+    interpreter::{gas::get_tokens_in_calldata_istanbul, Gas},
     primitives::U256,
 };
 
@@ -48,9 +46,9 @@ pub struct L1BlockInfo {
     pub l1_blob_base_fee: Option<U256>,
     /// The current L1 blob base fee scalar. None if Ecotone is not activated.
     pub l1_blob_base_fee_scalar: Option<U256>,
-    /// The current L1 blob base fee. None if Isthmus is not activated, except if `empty_ecotone_scalars` is `true`.
+    /// The operator fee scalar. None if Isthmus is not activated.
     pub operator_fee_scalar: Option<U256>,
-    /// The current L1 blob base fee scalar. None if Isthmus is not activated.
+    /// The operator fee constant. None if Isthmus is not activated.
     pub operator_fee_constant: Option<U256>,
     /// Da footprint gas scalar. Used to set the DA footprint block limit on the L2. Always null prior to the Jovian hardfork.
     pub da_footprint_gas_scalar: Option<u16>,
@@ -145,6 +143,7 @@ impl L1BlockInfo {
         let _ = db.basic(L1_BLOCK_CONTRACT)?;
         let _ = db.basic(GAS_ORACLE_CONTRACT)?;
 
+        // [MANTLE] - GAS_ORACLE + token_ratio
         let l1_base_fee = db.storage(L1_BLOCK_CONTRACT, L1_BASE_FEE_SLOT)?;
         let token_ratio = db.storage(GAS_ORACLE_CONTRACT, TOKEN_RATIO_SLOT)?;
 
@@ -207,9 +206,11 @@ impl L1BlockInfo {
             return U256::ZERO;
         }
 
+        // [MANTLE] - operator_fee_charge_inner spec_id not used
         let operator_cost_gas_limit = self.operator_fee_charge_inner(U256::from(gas.limit()));
+        // Exclude reservoir gas (EIP-8037) from used gas — reservoir is unused and reimbursed.
         let operator_cost_gas_used = self.operator_fee_charge_inner(U256::from(
-            gas.limit() - (gas.remaining() + gas.refunded() as u64),
+            gas.limit() - (gas.remaining() + gas.reservoir() + gas.refunded() as u64),
         ));
 
         operator_cost_gas_limit.saturating_sub(operator_cost_gas_used)
@@ -230,7 +231,7 @@ impl L1BlockInfo {
         };
 
         // tokens in calldata where non-zero bytes are priced 4 times higher than zero bytes (Same as in Istanbul).
-        let mut tokens_in_transaction_data = get_tokens_in_calldata(input, true);
+        let mut tokens_in_transaction_data = get_tokens_in_calldata_istanbul(input);
 
         // Prior to regolith, an extra 68 non zero bytes were included in the rollup data costs.
         if !spec_id.is_enabled_in(OpSpecId::REGOLITH) {
@@ -314,6 +315,8 @@ impl L1BlockInfo {
         self.calculate_tx_l1_cost_arsia_with_delta(input, 0)
     }
 
+    /// [MANTLE] - for reth calculate_tx_l1_cost_for_estimate
+    ///
     /// Like [`calculate_tx_l1_cost_arsia`] but adds `fastlz_delta` to compressed size (e.g. +80 for geth alignment).
     /// Uses geth Fjord formula: estimatedDASizeScaled = max(MinTxSizeScaled, intercept + coef*fastLzSize).
     /// [`estimate_tx_compressed_size_with_delta`] already returns that scaled value; use it directly.

@@ -7,9 +7,7 @@ use revm::{
     primitives::{hex, TxKind},
     Context, Database, ExecuteEvm, MainBuilder, MainContext,
 };
-use std::path::PathBuf;
-use std::{borrow::Cow, fs};
-use std::{io::Error as IoError, time::Instant};
+use std::{borrow::Cow, fs, io::Error as IoError, path::PathBuf, time::Instant};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Errors {
@@ -58,6 +56,9 @@ pub struct Cmd {
     /// Whether to print the trace
     #[arg(long)]
     trace: bool,
+    /// Output results in JSON format
+    #[arg(long)]
+    json: bool,
 }
 
 impl Cmd {
@@ -130,12 +131,27 @@ impl Cmd {
         .map_err(|_| Errors::EVMError)?;
         let time = time.elapsed();
 
-        println!("Result: {:#?}", r.result);
-        if self.state {
-            println!("State: {:#?}", r.state);
+        if self.json {
+            let json = if self.state {
+                serde_json::json!({
+                    "result": r.result,
+                    "state": r.state,
+                    "elapsed": time.as_secs_f64(),
+                })
+            } else {
+                serde_json::json!({
+                    "result": r.result,
+                    "elapsed": time.as_secs_f64(),
+                })
+            };
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        } else {
+            println!("Result: {:#?}", r.result);
+            if self.state {
+                println!("State: {:#?}", r.state);
+            }
+            println!("Elapsed: {time:?}");
         }
-
-        println!("Elapsed: {time:?}");
         Ok(())
     }
 }

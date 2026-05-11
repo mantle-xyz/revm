@@ -1,17 +1,5 @@
 //! Utility macros to help implementing opcode instruction functions.
 
-/// `const` Option `?`.
-#[macro_export]
-#[collapse_debuginfo(yes)]
-macro_rules! tri {
-    ($e:expr) => {
-        match $e {
-            Some(v) => v,
-            None => return None,
-        }
-    };
-}
-
 /// Fails the instruction if the current call is static.
 #[macro_export]
 #[collapse_debuginfo(yes)]
@@ -22,19 +10,6 @@ macro_rules! require_non_staticcall {
             return;
         }
     };
-}
-
-/// Macro for optional try - returns early if the expression evaluates to None.
-/// Similar to the `?` operator but for use in instruction implementations.
-#[macro_export]
-#[collapse_debuginfo(yes)]
-macro_rules! otry {
-    ($expression: expr) => {{
-        let Some(value) = $expression else {
-            return;
-        };
-        value
-    }};
 }
 
 /// Check if the `SPEC` is enabled, and fail the instruction if it is not.
@@ -53,6 +28,25 @@ macro_rules! check {
     };
 }
 
+/// Records a state gas cost (EIP-8037) and fails the instruction if it would exceed the available gas.
+/// State gas only deducts from `remaining` (not `regular_gas_remaining`).
+#[macro_export]
+#[collapse_debuginfo(yes)]
+macro_rules! state_gas {
+    ($interpreter:expr, $gas:expr) => {{
+        if !$interpreter.gas.record_state_cost($gas) {
+            $interpreter.halt_oog();
+            return;
+        }
+    }};
+    ($interpreter:expr, $gas:expr, $ret:expr) => {{
+        if !$interpreter.gas.record_state_cost($gas) {
+            $interpreter.halt_oog();
+            return $ret;
+        }
+    }};
+}
+
 /// Records a `gas` cost and fails the instruction if it would exceed the available gas.
 #[macro_export]
 #[collapse_debuginfo(yes)]
@@ -61,7 +55,7 @@ macro_rules! gas {
         $crate::gas!($interpreter, $gas, ())
     };
     ($interpreter:expr, $gas:expr, $ret:expr) => {
-        if !$interpreter.gas.record_cost($gas) {
+        if !$interpreter.gas.record_regular_cost($gas) {
             $interpreter.halt_oog();
             return $ret;
         }
@@ -76,20 +70,15 @@ macro_rules! berlin_load_account {
         $crate::berlin_load_account!($context, $address, $load_code, ())
     };
     ($context:expr, $address:expr, $load_code:expr, $ret:expr) => {{
-        $crate::gas!($context.interpreter, WARM_STORAGE_READ_COST, $ret);
-        let skip_cold_load =
-            $context.interpreter.gas.remaining() < COLD_ACCOUNT_ACCESS_COST_ADDITIONAL;
+        let cold_load_gas = $context.host.gas_params().cold_account_additional_cost();
+        let skip_cold_load = $context.interpreter.gas.remaining() < cold_load_gas;
         match $context
             .host
             .load_account_info_skip_cold_load($address, $load_code, skip_cold_load)
         {
             Ok(account) => {
                 if account.is_cold {
-                    $crate::gas!(
-                        $context.interpreter,
-                        COLD_ACCOUNT_ACCESS_COST_ADDITIONAL,
-                        $ret
-                    );
+                    $crate::gas!($context.interpreter, cold_load_gas, $ret);
                 }
                 account
             }
@@ -105,45 +94,23 @@ macro_rules! berlin_load_account {
     }};
 }
 
-/// Same as [`gas!`], but with `gas` as an option.
-#[macro_export]
-#[collapse_debuginfo(yes)]
-macro_rules! gas_or_fail {
-    ($interpreter:expr, $gas:expr) => {
-        $crate::gas_or_fail!($interpreter, $gas, ())
-    };
-    ($interpreter:expr, $gas:expr, $ret:expr) => {
-        match $gas {
-            Some(gas_used) => $crate::gas!($interpreter, gas_used, $ret),
-            None => {
-                $interpreter.halt_oog();
-                return $ret;
-            }
-        }
-    };
-}
-
 /// Resizes the interpreter memory if necessary. Fails the instruction if the memory or gas limit
 /// is exceeded.
 #[macro_export]
 #[collapse_debuginfo(yes)]
 macro_rules! resize_memory {
-    ($interpreter:expr, $offset:expr, $len:expr) => {
-        $crate::resize_memory!($interpreter, $offset, $len, ())
+    ($interpreter:expr, $gas_params:expr, $offset:expr, $len:expr) => {
+        $crate::resize_memory!($interpreter, $gas_params, $offset, $len, ())
     };
-    ($interpreter:expr, $offset:expr, $len:expr, $ret:expr) => {
-        #[cfg(feature = "memory_limit")]
-        if $interpreter.memory.limit_reached($offset, $len) {
-            $interpreter.halt_memory_limit_oog();
-            return $ret;
-        }
-        if !$crate::interpreter::resize_memory(
+    ($interpreter:expr, $gas_params:expr, $offset:expr, $len:expr, $ret:expr) => {
+        if let Err(result) = $crate::interpreter::resize_memory(
             &mut $interpreter.gas,
             &mut $interpreter.memory,
+            $gas_params,
             $offset,
             $len,
         ) {
-            $interpreter.halt_memory_oog();
+            $interpreter.halt(result);
             return $ret;
         }
     };
@@ -208,15 +175,7 @@ macro_rules! push {
 #[collapse_debuginfo(yes)]
 macro_rules! as_u64_saturated {
     ($v:expr) => {
-        match $v.as_limbs() {
-            x => {
-                if (x[1] == 0) & (x[2] == 0) & (x[3] == 0) {
-                    x[0]
-                } else {
-                    u64::MAX
-                }
-            }
-        }
+        u64::try_from($v).unwrap_or(u64::MAX)
     };
 }
 
@@ -225,7 +184,7 @@ macro_rules! as_u64_saturated {
 #[collapse_debuginfo(yes)]
 macro_rules! as_usize_saturated {
     ($v:expr) => {
-        usize::try_from($crate::as_u64_saturated!($v)).unwrap_or(usize::MAX)
+        usize::try_from($v).unwrap_or(usize::MAX)
     };
 }
 
@@ -234,9 +193,7 @@ macro_rules! as_usize_saturated {
 #[collapse_debuginfo(yes)]
 macro_rules! as_isize_saturated {
     ($v:expr) => {
-        // `isize_try_from(u64::MAX)`` will fail and return isize::MAX
-        // This is expected behavior as we are saturating the value.
-        isize::try_from($crate::as_u64_saturated!($v)).unwrap_or(isize::MAX)
+        isize::try_from($v).unwrap_or(isize::MAX)
     };
 }
 

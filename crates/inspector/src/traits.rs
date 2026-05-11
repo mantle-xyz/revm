@@ -1,10 +1,13 @@
-use context::{ContextTr, FrameStack};
+use context::{ContextTr, FrameStack, JournalTr};
 use handler::{
     evm::{ContextDbError, FrameInitResult, FrameTr},
     instructions::InstructionProvider,
     EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult,
 };
-use interpreter::{interpreter::EthInterpreter, interpreter_action::FrameInit, InterpreterTypes};
+use interpreter::{
+    interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, FrameInput,
+    InterpreterTypes,
+};
 
 use crate::{
     handler::{frame_end, frame_start},
@@ -24,7 +27,7 @@ pub trait InspectorEvmTr:
 >
 {
     /// The inspector type used for EVM execution inspection.
-    type Inspector: Inspector<Self::Context, EthInterpreter>;
+    type Inspector: Inspector<Self::Context, EthInterpreter, FrameInput, FrameResult>;
 
     /// Returns a tuple of mutable references to the context, the inspector, the frame and the instructions.
     ///
@@ -104,8 +107,23 @@ pub trait InspectorEvmTr:
         }
 
         let frame_input = frame_init.frame_input.clone();
+        let logs_i = ctx.journal().logs().len();
         if let ItemOrResult::Result(mut output) = self.frame_init(frame_init)? {
             let (ctx, inspector) = self.ctx_inspector();
+            // for precompiles send logs to inspector.
+            if let FrameResult::Call(CallOutcome {
+                was_precompile_called,
+                precompile_call_logs,
+                ..
+            }) = &mut output
+            {
+                if *was_precompile_called {
+                    let logs = ctx.journal_mut().logs()[logs_i..].to_vec();
+                    for log in logs.into_iter().chain(precompile_call_logs.iter().cloned()) {
+                        inspector.log(ctx, log);
+                    }
+                }
+            }
             frame_end(ctx, inspector, &frame_input, &mut output);
             return Ok(ItemOrResult::Result(output));
         }

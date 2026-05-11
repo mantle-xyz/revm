@@ -23,8 +23,12 @@ pub mod secp256k1;
 pub mod secp256r1;
 pub mod utilities;
 
+pub use primitives;
+
 pub use id::PrecompileId;
 pub use interface::*;
+
+use core::fmt::{self, Debug};
 
 // silence arkworks lint as bn impl will be used as default if both are enabled.
 cfg_if::cfg_if! {
@@ -52,24 +56,36 @@ cfg_if::cfg_if! {
 #[cfg(feature = "gmp")]
 use aurora_engine_modexp as _;
 
+// silence p256 lint as aws-lc-rs will be used if both are enabled.
+#[cfg(feature = "p256-aws-lc-rs")]
+use p256 as _;
+
 use core::hash::Hash;
 use primitives::{
-    hardfork::SpecId, short_address, Address, HashMap, HashSet, OnceLock, SHORT_ADDRESS_CAP,
+    hardfork::SpecId, short_address, Address, AddressMap, AddressSet, HashMap, OnceLock,
+    SHORT_ADDRESS_CAP,
 };
 use std::vec::Vec;
 
 /// Calculate the linear cost of a precompile.
-pub fn calc_linear_cost_u32(len: usize, base: u64, word: u64) -> u64 {
+#[inline]
+pub fn calc_linear_cost(len: usize, base: u64, word: u64) -> u64 {
     (len as u64).div_ceil(32) * word + base
 }
 
-/// Precompiles contain map of precompile addresses to functions and HashSet of precompile addresses.
+/// Calculate the linear cost of a precompile.
+#[deprecated(note = "please use `calc_linear_cost` instead")]
+pub fn calc_linear_cost_u32(len: usize, base: u64, word: u64) -> u64 {
+    calc_linear_cost(len, base, word)
+}
+
+/// Precompiles contain map of precompile addresses to functions and AddressSet of precompile addresses.
 #[derive(Clone, Debug)]
 pub struct Precompiles {
     /// Precompiles
-    inner: HashMap<Address, Precompile>,
+    inner: AddressMap<Precompile>,
     /// Addresses of precompiles.
-    addresses: HashSet<Address>,
+    addresses: AddressSet,
     /// Optimized addresses filter.
     optimized_access: Vec<Option<Precompile>>,
     /// `true` if all precompiles are short addresses.
@@ -80,7 +96,7 @@ impl Default for Precompiles {
     fn default() -> Self {
         Self {
             inner: HashMap::default(),
-            addresses: HashSet::default(),
+            addresses: AddressSet::default(),
             optimized_access: vec![None; SHORT_ADDRESS_CAP],
             all_short_addresses: true,
         }
@@ -117,7 +133,7 @@ impl Precompiles {
     }
 
     /// Returns inner HashMap of precompiles.
-    pub fn inner(&self) -> &HashMap<Address, Precompile> {
+    pub fn inner(&self) -> &AddressMap<Precompile> {
         &self.inner
     }
 
@@ -254,7 +270,7 @@ impl Precompiles {
     }
 
     /// Returns the precompiles addresses as a set.
-    pub fn addresses_set(&self) -> &HashSet<Address> {
+    pub fn addresses_set(&self) -> &AddressSet {
         &self.addresses
     }
 
@@ -263,18 +279,20 @@ impl Precompiles {
     /// Other precompiles with overwrite existing precompiles.
     #[inline]
     pub fn extend(&mut self, other: impl IntoIterator<Item = Precompile>) {
-        let items: Vec<Precompile> = other.into_iter().collect::<Vec<_>>();
-        for item in items.iter() {
-            if let Some(short_address) = short_address(item.address()) {
-                self.optimized_access[short_address] = Some(item.clone());
+        let iter = other.into_iter();
+        let (lower, _) = iter.size_hint();
+        self.addresses.reserve(lower);
+        self.inner.reserve(lower);
+        for item in iter {
+            let address = *item.address();
+            if let Some(short_idx) = short_address(&address) {
+                self.optimized_access[short_idx] = Some(item.clone());
             } else {
                 self.all_short_addresses = false;
             }
+            self.addresses.insert(address);
+            self.inner.insert(address, item);
         }
-
-        self.addresses.extend(items.iter().map(|p| *p.address()));
-        self.inner
-            .extend(items.into_iter().map(|p| (*p.address(), p.clone())));
     }
 
     /// Returns complement of `other` in `self`.
@@ -287,7 +305,7 @@ impl Precompiles {
             .iter()
             .filter(|(a, _)| !other.inner.contains_key(*a))
             .map(|(a, p)| (*a, p.clone()))
-            .collect::<HashMap<_, _>>();
+            .collect::<AddressMap<_>>();
 
         let mut precompiles = Self::default();
         precompiles.extend(inner.into_iter().map(|p| p.1));
@@ -304,7 +322,7 @@ impl Precompiles {
             .iter()
             .filter(|(a, _)| other.inner.contains_key(*a))
             .map(|(a, p)| (*a, p.clone()))
-            .collect::<HashMap<_, _>>();
+            .collect::<AddressMap<_>>();
 
         let mut precompiles = Self::default();
         precompiles.extend(inner.into_iter().map(|p| p.1));
@@ -312,15 +330,25 @@ impl Precompiles {
     }
 }
 
-/// Precompile.
-#[derive(Clone, Debug)]
+/// Precompile wrapper for simple eth function that provides complex interface on execution.
+#[derive(Clone)]
 pub struct Precompile {
     /// Unique identifier.
     id: PrecompileId,
     /// Precompile address.
     address: Address,
-    /// Precompile implementation.
+    /// Precompile function.
     fn_: PrecompileFn,
+}
+
+impl Debug for Precompile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Precompile {{ id: {:?}, address: {:?} }}",
+            self.id, self.address
+        )
+    }
 }
 
 impl From<(PrecompileId, Address, PrecompileFn)> for Precompile {
@@ -329,9 +357,9 @@ impl From<(PrecompileId, Address, PrecompileFn)> for Precompile {
     }
 }
 
-impl From<Precompile> for (PrecompileId, Address, PrecompileFn) {
+impl From<Precompile> for (PrecompileId, Address) {
     fn from(value: Precompile) -> Self {
-        (value.id, value.address, value.fn_)
+        (value.id, value.address)
     }
 }
 
@@ -353,22 +381,13 @@ impl Precompile {
         &self.address
     }
 
-    /// Returns reference to precompile implementation.
-    #[inline]
-    pub fn precompile(&self) -> &PrecompileFn {
-        &self.fn_
-    }
-
-    /// Consumes the type and returns the precompile implementation.
-    #[inline]
-    pub fn into_precompile(self) -> PrecompileFn {
-        self.fn_
-    }
-
     /// Executes the precompile.
+    ///
+    /// Returns `Ok(PrecompileOutput)` on success or non-fatal halt,
+    /// or `Err(PrecompileError)` for fatal/unrecoverable errors.
     #[inline]
-    pub fn execute(&self, input: &[u8], gas_limit: u64) -> PrecompileResult {
-        (self.fn_)(input, gas_limit)
+    pub fn execute(&self, input: &[u8], gas_limit: u64, reservoir: u64) -> PrecompileResult {
+        (self.fn_)(input, gas_limit, reservoir)
     }
 }
 
@@ -449,8 +468,8 @@ pub const fn u64_to_address(x: u64) -> Address {
 mod test {
     use super::*;
 
-    fn temp_precompile(_input: &[u8], _gas_limit: u64) -> PrecompileResult {
-        PrecompileResult::Err(PrecompileError::OutOfGas)
+    fn temp_precompile(_input: &[u8], _gas_limit: u64, reservoir: u64) -> PrecompileResult {
+        Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, reservoir))
     }
 
     #[test]
@@ -470,21 +489,25 @@ mod test {
             temp_precompile,
         )]);
 
-        assert_eq!(
-            precompiles.optimized_access[100]
-                .as_ref()
-                .unwrap()
-                .execute(&[], u64::MAX),
-            PrecompileResult::Err(PrecompileError::OutOfGas)
-        );
+        let output = precompiles.optimized_access[100]
+            .as_ref()
+            .unwrap()
+            .execute(&[], u64::MAX, 0)
+            .unwrap();
+        assert!(matches!(
+            output.status,
+            PrecompileStatus::Halt(PrecompileHalt::OutOfGas)
+        ));
 
-        assert_eq!(
-            precompiles
-                .get(&Address::left_padding_from(&[101]))
-                .unwrap()
-                .execute(&[], u64::MAX),
-            PrecompileResult::Err(PrecompileError::OutOfGas)
-        );
+        let output = precompiles
+            .get(&Address::left_padding_from(&[101]))
+            .unwrap()
+            .execute(&[], u64::MAX, 0)
+            .unwrap();
+        assert!(matches!(
+            output.status,
+            PrecompileStatus::Halt(PrecompileHalt::OutOfGas)
+        ));
     }
 
     #[test]

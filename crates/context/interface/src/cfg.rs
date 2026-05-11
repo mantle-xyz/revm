@@ -1,7 +1,12 @@
 //! Configuration for the EVM. Containing [`SpecId`].
+
+pub mod gas;
+pub mod gas_params;
+
+pub use gas_params::{GasId, GasParams};
+
 use auto_impl::auto_impl;
-use core::fmt::Debug;
-use core::hash::Hash;
+use core::{fmt::Debug, hash::Hash};
 use primitives::{hardfork::SpecId, Address, TxKind, U256};
 
 /// Configuration for the EVM.
@@ -65,8 +70,30 @@ pub trait Cfg {
     /// Returns whether the fee charge is disabled.
     fn is_fee_charge_disabled(&self) -> bool;
 
+    /// Returns whether EIP-7708 (ETH transfers emit logs) is disabled.
+    fn is_eip7708_disabled(&self) -> bool;
+
+    /// Returns whether EIP-7708 delayed burn logging is disabled.
+    ///
+    /// When enabled, revm tracks all self-destructed addresses and emits logs for
+    /// accounts that still have remaining balance at the end of the transaction.
+    /// This can be disabled for performance reasons as it requires storing and
+    /// iterating over all self-destructed accounts. When disabled, the logging
+    /// can be done outside of revm when applying accounts to database state.
+    fn is_eip7708_delayed_burn_disabled(&self) -> bool;
+
     /// Returns the limit in bytes for the memory buffer.
     fn memory_limit(&self) -> u64;
+
+    /// Returns the gas params for the EVM.
+    fn gas_params(&self) -> &GasParams;
+
+    /// Returns whether EIP-8037 (Amsterdam) state creation gas cost increase is enabled.
+    ///
+    /// When enabled, storage creation gas is tracked separately from regular gas
+    /// via the reservoir model. EIP-8037 specifies concrete gas values based on
+    /// `cost_per_state_byte` and adds a hash cost for deployed bytecode.
+    fn is_amsterdam_eip8037_enabled(&self) -> bool;
 }
 
 /// What bytecode analysis to perform
