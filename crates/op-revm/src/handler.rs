@@ -225,6 +225,12 @@ where
             return Ok(());
         }
 
+        // L1 block info is stored in the context for later use.
+        // and it will be reloaded from the database if it is not for the current block.
+        if chain.l2_block != Some(block.number()) {
+            *chain = L1BlockInfo::try_fetch(journal.db_mut(), block.number(), spec)?;
+        }
+
         let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
 
         // validates account nonce and code
@@ -594,8 +600,6 @@ where
                 journal.load_account_mut(caller).map(|mut acc| {
                     acc.bump_nonce();
                     acc.incr_balance(U256::from(mint.unwrap_or_default()));
-
-                    // drop(acc); // Drop acc to avoid borrow checker issues.
                 })
             };
 

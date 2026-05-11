@@ -216,7 +216,8 @@ impl Gas {
         self.tracker.set_remaining(remaining);
     }
 
-    /// Set the limit. [MANTLE] Gas::set_limit - Called by the token_ratio logic in op-revm/handler.rs
+    /// [MANTLE] Gas::set_limit - Called by the token_ratio logic in op-revm/handler.rs
+    /// Set the limit.
     #[inline]
     pub fn set_limit(&mut self, limit: u64) {
         self.tracker.set_limit(limit);

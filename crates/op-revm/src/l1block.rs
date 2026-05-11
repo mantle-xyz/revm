@@ -182,6 +182,7 @@ impl L1BlockInfo {
         self.operator_fee_charge_inner(gas_limit)
     }
 
+    /// [MANTLE] spec_id not used in operator_fee_charge_inner
     /// Calculate the operator fee for the given `gas`.
     fn operator_fee_charge_inner(&self, gas: U256) -> U256 {
         let operator_fee_scalar = self
@@ -206,7 +207,7 @@ impl L1BlockInfo {
             return U256::ZERO;
         }
 
-        // [MANTLE] - operator_fee_charge_inner spec_id not used
+        // [MANTLE] spec_id not used in operator_fee_charge_inner
         let operator_cost_gas_limit = self.operator_fee_charge_inner(U256::from(gas.limit()));
         // Exclude reservoir gas (EIP-8037) from used gas — reservoir is unused and reimbursed.
         let operator_cost_gas_used = self.operator_fee_charge_inner(U256::from(
