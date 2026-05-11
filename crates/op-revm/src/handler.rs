@@ -2,8 +2,8 @@
 use crate::{
     api::exec::OpContextTr,
     constants::{
-        BASE_FEE_RECIPIENT, GAS_ORACLE_CONTRACT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT,
-        BVM_ETH_MINT_GAS_COMPENSATION,
+        BASE_FEE_RECIPIENT, BVM_ETH_MINT_GAS_COMPENSATION, GAS_ORACLE_CONTRACT, L1_FEE_RECIPIENT,
+        OPERATOR_FEE_RECIPIENT,
     },
     transaction::{deposit::DEPOSIT_TRANSACTION_TYPE, OpTransactionError, OpTxTr},
     BvmEth, L1BlockInfo, OpHaltReason, OpSpecId,
@@ -33,7 +33,7 @@ use revm::{
     },
     primitives::{hardfork::SpecId, U256},
 };
-use std::{boxed::Box, vec::Vec};
+use std::{boxed::Box, vec, vec::Vec};
 
 /// Optimism handler extends the [`Handler`] with Optimism specific logic.
 #[derive(Debug, Clone)]
@@ -442,7 +442,10 @@ where
         // The condition guards against false positives: without eth_value/eth_tx_value no
         // BVM_ETH warming occurs, and without input no contract code executes.
         if (tx.eth_value().is_some() || tx.eth_tx_value().is_some()) && !tx.input().is_empty() {
-            gas.set_remaining(gas.remaining().saturating_sub(BVM_ETH_MINT_GAS_COMPENSATION));
+            gas.set_remaining(
+                gas.remaining()
+                    .saturating_sub(BVM_ETH_MINT_GAS_COMPENSATION),
+            );
         }
 
         let limit = gas.limit();
@@ -464,7 +467,10 @@ where
 
             if !is_arsia {
                 // scale refund and remaining by token_ratio, restore limit
-                gas.set_refund(scale_refund_with_token_ratio(gas.refunded(), token_ratio_u64));
+                gas.set_refund(scale_refund_with_token_ratio(
+                    gas.refunded(),
+                    token_ratio_u64,
+                ));
                 gas.set_remaining(gas.remaining().saturating_mul(token_ratio_u64));
                 gas.set_limit(limit);
             }
@@ -815,7 +821,12 @@ mod tests {
         info.calculate_tx_l1_cost(input, spec)
     }
 
-    fn regular_tx(caller: Address, to: Address, gas_limit: u64, input: &[u8]) -> OpTransaction<TxEnv> {
+    fn regular_tx(
+        caller: Address,
+        to: Address,
+        gas_limit: u64,
+        input: &[u8],
+    ) -> OpTransaction<TxEnv> {
         OpTransaction::builder()
             .base(
                 TxEnv::builder()
@@ -1953,7 +1964,8 @@ mod tests {
         let caller = Address::from_str("0x1000000000000000000000000000000000000001").unwrap();
         let recipient = Address::from_str("0x2000000000000000000000000000000000000002").unwrap();
         let regular_input = bytes!("faca01");
-        let deposit_caller = Address::from_str("0x9000000000000000000000000000000000000009").unwrap();
+        let deposit_caller =
+            Address::from_str("0x9000000000000000000000000000000000000009").unwrap();
 
         let mut db = InMemoryDB::default();
         update_fee_params_in_db(
@@ -2011,9 +2023,10 @@ mod tests {
             l1_block_contract
                 .storage
                 .insert(L1_BASE_FEE_SLOT, U256::from(NEW_L1_BASE_FEE));
-            l1_block_contract
-                .storage
-                .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(NEW_L1_BLOB_BASE_FEE));
+            l1_block_contract.storage.insert(
+                ECOTONE_L1_BLOB_BASE_FEE_SLOT,
+                U256::from(NEW_L1_BLOB_BASE_FEE),
+            );
             l1_block_contract.storage.insert(
                 ECOTONE_L1_FEE_SCALARS_SLOT,
                 ecotone_fee_scalars(
@@ -2057,7 +2070,10 @@ mod tests {
         assert_eq!(chain.token_ratio, U256::from(TOKEN_RATIO));
         assert_eq!(chain.l1_base_fee, U256::from(NEW_L1_BASE_FEE));
         if spec.is_enabled_in(OpSpecId::ARSIA) {
-            assert_eq!(chain.l1_blob_base_fee, Some(U256::from(NEW_L1_BLOB_BASE_FEE)));
+            assert_eq!(
+                chain.l1_blob_base_fee,
+                Some(U256::from(NEW_L1_BLOB_BASE_FEE))
+            );
             assert_eq!(
                 chain.l1_blob_base_fee_scalar,
                 Some(U256::from(NEW_L1_BLOB_BASE_FEE_SCALAR))
@@ -2255,7 +2271,8 @@ mod tests {
 
         let caller = Address::from_str("0x5000000000000000000000000000000000000005").unwrap();
         let recipient = Address::from_str("0x6000000000000000000000000000000000000006").unwrap();
-        let deposit_caller = Address::from_str("0x7000000000000000000000000000000000000007").unwrap();
+        let deposit_caller =
+            Address::from_str("0x7000000000000000000000000000000000000007").unwrap();
         let regular_input = bytes!("faca03");
         let set_token_ratio_input =
             bytes!("e38e91f900000000000000000000000000000000000000000000000000000000000010cc");
@@ -2316,9 +2333,10 @@ mod tests {
             l1_block_contract
                 .storage
                 .insert(L1_BASE_FEE_SLOT, U256::from(NEW_L1_BASE_FEE));
-            l1_block_contract
-                .storage
-                .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(NEW_L1_BLOB_BASE_FEE));
+            l1_block_contract.storage.insert(
+                ECOTONE_L1_BLOB_BASE_FEE_SLOT,
+                U256::from(NEW_L1_BLOB_BASE_FEE),
+            );
             l1_block_contract.storage.insert(
                 ECOTONE_L1_FEE_SCALARS_SLOT,
                 ecotone_fee_scalars(
@@ -2560,11 +2578,7 @@ mod tests {
 
         // Verify caller nonce was bumped and mint balance was credited.
         // Per the OP deposit spec, these must persist even on deposit failure.
-        let caller_acc = evm
-            .ctx()
-            .journal_mut()
-            .load_account(caller)
-            .unwrap();
+        let caller_acc = evm.ctx().journal_mut().load_account(caller).unwrap();
         assert_eq!(
             caller_acc.info.nonce, 1,
             "Caller nonce must be bumped for failed deposits"
@@ -3024,24 +3038,29 @@ mod tests {
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
         // eth_value is None by default, so compensation should not be applied
 
-        let gas_with_compensation =
-            call_last_frame_return(ctx_with_compensation, InstructionResult::Stop, Gas::new(remaining_gas));
-        let gas_without_compensation =
-            call_last_frame_return(ctx_without_compensation, InstructionResult::Stop, Gas::new(remaining_gas));
+        let gas_with_compensation = call_last_frame_return(
+            ctx_with_compensation,
+            InstructionResult::Stop,
+            Gas::new(remaining_gas),
+        );
+        let gas_without_compensation = call_last_frame_return(
+            ctx_without_compensation,
+            InstructionResult::Stop,
+            Gas::new(remaining_gas),
+        );
 
         // Calculate the difference in remaining gas
-        let gas_difference = gas_without_compensation.remaining() - gas_with_compensation.remaining();
+        let gas_difference =
+            gas_without_compensation.remaining() - gas_with_compensation.remaining();
 
         // Verify the difference is exactly 4500
         assert_eq!(
-            gas_difference,
-            BVM_ETH_MINT_GAS_COMPENSATION,
+            gas_difference, BVM_ETH_MINT_GAS_COMPENSATION,
             "Gas compensation should be exactly {} (account diff 2500 + storage diff 2000)",
             BVM_ETH_MINT_GAS_COMPENSATION
         );
         assert_eq!(
-            BVM_ETH_MINT_GAS_COMPENSATION,
-            4500,
+            BVM_ETH_MINT_GAS_COMPENSATION, 4500,
             "BVM_ETH_MINT_GAS_COMPENSATION constant should be 4500"
         );
     }
@@ -3056,9 +3075,7 @@ mod tests {
             .with_tx(
                 OpTransaction::builder()
                     .base(
-                        TxEnv::builder()
-                            .gas_limit(initial_gas)
-                            .data(Bytes::new()), // Empty input
+                        TxEnv::builder().gas_limit(initial_gas).data(Bytes::new()), // Empty input
                     )
                     .source_hash(B256::from([1u8; 32]))
                     .build_fill(),
@@ -3069,7 +3086,7 @@ mod tests {
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
-        
+
         // Gas compensation should NOT be applied when input is empty
         assert_eq!(
             gas.remaining(),
@@ -3098,7 +3115,7 @@ mod tests {
         // eth_value and eth_tx_value are None by default
 
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
-        
+
         // Gas compensation should NOT be applied when both eth_value and eth_tx_value are None
         assert_eq!(
             gas.remaining(),
@@ -3161,7 +3178,7 @@ mod tests {
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
-        
+
         // Gas compensation should NOT be applied when eth_value is zero (returns None)
         assert_eq!(
             gas.remaining(),
@@ -3201,9 +3218,9 @@ mod tests {
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
 
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(remaining_gas));
-        
+
         // Gas compensation (4500) should be subtracted from remaining gas
-        // Since remaining_gas (5000) > BVM_ETH_MINT_GAS_COMPENSATION (4500), 
+        // Since remaining_gas (5000) > BVM_ETH_MINT_GAS_COMPENSATION (4500),
         // remaining should be 5000 - 4500 = 500
         assert_eq!(
             gas.remaining(),
@@ -3348,11 +3365,15 @@ mod tests {
         let error = EVMError::Transaction(OpTransactionError::HaltedDepositPostRegolith);
         let result = handler.catch_error(&mut evm, error);
 
-        assert!(result.is_ok(), "Failed deposit should return Ok(FailedDeposit)");
+        assert!(
+            result.is_ok(),
+            "Failed deposit should return Ok(FailedDeposit)"
+        );
 
         // Verify cleanup was performed.
         assert_eq!(
-            evm.ctx().chain.tx_l1_cost, None,
+            evm.ctx().chain.tx_l1_cost,
+            None,
             "clear_tx_l1_cost must be called after catch_error"
         );
     }
@@ -3395,12 +3416,11 @@ mod tests {
         assert_eq!(nonce_before, 1, "Nonce should be 1 before catch_error");
 
         // catch_error for non-deposit should return Err and call discard_tx().
-        let error = EVMError::Transaction(
-            OpTransactionError::Base(InvalidTransaction::NonceTooLow {
+        let error =
+            EVMError::Transaction(OpTransactionError::Base(InvalidTransaction::NonceTooLow {
                 tx: 0,
                 state: 1,
-            }),
-        );
+            }));
         let result = handler.catch_error(&mut evm, error);
 
         assert!(result.is_err(), "Non-deposit error should propagate as Err");
@@ -3449,11 +3469,7 @@ mod tests {
         // This must NOT revert the previously committed nonce/mint.
         evm.ctx().journal_mut().discard_tx();
 
-        let caller_acc = evm
-            .ctx()
-            .journal_mut()
-            .load_account(caller)
-            .unwrap();
+        let caller_acc = evm.ctx().journal_mut().load_account(caller).unwrap();
         assert_eq!(
             caller_acc.info.nonce, 1,
             "Committed nonce must survive subsequent discard_tx"

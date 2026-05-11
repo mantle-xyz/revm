@@ -24,11 +24,11 @@ pub enum AlloyDBError {
     /// - The node has pruned the block data
     /// - Using a light client that doesn't have the block
     BlockNotFound(u64),
-    /// Provider returned malformed bytecode that cannot be decoded safely. 
+    /// Provider returned malformed bytecode that cannot be decoded safely.
     ///
     /// [MANTLE] - basic_async_ref
     InvalidBytecode(BytecodeDecodeError),
-    /// An internal design constraint was violated (e.g. a method that should never be called was called). 
+    /// An internal design constraint was violated (e.g. a method that should never be called was called).
     ///
     /// [MANTLE] - code_by_hash_async_ref
     Internal(String),

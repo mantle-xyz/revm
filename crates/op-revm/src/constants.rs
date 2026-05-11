@@ -73,7 +73,8 @@ pub const L1_BLOCK_CONTRACT: Address = address!("0x42000000000000000000000000000
 pub const GAS_ORACLE_CONTRACT: Address = address!("420000000000000000000000000000000000000F");
 
 /// The address of the sequencer fee wallet, which is block coinbase.
-pub const SEQUENCER_FEE_VAULT_ADDRESS: Address = address!("4200000000000000000000000000000000000011");
+pub const SEQUENCER_FEE_VAULT_ADDRESS: Address =
+    address!("4200000000000000000000000000000000000011");
 
 /// Gas compensation for BVM_ETH mint operations to align with go-ethereum behavior.
 ///
