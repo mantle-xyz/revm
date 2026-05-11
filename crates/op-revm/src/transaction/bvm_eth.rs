@@ -748,7 +748,7 @@ mod tests {
         };
 
         // 1. Verify gas used (most important check - do this first)
-        let actual_gas_used = result.gas_used();
+        let actual_gas_used = result.tx_gas_used();
         assert_eq!(
             actual_gas_used, test_case.expected_gas_used,
             "Gas used mismatch! Expected: {}, Actual: {}",

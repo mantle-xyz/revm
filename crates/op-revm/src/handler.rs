@@ -160,7 +160,7 @@ where
             if !cfg.spec().is_enabled_in(OpSpecId::ARSIA) {
                 // if the tx is not a deposit transaction and ARSIA is not enabled, we need to multiply the initial gas by the token ratio
                 // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to low 64 bits.
-                let token_ratio = chain.token_ratio.as_limbs()[0];
+                let token_ratio = chain.token_ratio.as_limbs()[0].max(1);
                 initial_gas.initial_total_gas = initial_gas
                     .initial_total_gas
                     .checked_mul(token_ratio)
@@ -450,7 +450,7 @@ where
 
         let limit = gas.limit();
         // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to low 64 bits.
-        let token_ratio_u64 = chain.token_ratio.as_limbs()[0];
+        let token_ratio_u64 = chain.token_ratio.as_limbs()[0].max(1);
 
         let is_arsia = cfg.spec().is_enabled_in(OpSpecId::ARSIA);
 
@@ -850,8 +850,8 @@ mod tests {
             .with_cfg(CfgEnv::new_with_spec(OpSpecId::BEDROCK));
 
         let gas = call_last_frame_return(ctx, InstructionResult::Revert, Gas::new(90));
-        assert_eq!(gas.remaining(), 0);
-        assert_eq!(gas.spent(), 100);
+        assert_eq!(gas.remaining(), 90);
+        assert_eq!(gas.total_gas_spent(), 10);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -988,7 +988,7 @@ mod tests {
 
         assert_eq!(gas_huge.remaining(), gas_truncated.remaining());
         assert_eq!(gas_huge.refunded(), gas_truncated.refunded());
-        assert_eq!(gas_huge.spent(), gas_truncated.spent());
+        assert_eq!(gas_huge.total_gas_spent(), gas_truncated.total_gas_spent());
     }
 
     #[test]

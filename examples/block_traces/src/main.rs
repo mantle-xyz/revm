@@ -172,7 +172,7 @@ async fn process_block(
             .inner
             .gas_used;
 
-        let actual_gas_used = res.unwrap().gas_used();
+        let actual_gas_used = res.unwrap().tx_gas_used();
         println!("Expected gas used: {expected_gas_used}, Actual gas used: {actual_gas_used}");
         if expected_gas_used == actual_gas_used {
             println!("--- passed✅");
