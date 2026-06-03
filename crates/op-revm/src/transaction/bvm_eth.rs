@@ -693,7 +693,7 @@ mod tests {
             .with_db(InMemoryDB::default())
             .with_chain(l1_block_info)
             .with_block(block_env)
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
             .with_tx(op_tx);
         let mut evm = ctx.build_op();
         let mut handler = OpHandler::<
@@ -1141,7 +1141,7 @@ mod tests {
         let ctx = Context::op()
             .with_db(db)
             .with_chain(l1_block_info)
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
             .modify_tx_chained(|tx| {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(target);
@@ -1210,7 +1210,7 @@ mod tests {
         let ctx = Context::op()
             .with_db(db)
             .with_chain(l1_block_info)
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
             .modify_tx_chained(|tx| {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(BvmEth::ADDRESS);
@@ -1278,7 +1278,7 @@ mod tests {
         let ctx = Context::op()
             .with_db(db)
             .with_chain(l1_block_info)
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
             .modify_tx_chained(|tx| {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(BvmEth::ADDRESS);
@@ -1350,7 +1350,7 @@ mod tests {
         let ctx = Context::op()
             .with_db(db)
             .with_chain(l1_block_info)
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
             .modify_tx_chained(|tx| {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(target);
@@ -1425,7 +1425,7 @@ mod tests {
         let ctx = Context::op()
             .with_db(db)
             .with_chain(l1_block_info)
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
             .modify_tx_chained(|tx| {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(target);
@@ -1775,7 +1775,7 @@ mod tests {
         let ctx = Context::op()
             .with_db(db)
             .with_chain(l1_block_info)
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
             .modify_tx_chained(|tx| {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(outer);
