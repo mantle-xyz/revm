@@ -9,12 +9,37 @@ use crate::transaction::{
 };
 use alloy_sol_types::SolValue;
 use revm::{
-    context::{JournalTr, Transaction},
+    context::{ContextTr, JournalTr, Transaction},
     primitives::{
         address, fixed_bytes, keccak256, Address, Bytes, FixedBytes, Log, LogData, TxKind, U256,
     },
+    Database, Journal,
 };
 use std::vec;
+
+/// Extension on the concrete [`Journal`] to reset an address (and its currently-loaded
+/// storage slots) back to EIP-2929 *cold*.
+///
+/// Used right after the BVM_ETH mint/transfer in [`BvmEth::process_eth_deposit`] so that
+/// subsequent EVM execution observes BVM_ETH as cold — exactly like op-geth, whose
+/// `StateDB.SetState()`-based mint never touches the EVM access list. Resetting the warm
+/// flags does NOT affect the persisted balance/totalSupply changes (those are journaled
+/// separately and stay committed); it only restores the EIP-2929 warm/cold accounting.
+pub trait JournalColdExt {
+    /// Mark `address` and all of its currently-loaded storage slots cold.
+    fn mark_address_cold(&mut self, address: Address);
+}
+
+impl<DB: Database> JournalColdExt for Journal<DB> {
+    fn mark_address_cold(&mut self, address: Address) {
+        if let Some(account) = self.inner.state().get_mut(&address) {
+            account.mark_cold();
+            for slot in account.storage.values_mut() {
+                slot.mark_cold();
+            }
+        }
+    }
+}
 
 /// BVM_ETH ERC20 token implementation.
 ///
@@ -89,6 +114,7 @@ impl BvmEth {
     ) -> Result<(), OpTransactionError>
     where
         CTX: OpContextTr,
+        <CTX as ContextTr>::Journal: JournalColdExt,
     {
         let (_, tx, _, journal, _, _) = context.all_mut();
 
@@ -120,6 +146,11 @@ impl BvmEth {
         }
 
         journal.touch_account(Self::ADDRESS);
+
+        // Reset BVM_ETH (account + the storage slots just touched by mint/transfer) back to
+        // cold so the subsequent EVM execution observes it cold, matching op-geth. This is the
+        // single source of warm/cold parity with op-geth — no static gas compensation anywhere.
+        journal.mark_address_cold(Self::ADDRESS);
         Ok(())
     }
 
@@ -571,6 +602,351 @@ mod tests {
     }
 
     /// Test case data structure
+    #[test]
+    fn process_eth_deposit_leaves_bvm_eth_cold() {
+        // After minting/transferring BVM_ETH, the account AND its touched storage slots must
+        // be COLD for the subsequent EVM execution — matching op-geth, whose SetState-based
+        // mint never warms the EVM access list. This is what makes the static gas
+        // compensation unnecessary.
+        let caller = Address::from([0x11; 20]);
+        let eth_value = 1_000_000_000_000_000u128; // 0.001 ETH
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(caller); // to = EOA, deliberately NOT BVM_ETH
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_tx_value = Some(eth_value);
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit processing should succeed");
+
+        // First post-mint access of the BVM_ETH account must report cold.
+        let acc = ctx
+            .journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load BVM_ETH account");
+        assert!(
+            acc.is_cold,
+            "BVM_ETH account must be cold after process_eth_deposit"
+        );
+
+        // The caller's BVM_ETH balance slot (touched by mint + transfer) must also be cold.
+        let slot = BvmEth::get_balance_slot(caller);
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot)
+            .expect("sload BVM_ETH balance slot");
+        assert!(
+            loaded.is_cold,
+            "BVM_ETH balance slot must be cold after process_eth_deposit"
+        );
+    }
+
+    #[test]
+    fn deposit_to_eoa_with_calldata_no_compensation_matches_geth() {
+        // Deterministic replay of hoodi-qa2 block 59294 user deposit (the fork tx):
+        //   to = caller (EOA, no code), value = 0, input = 0xdeadbeef01020304 (8 nonzero bytes),
+        //   ethValue = ethTxValue = 0.001 ETH.
+        // op-geth gasUsed = 21320 (= 21000 + EIP-7623 floor for 8 calldata tokens, 32*10).
+        // The removed BVM_ETH_MINT_GAS_COMPENSATION (4500) previously inflated reth to 25628,
+        // diverging from op-geth and forking the chain at this block.
+        let caller = Address::from([0x74; 20]);
+        let eth_value = 1_000_000_000_000_000u128; // 0.001 ETH
+
+        let op_tx = OpTransaction {
+            base: TxEnv {
+                caller,
+                kind: TxKind::Call(caller),
+                gas_limit: 100_000,
+                gas_price: 0,
+                value: U256::ZERO,
+                data: Bytes::from(hex::decode("deadbeef01020304").unwrap()),
+                ..Default::default()
+            },
+            enveloped_tx: None,
+            deposit: DepositTransactionParts {
+                source_hash: B256::from([9u8; 32]),
+                mint: Some(0),
+                is_system_transaction: false,
+                eth_value: Some(eth_value),
+                eth_tx_value: Some(eth_value),
+            },
+        };
+
+        let block_env = BlockEnv {
+            number: U256::from(59294u64),
+            gas_limit: 30_000_000,
+            basefee: 1_000_000_000,
+            ..Default::default()
+        };
+        let l1_block_info = L1BlockInfo {
+            l2_block: Some(U256::from(59294u64)),
+            token_ratio: U256::from(3040u64),
+            ..Default::default()
+        };
+
+        let ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .with_chain(l1_block_info)
+            .with_block(block_env)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .with_tx(op_tx);
+        let mut evm = ctx.build_op();
+        let mut handler = OpHandler::<
+            _,
+            EVMError<_, crate::transaction::error::OpTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let result = handler.run(&mut evm).expect("deposit must execute");
+
+        let gas = result.gas_used();
+        assert_ne!(
+            gas, 25_628,
+            "spurious BVM_ETH_MINT_GAS_COMPENSATION (+4500) must be gone"
+        );
+        assert_eq!(
+            gas, 21_320,
+            "deposit gasUsed must match op-geth EIP-7623 floor (hoodi-qa2 block 59294)"
+        );
+    }
+
+    #[test]
+    fn process_eth_deposit_all_slots_cold_after_mint_and_transfer() {
+        // Verify ALL storage slots touched by mint + transfer are cold:
+        // balance(caller), balance(to), totalSupply.
+        // This ensures mark_address_cold covers every slot, not just one.
+        let caller = Address::from([0x11; 20]);
+        let recipient = Address::from([0x22; 20]); // different from caller
+        let eth_value = 1_000_000_000_000_000u128;
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(recipient);
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_tx_value = Some(eth_value);
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
+
+        // Account must be cold
+        let acc = ctx
+            .journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load BVM_ETH");
+        assert!(acc.is_cold, "BVM_ETH account must be cold");
+
+        // balance(caller) — warmed by mint_inner + transfer_inner
+        let slot_caller = BvmEth::get_balance_slot(caller);
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot_caller)
+            .expect("sload balance(caller)");
+        assert!(loaded.is_cold, "balance(caller) must be cold");
+
+        // balance(recipient) — warmed by transfer_inner
+        let slot_recipient = BvmEth::get_balance_slot(recipient);
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot_recipient)
+            .expect("sload balance(recipient)");
+        assert!(loaded.is_cold, "balance(recipient) must be cold");
+
+        // totalSupply — warmed by add_total_supply in mint_inner
+        let slot_supply = BvmEth::get_total_supply_slot();
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot_supply)
+            .expect("sload totalSupply");
+        assert!(loaded.is_cold, "totalSupply must be cold");
+    }
+
+    #[test]
+    fn process_eth_deposit_mint_only_no_transfer() {
+        // When eth_tx_value is None, only mint_inner runs (no transfer_inner).
+        // Slots warmed: balance(caller) + totalSupply. Both must be cold after.
+        let caller = Address::from([0x33; 20]);
+        let recipient = Address::from([0x44; 20]);
+        let eth_value = 2_000_000_000_000_000u128;
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(recipient);
+                tx.deposit.source_hash = B256::from([2u8; 32]);
+                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_tx_value = None; // no transfer
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
+
+        let acc = ctx
+            .journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load BVM_ETH");
+        assert!(acc.is_cold, "BVM_ETH account must be cold (mint-only)");
+
+        let slot_caller = BvmEth::get_balance_slot(caller);
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot_caller)
+            .expect("sload balance(caller)");
+        assert!(loaded.is_cold, "balance(caller) must be cold (mint-only)");
+
+        let slot_supply = BvmEth::get_total_supply_slot();
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot_supply)
+            .expect("sload totalSupply");
+        assert!(loaded.is_cold, "totalSupply must be cold (mint-only)");
+
+        // balance(recipient) should NOT have been loaded at all (no transfer)
+        // Accessing it now should also be cold (never touched by process_eth_deposit)
+        let slot_recipient = BvmEth::get_balance_slot(recipient);
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot_recipient)
+            .expect("sload balance(recipient)");
+        assert!(
+            loaded.is_cold,
+            "balance(recipient) must be cold (never touched in mint-only)"
+        );
+    }
+
+    #[test]
+    fn process_eth_deposit_from_eq_to_transfer_skipped() {
+        // When from == to, transfer_inner returns early (no-op).
+        // Only mint_inner runs. Verify cold state is still correct.
+        let caller = Address::from([0x55; 20]);
+        let eth_value = 500_000_000_000_000u128;
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(caller); // to == from → transfer_inner skips
+                tx.deposit.source_hash = B256::from([3u8; 32]);
+                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_tx_value = Some(eth_value);
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
+
+        let acc = ctx
+            .journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load BVM_ETH");
+        assert!(acc.is_cold, "BVM_ETH account must be cold (from==to)");
+
+        // balance(caller) — warmed by mint_inner only (transfer skipped)
+        let slot = BvmEth::get_balance_slot(caller);
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot)
+            .expect("sload balance(caller)");
+        assert!(loaded.is_cold, "balance(caller) must be cold (from==to)");
+
+        let slot_supply = BvmEth::get_total_supply_slot();
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot_supply)
+            .expect("sload totalSupply");
+        assert!(loaded.is_cold, "totalSupply must be cold (from==to)");
+    }
+
+    #[test]
+    fn process_eth_deposit_no_eth_value_no_warming() {
+        // When neither eth_value nor eth_tx_value is set, process_eth_deposit
+        // returns early without loading BVM_ETH at all. No warming occurs.
+        let caller = Address::from([0x66; 20]);
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(caller);
+                tx.deposit.source_hash = B256::from([4u8; 32]);
+                tx.deposit.eth_value = None;
+                tx.deposit.eth_tx_value = None;
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
+
+        // BVM_ETH account was never loaded, first access must be cold
+        let acc = ctx
+            .journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load BVM_ETH");
+        assert!(
+            acc.is_cold,
+            "BVM_ETH must be cold when no eth_value/eth_tx_value"
+        );
+    }
+
+    #[test]
+    fn process_eth_deposit_state_changes_persist_after_cold_reset() {
+        // mark_address_cold must NOT undo the balance/totalSupply state changes.
+        // Only the warm/cold flags should be reset.
+        let caller = Address::from([0x77; 20]);
+        let recipient = Address::from([0x88; 20]);
+        let eth_value = 3_000_000_000_000_000u128; // 0.003 ETH
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(recipient);
+                tx.deposit.source_hash = B256::from([5u8; 32]);
+                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_tx_value = Some(eth_value);
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
+
+        // balance(caller) should have been minted (mint_inner) then debited (transfer_inner)
+        // mint: 0 + eth_value = eth_value, transfer: eth_value - eth_value = 0
+        let slot_caller = BvmEth::get_balance_slot(caller);
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot_caller)
+            .expect("sload balance(caller)");
+        assert_eq!(
+            loaded.data,
+            U256::ZERO,
+            "balance(caller) should be 0 after mint+transfer of same amount"
+        );
+
+        // balance(recipient) should have received the transfer
+        let slot_recipient = BvmEth::get_balance_slot(recipient);
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot_recipient)
+            .expect("sload balance(recipient)");
+        assert_eq!(
+            loaded.data,
+            U256::from(eth_value),
+            "balance(recipient) should equal eth_value after transfer"
+        );
+
+        // totalSupply should have increased by eth_value (from mint)
+        let slot_supply = BvmEth::get_total_supply_slot();
+        let loaded = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, slot_supply)
+            .expect("sload totalSupply");
+        assert_eq!(
+            loaded.data,
+            U256::from(eth_value),
+            "totalSupply should equal eth_value after mint"
+        );
+    }
+
     #[derive(Debug, Serialize, Deserialize)]
     struct BvmEthDepositTestCase {
         block_number: u64,
