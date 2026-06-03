@@ -314,9 +314,10 @@ mod tests {
         context::{BlockEnv, Context, TxEnv},
         context_interface::result::{EVMError, ExecutionResult},
         database::{Cache, InMemoryDB},
-        handler::{EthFrame, Handler},
+        handler::{EthFrame, EvmTr, Handler},
         interpreter::interpreter::EthInterpreter,
         primitives::{hex, Address, Bytes, B256, U256},
+        state::{AccountInfo, AccountStatus, Bytecode},
     };
     use rstest::rstest;
     use serde::{Deserialize, Serialize};
@@ -944,6 +945,869 @@ mod tests {
             loaded.data,
             U256::from(eth_value),
             "totalSupply should equal eth_value after mint"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional coverage for JournalColdExt cooling.
+    //
+    // Groups:
+    //   * Cold-state for remaining process_eth_deposit scenarios (transfer-
+    //     only paths, mint_only=true with both values).
+    //   * End-to-end gas regression for paths not covered above: contract
+    //     target that doesn't touch BVM_ETH (the case any heuristic-on-
+    //     calldata fix would have failed), direct BVM_ETH call (STOP and
+    //     SLOAD synthetic bytecode), nested CALL into BVM_ETH.
+    //   * Revert paths: EVM REVERT preserves pre-EVM mint; cooling is
+    //     idempotent across a catch_error-style full revert + re-mint
+    //     replay; cooling is restored after an inner frame warms-then-
+    //     reverts a slot.
+    //   * CREATE deposits (TxKind::Create): cooling reaches the create-
+    //     derived destination address.
+    // -----------------------------------------------------------------------
+
+    /// Inspect cold state without warming the account/slots (which the
+    /// journal API would do as a side-effect of load_account/sload).
+    fn assert_bvm_eth_and_slots_cold(state: &revm::state::EvmState, expected_cold_slots: &[U256]) {
+        let acc = state
+            .get(&BvmEth::ADDRESS)
+            .expect("BVM_ETH must be loaded");
+        assert!(
+            acc.status.contains(AccountStatus::Cold),
+            "BVM_ETH account must be cold"
+        );
+        for slot in expected_cold_slots {
+            let s = acc
+                .storage
+                .get(slot)
+                .unwrap_or_else(|| panic!("slot {:?} must be in storage", slot));
+            assert!(s.is_cold, "slot {:?} must be cold", slot);
+        }
+    }
+
+    #[test]
+    fn process_eth_deposit_transfer_only_self_no_storage_writes() {
+        // eth_tx_value only with from == to. transfer_inner early-returns,
+        // so no balance slot is written. BVM_ETH account itself was loaded
+        // by process_eth_deposit and must be cold afterwards.
+        let caller = Address::from([0x11; 20]);
+        let eth_tx_value = 500_000_000_000_000u128;
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(caller);
+                tx.deposit.source_hash = B256::from([0x10; 32]);
+                tx.deposit.eth_value = None;
+                tx.deposit.eth_tx_value = Some(eth_tx_value);
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
+
+        let bvm = ctx
+            .journaled_state
+            .inner
+            .state
+            .get(&BvmEth::ADDRESS)
+            .expect("BVM_ETH must be loaded");
+        assert!(
+            bvm.status.contains(AccountStatus::Cold),
+            "BVM_ETH account must be cold after self-transfer-only deposit"
+        );
+        assert!(
+            bvm.storage.is_empty(),
+            "self-transfer must not touch any balance slot; got {:?}",
+            bvm.storage.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn process_eth_deposit_transfer_only_distinct_cools_balance_slots() {
+        // eth_tx_value only with from != to. transfer_inner writes both
+        // balance[from] and balance[to]. Both must end up cold.
+        use revm::context_interface::JournalTr;
+
+        let caller = Address::from([0x11; 20]);
+        let recipient = Address::from([0x22; 20]);
+        let eth_tx_value = 500_000_000_000_000u128;
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(recipient);
+                tx.deposit.source_hash = B256::from([0x11; 32]);
+                tx.deposit.eth_value = None;
+                tx.deposit.eth_tx_value = Some(eth_tx_value);
+            });
+
+        // Pre-fund caller BVM_ETH balance so transfer_inner doesn't fail.
+        ctx.journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load BVM_ETH");
+        ctx.journaled_state
+            .sstore(
+                BvmEth::ADDRESS,
+                BvmEth::get_balance_slot(caller),
+                U256::from(1_000_000_000_000_000u128),
+            )
+            .expect("seed caller balance");
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
+
+        assert_bvm_eth_and_slots_cold(
+            &ctx.journaled_state.inner.state,
+            &[
+                BvmEth::get_balance_slot(caller),
+                BvmEth::get_balance_slot(recipient),
+            ],
+        );
+    }
+
+    #[test]
+    fn process_eth_deposit_mint_only_flag_with_both_values_skips_transfer() {
+        // mint_only=true with both eth_value and eth_tx_value: transfer is
+        // skipped, so balance[to] must NOT be touched. Only mint slots
+        // (total_supply, balance[caller]) end up cold.
+        let caller = Address::from([0x11; 20]);
+        let recipient = Address::from([0x22; 20]);
+        let eth_value = 1_000_000_000_000_000_000u128;
+        let eth_tx_value = 500_000_000_000_000u128;
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(recipient);
+                tx.deposit.source_hash = B256::from([0x12; 32]);
+                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_tx_value = Some(eth_tx_value);
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, true).expect("mint_only deposit");
+
+        let state = &ctx.journaled_state.inner.state;
+        assert_bvm_eth_and_slots_cold(
+            state,
+            &[
+                BvmEth::get_total_supply_slot(),
+                BvmEth::get_balance_slot(caller),
+            ],
+        );
+        let bvm = state.get(&BvmEth::ADDRESS).unwrap();
+        assert!(
+            !bvm.storage.contains_key(&BvmEth::get_balance_slot(recipient)),
+            "balance[recipient] must not be touched when mint_only=true"
+        );
+    }
+
+    #[test]
+    fn deposit_to_contract_no_bvm_eth_access_no_overcharge() {
+        // Contract target whose bytecode is just STOP. EVM enters and halts
+        // without touching BVM_ETH. The previous heuristic (4500 magic gated
+        // on non-empty input + eth_value) would have over-charged this case.
+        // With cooling-based fix: gas_used reflects only intrinsic + calldata.
+        let caller = Address::from([0x74; 20]);
+        let target = Address::from([0xc0; 20]);
+
+        let stop_code = Bytecode::new_raw(Bytes::from(vec![0x00]));
+        let code_hash = stop_code.hash_slow();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            target,
+            AccountInfo {
+                balance: U256::ZERO,
+                nonce: 1,
+                code_hash,
+                code: Some(stop_code),
+            },
+        );
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(u128::MAX),
+                nonce: 0,
+                ..Default::default()
+            },
+        );
+
+        let l1_block_info = L1BlockInfo {
+            l2_block: Some(U256::ZERO),
+            token_ratio: U256::from(3040u64),
+            ..Default::default()
+        };
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(l1_block_info)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(target);
+                tx.base.gas_limit = 0x186a0;
+                tx.base.gas_price = 0;
+                tx.base.data = Bytes::from(hex::decode("deadbeef01020304").unwrap());
+                tx.deposit.source_hash = B256::from([0x20; 32]);
+                tx.deposit.mint = Some(0);
+                tx.deposit.eth_value = Some(0x38d7ea4c68000u128);
+                tx.deposit.eth_tx_value = Some(0x38d7ea4c68000u128);
+            });
+
+        let mut evm = ctx.build_op();
+        let mut handler = OpHandler::<
+            _,
+            EVMError<_, crate::transaction::error::OpTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let result = handler.run(&mut evm).expect("handler.run");
+        let gas_used = result.gas_used();
+
+        // Old heuristic would land near 25820 (intrinsic + calldata + 4500).
+        // With fix: just intrinsic + calldata + STOP (0) ≈ 21320 territory.
+        assert!(
+            gas_used < 22000,
+            "contract-target deposit (target does not touch BVM_ETH) must not include 4500 BVM_ETH compensation; got gas_used={}",
+            gas_used
+        );
+    }
+
+    #[test]
+    fn deposit_direct_to_bvm_eth_stop_body_no_overcharge() {
+        // tx.to = BVM_ETH with a STOP bytecode stub. EVM enters BVM_ETH
+        // (auto-warm via EIP-2929 tx.to pre-warm), halts immediately, no
+        // storage access. Verifies cooling doesn't break tx.to pre-warm and
+        // there is no stale 4500 compensation.
+        let caller = Address::from([0x74; 20]);
+
+        let stop_code = Bytecode::new_raw(Bytes::from(vec![0x00]));
+        let code_hash = stop_code.hash_slow();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            BvmEth::ADDRESS,
+            AccountInfo {
+                balance: U256::ZERO,
+                nonce: 1,
+                code_hash,
+                code: Some(stop_code),
+            },
+        );
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(u128::MAX),
+                nonce: 0,
+                ..Default::default()
+            },
+        );
+
+        let l1_block_info = L1BlockInfo {
+            l2_block: Some(U256::ZERO),
+            token_ratio: U256::from(3040u64),
+            ..Default::default()
+        };
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(l1_block_info)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(BvmEth::ADDRESS);
+                tx.base.gas_limit = 0x186a0;
+                tx.base.gas_price = 0;
+                tx.base.data = Bytes::from(hex::decode("deadbeef").unwrap());
+                tx.deposit.source_hash = B256::from([0x21; 32]);
+                tx.deposit.mint = Some(0);
+                tx.deposit.eth_value = Some(0x38d7ea4c68000u128);
+                tx.deposit.eth_tx_value = None;
+            });
+
+        let mut evm = ctx.build_op();
+        let mut handler = OpHandler::<
+            _,
+            EVMError<_, crate::transaction::error::OpTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let result = handler.run(&mut evm).expect("handler.run");
+        let gas_used = result.gas_used();
+
+        assert!(
+            gas_used < 22000,
+            "direct BVM_ETH call (STOP body) must not include 4500 compensation; got gas_used={}",
+            gas_used
+        );
+    }
+
+    #[test]
+    fn deposit_direct_to_bvm_eth_sload_pays_cold_cost() {
+        // tx.to = BVM_ETH with bytecode `PUSH1 2; SLOAD; POP; STOP`. SLOAD
+        // hits total_supply (slot 2), which was warmed by pre-EVM mint and
+        // then cooled. The EVM SLOAD must pay cold cost (~2100), giving the
+        // op-geth-aligned gas. Without cooling the SLOAD would be warm
+        // (~100) and gas would be ~2000 lower — caught by the lower bound.
+        let caller = Address::from([0x74; 20]);
+
+        let sload_code = Bytecode::new_raw(Bytes::from(vec![0x60, 0x02, 0x54, 0x50, 0x00]));
+        let code_hash = sload_code.hash_slow();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            BvmEth::ADDRESS,
+            AccountInfo {
+                balance: U256::ZERO,
+                nonce: 1,
+                code_hash,
+                code: Some(sload_code),
+            },
+        );
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(u128::MAX),
+                nonce: 0,
+                ..Default::default()
+            },
+        );
+
+        let l1_block_info = L1BlockInfo {
+            l2_block: Some(U256::ZERO),
+            token_ratio: U256::from(3040u64),
+            ..Default::default()
+        };
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(l1_block_info)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(BvmEth::ADDRESS);
+                tx.base.gas_limit = 0x186a0;
+                tx.base.gas_price = 0;
+                tx.base.data = Bytes::from(hex::decode("deadbeef").unwrap());
+                tx.deposit.source_hash = B256::from([0x22; 32]);
+                tx.deposit.mint = Some(0);
+                tx.deposit.eth_value = Some(0x38d7ea4c68000u128);
+                tx.deposit.eth_tx_value = None;
+            });
+
+        let mut evm = ctx.build_op();
+        let mut handler = OpHandler::<
+            _,
+            EVMError<_, crate::transaction::error::OpTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let result = handler.run(&mut evm).expect("handler.run");
+        let gas_used = result.gas_used();
+
+        assert!(
+            gas_used > 22500,
+            "direct BVM_ETH SLOAD must pay cold storage cost (~2100 gas) — slot must have been cooled before EVM; got gas_used={}",
+            gas_used
+        );
+        assert!(
+            gas_used < 25000,
+            "direct BVM_ETH SLOAD must not double-charge with 4500 compensation; got gas_used={}",
+            gas_used
+        );
+    }
+
+    #[test]
+    fn deposit_with_target_revert_no_overcharge() {
+        // Target bytecode `PUSH1 0; PUSH1 0; REVERT`. EVM enters and reverts.
+        // Verifies that the previous code path (4500 applied even on revert)
+        // is gone.
+        let caller = Address::from([0x74; 20]);
+        let target = Address::from([0xfa; 20]);
+
+        let revert_code = Bytecode::new_raw(Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xfd]));
+        let code_hash = revert_code.hash_slow();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            target,
+            AccountInfo {
+                balance: U256::ZERO,
+                nonce: 1,
+                code_hash,
+                code: Some(revert_code),
+            },
+        );
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(u128::MAX),
+                nonce: 0,
+                ..Default::default()
+            },
+        );
+
+        let l1_block_info = L1BlockInfo {
+            l2_block: Some(U256::ZERO),
+            token_ratio: U256::from(3040u64),
+            ..Default::default()
+        };
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(l1_block_info)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(target);
+                tx.base.gas_limit = 0x186a0;
+                tx.base.gas_price = 0;
+                tx.base.data = Bytes::from(hex::decode("deadbeef").unwrap());
+                tx.deposit.source_hash = B256::from([0x30; 32]);
+                tx.deposit.mint = Some(0);
+                tx.deposit.eth_value = Some(0x38d7ea4c68000u128);
+                tx.deposit.eth_tx_value = None;
+            });
+
+        let mut evm = ctx.build_op();
+        let mut handler = OpHandler::<
+            _,
+            EVMError<_, crate::transaction::error::OpTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let result = handler.run(&mut evm).expect("handler.run");
+
+        assert!(
+            matches!(result, ExecutionResult::Revert { .. }),
+            "expected ExecutionResult::Revert; got {:?}",
+            result
+        );
+
+        let gas_used = result.gas_used();
+        assert!(
+            gas_used < 22000,
+            "deposit-with-revert must not include 4500 compensation; got gas_used={}",
+            gas_used
+        );
+    }
+
+    #[test]
+    fn deposit_with_target_revert_pre_mint_persists() {
+        // Same shape as the revert gas test, but verify pre-EVM BVM_ETH
+        // mint persists in journal state per OP deposit spec.
+        use revm::context_interface::JournalTr;
+
+        let caller = Address::from([0x74; 20]);
+        let target = Address::from([0xfa; 20]);
+        let mint_amount = 0x38d7ea4c68000u128;
+
+        let revert_code = Bytecode::new_raw(Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xfd]));
+        let code_hash = revert_code.hash_slow();
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            target,
+            AccountInfo {
+                balance: U256::ZERO,
+                nonce: 1,
+                code_hash,
+                code: Some(revert_code),
+            },
+        );
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(u128::MAX),
+                nonce: 0,
+                ..Default::default()
+            },
+        );
+
+        let l1_block_info = L1BlockInfo {
+            l2_block: Some(U256::ZERO),
+            token_ratio: U256::from(3040u64),
+            ..Default::default()
+        };
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(l1_block_info)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(target);
+                tx.base.gas_limit = 0x186a0;
+                tx.base.gas_price = 0;
+                tx.base.data = Bytes::from(hex::decode("deadbeef").unwrap());
+                tx.deposit.source_hash = B256::from([0x31; 32]);
+                tx.deposit.mint = Some(0);
+                tx.deposit.eth_value = Some(mint_amount);
+                tx.deposit.eth_tx_value = None;
+            });
+
+        let mut evm = ctx.build_op();
+        let mut handler = OpHandler::<
+            _,
+            EVMError<_, crate::transaction::error::OpTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let _ = handler.run(&mut evm).expect("handler.run");
+
+        let balance_slot = BvmEth::get_balance_slot(caller);
+        let supply_slot = BvmEth::get_total_supply_slot();
+        let ctx_after = evm.ctx_mut();
+        let balance = ctx_after
+            .journaled_state
+            .sload(BvmEth::ADDRESS, balance_slot)
+            .expect("sload balance")
+            .data;
+        let supply = ctx_after
+            .journaled_state
+            .sload(BvmEth::ADDRESS, supply_slot)
+            .expect("sload supply")
+            .data;
+        assert_eq!(
+            balance,
+            U256::from(mint_amount),
+            "BVM_ETH balance[caller] must reflect pre-EVM mint despite EVM REVERT"
+        );
+        assert_eq!(
+            supply,
+            U256::from(mint_amount),
+            "BVM_ETH total_supply must reflect pre-EVM mint despite EVM REVERT"
+        );
+    }
+
+    #[test]
+    fn catch_error_full_revert_then_remint_cooling_idempotent() {
+        // Simulate the catch_error path in handler::catch_error:
+        //   1. process_eth_deposit(false) — initial mint+transfer + cool
+        //   2. journal.checkpoint_revert(default) — full revert
+        //   3. process_eth_deposit(true) — re-mint (mint_only)
+        // After this sequence BVM_ETH must again be cold with mint slots
+        // cooled, exactly as on a fresh happy-path deposit.
+        use revm::context::journaled_state::JournalCheckpoint;
+        use revm::context_interface::JournalTr;
+
+        let caller = Address::from([0x11; 20]);
+        let recipient = Address::from([0x22; 20]);
+        let eth_value = 1_000_000_000_000_000_000u128;
+        let eth_tx_value = 500_000_000_000_000u128;
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(recipient);
+                tx.deposit.source_hash = B256::from([0x40; 32]);
+                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_tx_value = Some(eth_tx_value);
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("first process_eth_deposit");
+        assert_bvm_eth_and_slots_cold(
+            &ctx.journaled_state.inner.state,
+            &[
+                BvmEth::get_total_supply_slot(),
+                BvmEth::get_balance_slot(caller),
+                BvmEth::get_balance_slot(recipient),
+            ],
+        );
+
+        // Full revert (catch_error step 1).
+        ctx.journaled_state
+            .checkpoint_revert(JournalCheckpoint::default());
+
+        // After full revert BVM_ETH stays in state but is cold (AccountWarmed
+        // revert calls mark_cold).
+        let bvm = ctx
+            .journaled_state
+            .inner
+            .state
+            .get(&BvmEth::ADDRESS)
+            .expect("BVM_ETH still in state after revert");
+        assert!(
+            bvm.status.contains(AccountStatus::Cold),
+            "BVM_ETH must be cold after full journal revert"
+        );
+
+        // Re-mint via mint_only (catch_error step 2).
+        BvmEth::process_eth_deposit(&mut ctx, true).expect("re-mint after revert");
+
+        assert_bvm_eth_and_slots_cold(
+            &ctx.journaled_state.inner.state,
+            &[
+                BvmEth::get_total_supply_slot(),
+                BvmEth::get_balance_slot(caller),
+            ],
+        );
+
+        // And the re-minted balance must be present at the journal level.
+        let balance = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, BvmEth::get_balance_slot(caller))
+            .expect("sload balance after re-mint")
+            .data;
+        assert_eq!(
+            balance,
+            U256::from(eth_value),
+            "balance[caller] must reflect the re-mint amount"
+        );
+    }
+
+    #[test]
+    fn cooling_restored_after_inner_frame_warms_then_reverts_slot() {
+        // After process_eth_deposit cools BVM_ETH, an inner EVM frame
+        // performs an sload (warming the slot via mark_warm_with_transaction_id)
+        // and then reverts. The journal's StorageWarmed::revert calls
+        // slot.mark_cold, so post-revert the slot is cold again.
+        use revm::context_interface::JournalTr;
+
+        let caller = Address::from([0x11; 20]);
+        let recipient = Address::from([0x22; 20]);
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(recipient);
+                tx.deposit.source_hash = B256::from([0x41; 32]);
+                tx.deposit.eth_value = Some(1_000_000_000_000_000_000u128);
+                tx.deposit.eth_tx_value = None;
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("process_eth_deposit");
+
+        let supply_slot = BvmEth::get_total_supply_slot();
+        {
+            let slot = ctx
+                .journaled_state
+                .inner
+                .state
+                .get(&BvmEth::ADDRESS)
+                .unwrap()
+                .storage
+                .get(&supply_slot)
+                .unwrap();
+            assert!(slot.is_cold, "supply slot must be cold after process_eth_deposit");
+        }
+
+        // Inner frame: checkpoint, sload (warms), then revert.
+        let checkpoint = ctx.journaled_state.checkpoint();
+        let _ = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, supply_slot)
+            .expect("inner-frame sload");
+        {
+            let slot = ctx
+                .journaled_state
+                .inner
+                .state
+                .get(&BvmEth::ADDRESS)
+                .unwrap()
+                .storage
+                .get(&supply_slot)
+                .unwrap();
+            assert!(!slot.is_cold, "supply slot must be warm after inner sload");
+        }
+        ctx.journaled_state.checkpoint_revert(checkpoint);
+
+        let slot = ctx
+            .journaled_state
+            .inner
+            .state
+            .get(&BvmEth::ADDRESS)
+            .unwrap()
+            .storage
+            .get(&supply_slot)
+            .unwrap();
+        assert!(
+            slot.is_cold,
+            "supply slot must be cold after revert undoes the inner-frame warming"
+        );
+    }
+
+    #[test]
+    fn process_eth_deposit_create_transfer_cools_create_address_slot() {
+        // CREATE deposit with eth_tx_value only. transfer_inner derives the
+        // destination as caller.create(nonce). Verify cooling covers both
+        // balance[caller] and balance[create_addr].
+        use revm::context_interface::JournalTr;
+
+        let caller = Address::from([0x11; 20]);
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Create;
+                tx.deposit.source_hash = B256::from([0x50; 32]);
+                tx.deposit.eth_value = None;
+                tx.deposit.eth_tx_value = Some(500_000_000_000_000_000u128);
+            });
+
+        // Pre-seed caller balance for transfer to succeed.
+        ctx.journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load BVM_ETH");
+        ctx.journaled_state
+            .sstore(
+                BvmEth::ADDRESS,
+                BvmEth::get_balance_slot(caller),
+                U256::from(1_000_000_000_000_000_000u128),
+            )
+            .expect("seed caller balance");
+
+        let caller_nonce = ctx
+            .journaled_state
+            .load_account(caller)
+            .expect("load caller")
+            .data
+            .info
+            .nonce;
+        let create_addr = caller.create(caller_nonce);
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("process_eth_deposit");
+
+        assert_bvm_eth_and_slots_cold(
+            &ctx.journaled_state.inner.state,
+            &[
+                BvmEth::get_balance_slot(caller),
+                BvmEth::get_balance_slot(create_addr),
+            ],
+        );
+    }
+
+    #[test]
+    fn process_eth_deposit_create_mint_and_transfer_cools_all_slots() {
+        // CREATE deposit with both eth_value and eth_tx_value. Cooling must
+        // cover total_supply, balance[caller], balance[create_addr].
+        use revm::context_interface::JournalTr;
+
+        let caller = Address::from([0x11; 20]);
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Create;
+                tx.deposit.source_hash = B256::from([0x51; 32]);
+                tx.deposit.eth_value = Some(1_000_000_000_000_000_000u128);
+                tx.deposit.eth_tx_value = Some(500_000_000_000_000_000u128);
+            });
+
+        let caller_nonce = ctx
+            .journaled_state
+            .load_account(caller)
+            .expect("load caller")
+            .data
+            .info
+            .nonce;
+        let create_addr = caller.create(caller_nonce);
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("process_eth_deposit");
+
+        assert_bvm_eth_and_slots_cold(
+            &ctx.journaled_state.inner.state,
+            &[
+                BvmEth::get_total_supply_slot(),
+                BvmEth::get_balance_slot(caller),
+                BvmEth::get_balance_slot(create_addr),
+            ],
+        );
+    }
+
+    #[test]
+    fn deposit_nested_call_to_bvm_eth_pays_cold_cost() {
+        // tx.to = outer contract whose code is:
+        //   PUSH1 0 PUSH1 0 PUSH1 0 PUSH1 0 PUSH1 0 PUSH20 <BVM_ETH> GAS CALL STOP
+        // i.e. CALL(BVM_ETH, 0, 0, 0, 0, 0); STOP.
+        //
+        // BVM_ETH stub: PUSH1 2; SLOAD; POP; STOP.
+        //
+        // The first CALL to BVM_ETH from EVM pays cold account cost (~2600),
+        // and the inner SLOAD on total_supply pays cold storage cost
+        // (~2100) — both made cold by the JournalColdExt reset.
+        let caller = Address::from([0x74; 20]);
+        let outer = Address::from([0xc0; 20]);
+
+        let mut outer_code: Vec<u8> = Vec::new();
+        for _ in 0..5 {
+            outer_code.push(0x60);
+            outer_code.push(0x00);
+        }
+        outer_code.push(0x73);
+        outer_code.extend_from_slice(BvmEth::ADDRESS.as_slice());
+        outer_code.push(0x5a);
+        outer_code.push(0xf1);
+        outer_code.push(0x00);
+
+        let outer_bc = Bytecode::new_raw(Bytes::from(outer_code));
+        let outer_hash = outer_bc.hash_slow();
+
+        let bvm_stub = Bytecode::new_raw(Bytes::from(vec![0x60, 0x02, 0x54, 0x50, 0x00]));
+        let bvm_hash = bvm_stub.hash_slow();
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            outer,
+            AccountInfo {
+                balance: U256::ZERO,
+                nonce: 1,
+                code_hash: outer_hash,
+                code: Some(outer_bc),
+            },
+        );
+        db.insert_account_info(
+            BvmEth::ADDRESS,
+            AccountInfo {
+                balance: U256::ZERO,
+                nonce: 1,
+                code_hash: bvm_hash,
+                code: Some(bvm_stub),
+            },
+        );
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(u128::MAX),
+                nonce: 0,
+                ..Default::default()
+            },
+        );
+
+        let l1_block_info = L1BlockInfo {
+            l2_block: Some(U256::ZERO),
+            token_ratio: U256::from(3040u64),
+            ..Default::default()
+        };
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(l1_block_info)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(outer);
+                tx.base.gas_limit = 0x186a0;
+                tx.base.gas_price = 0;
+                tx.base.data = Bytes::new();
+                tx.deposit.source_hash = B256::from([0x60; 32]);
+                tx.deposit.mint = Some(0);
+                tx.deposit.eth_value = Some(0x38d7ea4c68000u128);
+                tx.deposit.eth_tx_value = None;
+            });
+
+        let mut evm = ctx.build_op();
+        let mut handler = OpHandler::<
+            _,
+            EVMError<_, crate::transaction::error::OpTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let result = handler.run(&mut evm).expect("handler.run");
+        let gas_used = result.gas_used();
+
+        // Cold CALL (~2600) + cold SLOAD (~2100) must both be paid.
+        assert!(
+            gas_used > 25000,
+            "nested CALL to BVM_ETH must pay cold account + cold storage cost; got gas_used={}",
+            gas_used
+        );
+        // No stale 4500 compensation on top.
+        assert!(
+            gas_used < 30000,
+            "nested CALL to BVM_ETH must not include stale 4500 compensation; got gas_used={}",
+            gas_used
         );
     }
 
