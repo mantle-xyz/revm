@@ -138,6 +138,11 @@ impl JournalTr for Backend {
         self.journaled_state.touch_account(address);
     }
 
+    fn mark_account_and_slots_cold(&mut self, address: Address, slots: &[StorageKey]) {
+        self.journaled_state
+            .mark_account_and_slots_cold(address, slots);
+    }
+
     fn transfer(
         &mut self,
         from: Address,

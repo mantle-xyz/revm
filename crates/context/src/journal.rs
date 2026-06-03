@@ -206,6 +206,33 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
         self.inner.touch(address);
     }
 
+    fn mark_account_and_slots_cold(&mut self, address: Address, slots: &[StorageKey]) {
+        // Snapshot EIP-2930 user-access-list warmth before borrowing state
+        // mutably. Slots/addresses warmed via the user's access list must
+        // stay warm; we only reverse the warming we introduced via pre-EVM
+        // journal loads.
+        let address_in_user_list = self.inner.warm_addresses.is_warm(&address);
+        let slot_in_user_list: Vec<bool> = slots
+            .iter()
+            .map(|k| self.inner.warm_addresses.is_storage_warm(&address, k))
+            .collect();
+
+        let Some(account) = self.inner.state.get_mut(&address) else {
+            return;
+        };
+        if !address_in_user_list {
+            account.mark_cold();
+        }
+        for (key, was_user_warm) in slots.iter().zip(slot_in_user_list) {
+            if was_user_warm {
+                continue;
+            }
+            if let Some(slot) = account.storage.get_mut(key) {
+                slot.mark_cold();
+            }
+        }
+    }
+
     #[inline]
     fn caller_accounting_journal_entry(
         &mut self,

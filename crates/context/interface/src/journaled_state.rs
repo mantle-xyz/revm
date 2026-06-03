@@ -112,6 +112,29 @@ pub trait JournalTr {
     /// Touches the account.
     fn touch_account(&mut self, address: Address);
 
+    /// Marks the account and the given storage slots as cold (un-warm) within
+    /// this transaction.
+    ///
+    /// Used for pre-EVM state mutations that should not affect the EVM access
+    /// list — matches go-ethereum's `st.state.SetState()` semantics, which
+    /// modifies state without warming the account or slots for subsequent
+    /// access-cost accounting.
+    ///
+    /// Entries warm via the EIP-2930 access list (set through
+    /// [`Self::warm_access_list`]) are left untouched.
+    ///
+    /// # v38 migration warning
+    ///
+    /// This is correct in revm v2.2.x only. In revm v38+,
+    /// `EvmStorageSlot::mark_warm_with_transaction_id` resets
+    /// `original_value = present_value` on the cold→warm transition, which
+    /// would silently break SSTORE refund semantics for slots that were
+    /// pre-modified by the journal before cooling. When upgrading, this
+    /// approach must be replaced with inspector-based access tracking, or
+    /// `mark_warm_with_transaction_id` must be patched to preserve
+    /// `original_value` on cold→warm.
+    fn mark_account_and_slots_cold(&mut self, address: Address, slots: &[StorageKey]);
+
     /// Transfers the balance from one account to another.
     fn transfer(
         &mut self,
