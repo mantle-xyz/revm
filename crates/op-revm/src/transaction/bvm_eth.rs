@@ -1965,7 +1965,7 @@ mod tests {
         // Verify transaction succeeds
         let logs = match &result {
             ExecutionResult::Success { logs, .. } => logs,
-            ExecutionResult::Halt { reason, gas_used } => {
+            ExecutionResult::Halt { reason, gas_used, .. } => {
                 panic!(
                     "Transaction halted with reason: {:?}, gas_used: {}",
                     reason, gas_used

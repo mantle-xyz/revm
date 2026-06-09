@@ -595,6 +595,14 @@ where
                     // Mint BVM_ETH tokens for the failed deposit (no transfer).
                     match BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from) {
                         Ok(()) => {
+                            // Capture the BVM_ETH `Mint` log emitted by
+                            // process_eth_deposit BEFORE commit_tx clears the
+                            // journal logs. op-geth emits this mint (and its log)
+                            // before its revert snapshot, so a failed deposit
+                            // still persists the mint log into the receipt; the
+                            // log must survive the halt to match op-geth's
+                            // receipts root.
+                            let logs = evm.ctx().journal_mut().take_logs();
                             evm.ctx().journal_mut().commit_tx();
 
                             // The gas used of a failed deposit post-regolith is the gas
@@ -610,6 +618,7 @@ where
                             Ok(ExecutionResult::Halt {
                                 reason: OpHaltReason::FailedDeposit,
                                 gas_used,
+                                logs,
                             })
                         }
                         Err(e) => Err(e),
