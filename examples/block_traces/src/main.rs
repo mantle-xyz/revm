@@ -3,7 +3,10 @@
 //! The EIP3155 trace of each transaction is saved into file `traces/{tx_number}.json`.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use alloy_consensus::{transaction::SignerRecoverable, TxEip1559, TxEip2930, TxEip7702, TxLegacy};
+use alloy_consensus::{
+    transaction::SignerRecoverable, Eip658Value, Receipt, TxEip1559, TxEip2930, TxEip7702,
+    TxLegacy,
+};
 use alloy_eips::{BlockId, Decodable2718, Typed2718};
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_provider::{network::primitives::BlockTransactions, Provider, ProviderBuilder};
@@ -25,6 +28,7 @@ use revm::{
     primitives::{TxKind, KECCAK_EMPTY},
     Context, ExecuteCommitEvm,
 };
+use serde_json::Value;
 use std::time::Instant;
 use std::fs;
 use std::path::Path;
@@ -69,9 +73,29 @@ async fn main() -> anyhow::Result<()> {
         println!("⚠️  EXPORT_CACHE_DB is enabled - cache_db will be exported");
     }
 
+    let mut mismatched: Vec<u64> = Vec::new();
     for i in start_block..=end_block {
         println!("Processing block number: {i}");
-        process_block(i, chain_id, spec, state_verify, export_cache_db, client.clone()).await?;
+        let matched =
+            process_block(i, chain_id, spec, state_verify, export_cache_db, client.clone()).await?;
+        if !matched {
+            mismatched.push(i);
+        }
+    }
+
+    // ===== Range summary: which blocks (if any) diverge from on-chain =====
+    let total = end_block - start_block + 1;
+    println!("\n==== REPLAY SUMMARY [{start_block}..={end_block}] ({total} blocks) ====");
+    if mismatched.is_empty() {
+        println!(
+            "ALL BLOCKS MATCH ✅ (every receipt's status/cumGas/logs/bloom == on-chain)"
+        );
+    } else {
+        println!(
+            "MISMATCH ❌ at {} / {total} block(s): {:?}",
+            mismatched.len(),
+            mismatched
+        );
     }
 
     Ok(())
@@ -84,7 +108,7 @@ async fn process_block(
     state_verify: bool,
     export_cache_db: bool,
     client: impl Provider<Optimism> + Clone,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     // Fetch the transaction-rich block
     let block = client
         .get_block_by_number(block_number.into())
@@ -131,6 +155,10 @@ async fn process_block(
         panic!("Wrong transaction type")
     };
 
+    // Running cumulative gas used, mirroring how op-reth fills receipts.
+    let mut cumulative_gas_used: u64 = 0;
+    let mut all_receipts_match = true;
+
     for tx_hash in transactions.iter() {
         println!("tx_hash: {tx_hash}");
         let raw_tx = client
@@ -155,23 +183,69 @@ async fn process_block(
             println!("Got error: {res:?}");
         }
 
-        let expected_gas_used = client
-            .clone()
-            .get_transaction_receipt(*tx_hash)
-            .await
-            .unwrap()
-            .unwrap()
-            .inner
-            .gas_used;
+        let exec = res.unwrap();
+        let actual_gas_used = exec.gas_used();
+        let is_success = exec.is_success();
 
-        let actual_gas_used = res.unwrap().gas_used();
-        println!("Expected gas used: {expected_gas_used}, Actual gas used: {actual_gas_used}");
-        if expected_gas_used == actual_gas_used {
-            println!("--- passed✅");
-        } else {
-            println!("--- failed❌");
-        }
+        // Extract logs exactly as op-reth's receipt builder does: `result.into_logs()`.
+        // On this revm line a failed deposit's persisted BVM_ETH mint/transfer logs
+        // live in `ExecutionResult::Halt { logs }`, so `into_logs()` surfaces them
+        // (Success returns its logs; Revert none). Using the real `into_logs()` path
+        // means this proxy cannot bless a fix whose logs never reach the receipt
+        // builder (e.g. logs stashed only in `OpHaltReason`).
+        let receipt_logs: Vec<_> = exec.into_logs();
+
+        cumulative_gas_used += actual_gas_used;
+
+        // Build the receipt exactly as op-reth would and derive its logsBloom.
+        let local_receipt = Receipt {
+            status: Eip658Value::Eip658(is_success),
+            cumulative_gas_used,
+            logs: receipt_logs.clone(),
+        };
+        let local_bloom = local_receipt.bloom_slow();
+        let local_bloom_hex = format!("0x{}", alloy_primitives::hex::encode(local_bloom));
+
+        // Fetch the canonical on-chain receipt and compare field-by-field.
+        let oc: Value = client
+            .clone()
+            .client()
+            .request("eth_getTransactionReceipt", &[*tx_hash])
+            .await?;
+        let oc_logs = oc["logs"].as_array().map(|a| a.len()).unwrap_or(0);
+        let oc_bloom = oc["logsBloom"].as_str().unwrap_or("").to_string();
+        let oc_status = u64::from_str_radix(
+            oc["status"].as_str().unwrap_or("0x0").trim_start_matches("0x"),
+            16,
+        )
+        .unwrap_or(0);
+        let oc_cum = u64::from_str_radix(
+            oc["cumulativeGasUsed"].as_str().unwrap_or("0x0").trim_start_matches("0x"),
+            16,
+        )
+        .unwrap_or(0);
+
+        let status_ok = (is_success as u64) == oc_status;
+        let cum_ok = cumulative_gas_used == oc_cum;
+        let logs_ok = receipt_logs.len() == oc_logs;
+        let bloom_ok = local_bloom_hex.eq_ignore_ascii_case(&oc_bloom);
+        let receipt_ok = status_ok && cum_ok && logs_ok && bloom_ok;
+        all_receipts_match &= receipt_ok;
+
+        println!("RECEIPT_CHECK tx={tx_hash} is_deposit={is_deposit}");
+        println!("  status  local={} onchain={} {}", is_success as u64, oc_status, if status_ok { "✅" } else { "❌" });
+        println!("  cumGas  local={} onchain={} {}", cumulative_gas_used, oc_cum, if cum_ok { "✅" } else { "❌" });
+        println!("  logs    local={} onchain={} {}", receipt_logs.len(), oc_logs, if logs_ok { "✅" } else { "❌" });
+        println!("  bloom   match={} {}", bloom_ok, if bloom_ok { "✅" } else { "❌" });
+        println!("    local_bloom={local_bloom_hex}");
+        println!("    chain_bloom={oc_bloom}");
+        println!("  --- receipt {}", if receipt_ok { "MATCH✅" } else { "MISMATCH❌" });
     }
+
+    println!(
+        "==== BLOCK {block_number} ALL RECEIPTS {} ====",
+        if all_receipts_match { "MATCH ✅ (receiptsRoot will equal on-chain)" } else { "MISMATCH ❌" }
+    );
 
     // Verify account states using eth_getProof if enabled
     if state_verify {
@@ -195,7 +269,7 @@ async fn process_block(
         elapsed.as_secs_f64()
     );
 
-    Ok(())
+    Ok(all_receipts_match)
 }
 
 /// Export cache_db data to JSON file
