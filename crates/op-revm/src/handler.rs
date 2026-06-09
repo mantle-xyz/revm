@@ -525,15 +525,63 @@ where
         let exec_result =
             post_execution::output(evm.ctx(), frame_result).map_haltreason(OpHaltReason::Base);
 
+        let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
+        let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
+
         if exec_result.is_halt() {
             // Post-regolith, if the transaction is a deposit transaction and it halts,
             // we bubble up to the global return handler. The mint value will be persisted
             // and the caller nonce will be incremented there.
-            let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-            if is_deposit && evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH) {
+            if is_deposit && is_regolith {
                 return Err(ERROR::from(OpTransactionError::HaltedDepositPostRegolith));
             }
         }
+
+        // A deposit that cleanly REVERTS (post-regolith) — as opposed to halting —
+        // still persists its BVM_ETH mint and (successful) transfer per the OP
+        // deposit spec: op-geth runs them before its revert snapshot, so their
+        // `Mint`/`Transfer` logs end up in the receipt. revm's frame revert discards
+        // those logs (and their pre-frame state), and `ExecutionResult::Revert`
+        // carries no logs — so without this the receipt loses them and the receipts
+        // root diverges from op-geth (node fork). Re-apply them exactly like the halt
+        // path (see `catch_error`) and report a FailedDeposit. Unlike a halt, a revert
+        // refunds gas, so we keep the ACTUAL gas used (already in `exec_result`), NOT
+        // the gas limit.
+        if is_deposit && is_regolith && matches!(exec_result, ExecutionResult::Revert { .. }) {
+            let gas_used = exec_result.gas_used();
+            let caller = evm.ctx().tx().caller();
+            let mint = evm.ctx().tx().mint();
+
+            // Wipe the failed tx's partial state, then re-apply the nonce bump +
+            // native mint and the BVM_ETH mint (+ best-effort transfer), capturing the
+            // resulting logs before commit_tx clears them.
+            evm.ctx()
+                .journal_mut()
+                .checkpoint_revert(JournalCheckpoint::default());
+            evm.ctx()
+                .journal_mut()
+                .load_account_mut(caller)
+                .map(|mut acc| {
+                    acc.bump_nonce();
+                    acc.incr_balance(U256::from(mint.unwrap_or_default()));
+                })?;
+            evm.ctx().journal_mut().commit_tx();
+            BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from)?;
+            if let Some(eth_tx_value) = evm.ctx().tx().eth_tx_value() {
+                let _ = BvmEth::transfer(evm.ctx(), U256::from(eth_tx_value));
+            }
+            let logs = evm.ctx().journal_mut().take_logs();
+            evm.ctx().journal_mut().commit_tx();
+            evm.ctx().chain_mut().clear_tx_l1_cost();
+            evm.ctx().local_mut().clear();
+            evm.frame_stack().clear();
+            return Ok(ExecutionResult::Halt {
+                reason: OpHaltReason::FailedDeposit,
+                gas_used,
+                logs,
+            });
+        }
+
         evm.ctx().journal_mut().commit_tx();
         evm.ctx().chain_mut().clear_tx_l1_cost();
         evm.ctx().local_mut().clear();
