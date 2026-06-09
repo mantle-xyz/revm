@@ -2162,4 +2162,22 @@ mod tests {
         ))
         .await;
     }
+
+    /// Real-block execution replay of Mantle Sepolia block 286432's FAILED
+    /// deposit (tx 0x00637e34 -> L2StandardBridge, 256-byte calldata -> out-of-gas
+    /// HALT: gas_used == gas_limit == 30000). This is the HALT class (vs 286456's
+    /// REVERT class): op-geth keeps only the BVM_ETH `Mint` log (1 log) — the
+    /// transfer does not persist on a halt.
+    ///
+    /// Regression guard for the HALT path (catch_error): a failed deposit that
+    /// halts must surface exactly the Mint log into the receipt. Pairs with
+    /// test_failed_deposit_replay_block_286456 (REVERT -> Mint+Transfer) to lock
+    /// both failure paths against op-geth.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_failed_deposit_replay_block_286432() {
+        run_test_fixture(PathBuf::from(
+            "./src/test_data/failed/test_fixture_286432.tar.gz",
+        ))
+        .await;
+    }
 }

@@ -643,25 +643,18 @@ where
                     // Mint BVM_ETH tokens for the failed deposit.
                     match BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from) {
                         Ok(()) => {
-                            // Mirror op-geth: after the mint, the BVM_ETH transfer
-                            // (eth_tx_value -> tx.to) is attempted and PERSISTS iff it
-                            // succeeds. op-geth runs this transfer after its revert
-                            // snapshot, so a transfer that fails (insufficient balance,
-                            // or recipient == sender) is rewound — leaving only the mint —
-                            // while a transfer that succeeds survives a later EVM-call
-                            // revert. Replaying it best-effort here makes a failed deposit
-                            // keep exactly the logs and balances op-geth keeps: both the
-                            // Mint and Transfer logs for a reverted bridge deposit, or only
-                            // the Mint when eth_tx_value exceeds the minted balance.
-                            if let Some(eth_tx_value) = evm.ctx().tx().eth_tx_value() {
-                                let _ = BvmEth::transfer(evm.ctx(), U256::from(eth_tx_value));
-                            }
+                            // HALT path (out-of-gas / exceptional): op-geth keeps only the
+                            // BVM_ETH mint, NOT the transfer. The eth_tx_value transfer is
+                            // part of the gas-metered execution that the halt rolls back, so
+                            // it does not persist (confirmed on-chain: Sepolia block 286432,
+                            // mainnet 96442768 — both halted failed deposits carry exactly one
+                            // Mint log). The transfer only survives on the REVERT path, which
+                            // is handled in `execution_result`. So mint only here.
 
-                            // Capture the BVM_ETH logs (Mint, and Transfer if it persisted)
-                            // BEFORE commit_tx clears the journal logs. op-geth emits these
-                            // before its revert snapshot, so a failed deposit still persists
-                            // them into the receipt; they must survive the halt to match
-                            // op-geth's receipts root.
+                            // Capture the BVM_ETH Mint log BEFORE commit_tx clears the journal
+                            // logs. op-geth emits the mint before its revert snapshot, so a
+                            // failed deposit still persists it into the receipt; it must
+                            // survive the halt to match op-geth's receipts root.
                             let logs = evm.ctx().journal_mut().take_logs();
                             evm.ctx().journal_mut().commit_tx();
 
@@ -2650,18 +2643,20 @@ mod tests {
         );
     }
 
-    /// A failed deposit whose BVM_ETH transfer SUCCEEDS keeps BOTH the Mint and
-    /// Transfer logs (and the moved balances), mirroring Mantle sepolia-qa5 block
-    /// 286456: a deposit routed to the L2StandardBridge where the BVM_ETH transfer
-    /// to the bridge succeeds and only the subsequent bridge call reverts. op-geth
-    /// runs the transfer after its revert snapshot and rewinds only the reverted
-    /// call, so mint + transfer persist with their two logs.
+    /// A failed deposit that HALTS (the `catch_error` path) persists only the
+    /// BVM_ETH Mint — NOT the transfer — even when eth_tx_value would be
+    /// transferable. op-geth's transfer is part of the gas-metered execution that
+    /// the halt rolls back, so a halted failed deposit keeps exactly one Mint log
+    /// (confirmed on-chain: Sepolia 286432, mainnet 96442768). The transfer only
+    /// survives on the REVERT path — see the real-block replay
+    /// `test_failed_deposit_replay_block_286456` (REVERT -> Mint + Transfer).
     #[test]
-    fn test_failed_deposit_persists_mint_and_transfer_when_transfer_succeeds() {
+    fn test_failed_deposit_halt_persists_mint_only_not_transfer() {
         let caller = Address::from([0x11; 20]);
         let recipient = Address::from([0x42; 20]);
-        // transfer == mint, so the transfer succeeds (sufficient minted balance).
-        let amount = 1_000_000_000_000_000u128; // 0.001 ETH, like block 286456
+        // transfer == mint: the transfer WOULD succeed on balance, yet a halt must
+        // still drop it (only the mint persists).
+        let amount = 1_000_000_000_000_000u128; // 0.001 ETH, like block 286432
 
         let ctx = Context::op()
             .modify_tx_chained(|tx| {
@@ -2669,7 +2664,7 @@ mod tests {
                 tx.base.kind = revm::primitives::TxKind::Call(recipient);
                 tx.deposit.source_hash = B256::from([1u8; 32]);
                 tx.deposit.eth_value = Some(amount); // mint
-                tx.deposit.eth_tx_value = Some(amount); // transfer (== mint -> succeeds)
+                tx.deposit.eth_tx_value = Some(amount); // transfer (dropped on halt)
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
 
@@ -2691,34 +2686,18 @@ mod tests {
             "failed deposit must Halt with FailedDeposit"
         );
 
+        // HALT keeps exactly the Mint log — the transfer does not persist.
         let logs = result.logs();
         assert_eq!(
             logs.len(),
-            2,
-            "transfer succeeds -> both Mint and Transfer logs persist"
+            1,
+            "halted failed deposit persists only the Mint log (transfer dropped)"
         );
-
-        // logs[0] = Mint(caller, amount)
         assert_eq!(logs[0].address, BvmEth::ADDRESS);
         assert_eq!(logs[0].topics()[0], BvmEth::MINT_SELECTOR, "topic0 = Mint");
         assert_eq!(logs[0].topics()[1], caller.into_word(), "minter = caller");
 
-        // logs[1] = Transfer(caller, recipient, amount)
-        assert_eq!(logs[1].address, BvmEth::ADDRESS);
-        assert_eq!(
-            logs[1].topics()[0],
-            BvmEth::TRANSFER_SELECTOR,
-            "topic0 = Transfer"
-        );
-        assert_eq!(logs[1].topics()[1], caller.into_word(), "from = caller");
-        assert_eq!(logs[1].topics()[2], recipient.into_word(), "to = recipient");
-        assert_eq!(
-            logs[1].data.data,
-            Bytes::from(U256::from(amount).to_be_bytes_vec()),
-            "data = transfer amount as 32-byte big-endian"
-        );
-
-        // Balances: minted to caller, then fully transferred out to recipient.
+        // Balances: minted to caller; nothing transferred out (transfer dropped).
         let caller_bal = evm
             .ctx()
             .journal_mut()
@@ -2731,11 +2710,15 @@ mod tests {
             .sload(BvmEth::ADDRESS, BvmEth::get_balance_slot(recipient))
             .unwrap()
             .data;
-        assert_eq!(caller_bal, U256::ZERO, "caller minted then transferred out");
+        assert_eq!(
+            caller_bal,
+            U256::from(amount),
+            "caller keeps the minted BVM_ETH (no transfer on halt)"
+        );
         assert_eq!(
             recip_bal,
-            U256::from(amount),
-            "recipient received the transferred BVM_ETH"
+            U256::ZERO,
+            "recipient receives nothing on a halted deposit"
         );
     }
 
