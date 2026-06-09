@@ -2521,12 +2521,41 @@ mod tests {
         // catch_error handles the cleanup and BVM_ETH minting logic for failed deposits.
         let result = handler.catch_error(&mut evm, error).unwrap();
 
-        match result {
+        match &result {
             ExecutionResult::Halt { reason, .. } => {
-                assert_eq!(reason, OpHaltReason::FailedDeposit);
+                assert_eq!(*reason, OpHaltReason::FailedDeposit);
             }
             _ => panic!("Expected Halt result"),
         }
+
+        // The failed deposit must still surface the BVM_ETH `Mint` log into the
+        // receipt (op-geth emits it before its revert snapshot). Assert the log
+        // matches op-geth's format exactly: BVM_ETH address, Mint selector,
+        // minter = caller (left-padded), data = eth_value as 32-byte big-endian.
+        let logs = result.logs();
+        assert_eq!(
+            logs.len(),
+            1,
+            "failed deposit with eth_value must keep 1 Mint log"
+        );
+        let mint = &logs[0];
+        assert_eq!(mint.address, BvmEth::ADDRESS, "log address must be BVM_ETH");
+        assert_eq!(mint.topics().len(), 2, "Mint event has 2 topics");
+        assert_eq!(
+            mint.topics()[0],
+            BvmEth::MINT_SELECTOR,
+            "topic0 = Mint selector"
+        );
+        assert_eq!(
+            mint.topics()[1],
+            caller.into_word(),
+            "topic1 = minter (caller), left-padded to 32 bytes"
+        );
+        assert_eq!(
+            mint.data.data,
+            Bytes::from(U256::from(mint_amount).to_be_bytes_vec()),
+            "data = eth_value as 32-byte big-endian"
+        );
 
         // Verify BVM_ETH was minted.
         // We calculate the storage slot for the caller's balance in the BvmEth contract
@@ -2555,6 +2584,88 @@ mod tests {
             caller_acc.info.balance,
             U256::from(mint_amount),
             "Caller balance must include mint for failed deposits"
+        );
+    }
+
+    /// Reproduces Mantle mainnet block 96442768, tx index 1
+    /// (0x6b7cbdddeae0c93405abb79fd4f18eb162377efc3a39d50a3412dbe58e427482):
+    /// a failed deposit (status=0) to an EOA with empty calldata that still
+    /// mints `eth_value` of BVM_ETH. op-geth emits the ERC20 `Mint` event before
+    /// its revert snapshot, so the mint log survives the failure and appears in
+    /// the receipt (1 log, non-zero logsBloom). op-revm previously dropped it,
+    /// producing a different receipts root and forking the node.
+    ///
+    /// This asserts op-revm now surfaces a Mint log byte-for-byte identical to
+    /// the canonical (op-geth) log observed on-chain for this transaction.
+    #[test]
+    fn test_failed_deposit_persists_mint_log_like_geth_block_96442768() {
+        // Exact on-chain values for the failing deposit.
+        let caller =
+            Address::from_str("0xc214b42e093c7739179833496791fbd50ec68de4").unwrap();
+        // eth_value = 0.001 ETH = 1_000_000_000_000_000 wei = 0x38d7ea4c68000.
+        let eth_value: u128 = 1_000_000_000_000_000;
+
+        let ctx = Context::op()
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.mint = Some(eth_value);
+                tx.deposit.eth_value = Some(eth_value);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        let error = EVMError::Transaction(OpTransactionError::HaltedDepositPostRegolith);
+        let result = handler.catch_error(&mut evm, error).unwrap();
+
+        // status = 0 (Halt) but the receipt still carries the Mint log.
+        assert!(
+            matches!(
+                &result,
+                ExecutionResult::Halt {
+                    reason: OpHaltReason::FailedDeposit,
+                    ..
+                }
+            ),
+            "failed deposit must Halt with FailedDeposit"
+        );
+
+        let logs = result.logs();
+        assert_eq!(logs.len(), 1, "exactly one Mint log, matching op-geth");
+        let mint = &logs[0];
+
+        // Byte-for-byte equality with the canonical op-geth log.
+        assert_eq!(
+            mint.address,
+            Address::from_str("0xdeaddeaddeaddeaddeaddeaddeaddeaddead1111").unwrap(),
+            "address = BVM_ETH"
+        );
+        assert_eq!(
+            mint.topics()[0],
+            B256::from_str(
+                "0x0f6798a560793a54c3bcfe86a93cde1e73087d944c0ea20544137d4121396885"
+            )
+            .unwrap(),
+            "topic0 = keccak(Mint(address,uint256))"
+        );
+        assert_eq!(
+            mint.topics()[1],
+            B256::from_str(
+                "0x000000000000000000000000c214b42e093c7739179833496791fbd50ec68de4"
+            )
+            .unwrap(),
+            "topic1 = minter, left-padded"
+        );
+        assert_eq!(
+            mint.data.data,
+            Bytes::from_str(
+                "0x00000000000000000000000000000000000000000000000000038d7ea4c68000"
+            )
+            .unwrap(),
+            "data = 0.001 ETH as 32-byte big-endian"
         );
     }
 
