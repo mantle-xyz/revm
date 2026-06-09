@@ -89,7 +89,7 @@ fn main() -> anyhow::Result<()> {
         Ok(revm::context::result::ExecutionResult::Revert { output, gas_used }) => {
             println!("   ❌ Reverted! Gas used: {gas_used}, Output: {output:?}");
         }
-        Ok(revm::context::result::ExecutionResult::Halt { reason, gas_used }) => {
+        Ok(revm::context::result::ExecutionResult::Halt { reason, gas_used, .. }) => {
             println!("   🛑 Halted! Reason: {reason:?}, Gas used: {gas_used}");
         }
         Err(e) => {
@@ -121,7 +121,7 @@ fn main() -> anyhow::Result<()> {
         Ok(revm::context::result::ExecutionResult::Revert { output, gas_used }) => {
             println!("   ❌ Reverted! Gas used: {gas_used}, Output: {output:?}");
         }
-        Ok(revm::context::result::ExecutionResult::Halt { reason, gas_used }) => {
+        Ok(revm::context::result::ExecutionResult::Halt { reason, gas_used, .. }) => {
             println!("   🛑 Halted! Reason: {reason:?}, Gas used: {gas_used}");
         }
         Err(e) => {
@@ -160,7 +160,7 @@ fn main() -> anyhow::Result<()> {
         Ok(revm::context::result::ExecutionResult::Revert { output, gas_used }) => {
             println!("   ❌ Reverted! Gas used: {gas_used}, Output: {output:?}");
         }
-        Ok(revm::context::result::ExecutionResult::Halt { reason, gas_used }) => {
+        Ok(revm::context::result::ExecutionResult::Halt { reason, gas_used, .. }) => {
             println!("   🛑 Halted! Reason: {reason:?}, Gas used: {gas_used}");
         }
         Err(e) => {

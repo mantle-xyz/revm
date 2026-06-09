@@ -118,14 +118,14 @@ pub fn output<CTX: ContextTr<Journal: JournalTr>, HALTREASON: HaltReasonTr>(
                     return ExecutionResult::Halt {
                         reason: HALTREASON::from(HaltReason::PrecompileErrorWithContext(message)),
                         gas_used,
-                        logs: Vec::new(),
+                        logs: Default::default(),
                     };
                 }
             }
             ExecutionResult::Halt {
                 reason,
                 gas_used,
-                logs: Vec::new(),
+                logs: Default::default(),
             }
         }
         // Only two internal return flags.

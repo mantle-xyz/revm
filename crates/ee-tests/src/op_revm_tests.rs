@@ -100,6 +100,7 @@ fn test_halted_deposit_tx() {
         ExecutionResult::Halt {
             reason: OpHaltReason::FailedDeposit,
             gas_used: eip7825::TX_GAS_LIMIT_CAP,
+            logs: vec![],
         }
     );
     assert_eq!(

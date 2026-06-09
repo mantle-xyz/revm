@@ -81,6 +81,10 @@ pub enum ExecutionResult<HaltReasonTy = HaltReason> {
         /// BVM_ETH mint (matching op-geth, which emits the mint before its
         /// revert snapshot), so the `Mint` event log must survive into the
         /// receipt. All other halts leave this empty.
+        ///
+        /// `serde(default)` keeps older serialized halts (which predate this
+        /// field) decodable as an empty log list.
+        #[cfg_attr(feature = "serde", serde(default))]
         logs: Vec<Log>,
     },
 }
