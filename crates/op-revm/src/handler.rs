@@ -3331,4 +3331,99 @@ mod tests {
             "Committed BVM_ETH balance must survive subsequent discard_tx"
         );
     }
+
+    // ---- PR #29 verification: op-geth keeps mint+transfer for ANY vm error ----
+    // op-geth `core/state_transition.go::innerExecute` stores the EVM call's vm
+    // error (revert OR out-of-gas) into `result.Err` with the Go `err == nil`
+    // ("vm errors do not effect consensus and are therefore not assigned to err"),
+    // so the post-snapshot rewind is skipped and the pre-snapshot BVM_ETH
+    // mint+transfer (and their logs) persist for BOTH revert and OOG halts.
+
+    #[cfg(test)]
+    fn run_deposit_to_target(
+        target: Address,
+        code: std::vec::Vec<u8>,
+        amount: u128,
+        gas_limit: u64,
+    ) -> ExecutionResult<OpHaltReason> {
+        use revm::{bytecode::Bytecode, primitives::TxKind, ExecuteEvm};
+
+        let caller = Address::from([0x11; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo { balance: U256::from(10_000_000_000_000_000u128), ..Default::default() },
+        );
+        let target_code = Bytecode::new_raw(Bytes::from(code));
+        let code_hash = target_code.hash_slow();
+        db.insert_account_info(
+            target,
+            AccountInfo { code_hash, code: Some(target_code), ..Default::default() },
+        );
+
+        let ctx = Context::op()
+            .with_db(db)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(target);
+                tx.base.gas_limit = gas_limit;
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.eth_value = Some(amount);
+                tx.deposit.eth_tx_value = Some(amount);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let mut evm = ctx.build_op();
+        evm.replay().unwrap().result
+    }
+
+    #[cfg(test)]
+    fn assert_mint_then_transfer_logs(
+        logs: &[revm::primitives::Log],
+        target: Address,
+        amount: u128,
+    ) {
+        let caller = Address::from([0x11; 20]);
+        assert_eq!(
+            logs.len(),
+            2,
+            "op-geth keeps Mint + Transfer for an executed-then-failed deposit; got {logs:?}"
+        );
+        assert_eq!(logs[0].topics()[0], BvmEth::MINT_SELECTOR, "log[0] = Mint");
+        assert_eq!(logs[0].topics()[1], caller.into_word());
+        assert_eq!(logs[1].topics()[0], BvmEth::TRANSFER_SELECTOR, "log[1] = Transfer");
+        assert_eq!(logs[1].topics()[1], caller.into_word());
+        assert_eq!(logs[1].topics()[2], target.into_word());
+        let _ = amount;
+    }
+
+    /// 286456 shape — deposit executes then REVERTs. PR #29 handles this in its
+    /// `execution_result` Revert branch -> expected PASS (mint + transfer).
+    #[test]
+    fn pr29_executed_then_revert_keeps_mint_and_transfer() {
+        let target = Address::from([0x42; 20]);
+        let amount = 1_000_000_000_000_000u128;
+        // PUSH1 0; PUSH1 0; REVERT
+        let result =
+            run_deposit_to_target(target, vec![0x60, 0x00, 0x60, 0x00, 0xfd], amount, 200_000);
+        assert_mint_then_transfer_logs(result.logs(), target, amount);
+    }
+
+    /// Deposit executes (transfer succeeds) then OUT-OF-GAS halts. op-geth keeps
+    /// mint + transfer (OOG is a vm error -> err == nil -> no rewind). PR #29
+    /// routes `is_halt()` to `catch_error` (mint only) -> expected FAIL, proving
+    /// the gap.
+    #[test]
+    fn pr29_executed_then_oog_keeps_mint_and_transfer() {
+        let target = Address::from([0x43; 20]);
+        let amount = 1_000_000_000_000_000u128;
+        // JUMPDEST; PUSH1 0; JUMP -> infinite loop -> out of gas
+        let result = run_deposit_to_target(target, vec![0x5b, 0x60, 0x00, 0x56], amount, 200_000);
+        eprintln!(
+            "PR29 OOG: is_halt={} nlogs={} result={result:?}",
+            result.is_halt(),
+            result.logs().len()
+        );
+        assert_mint_then_transfer_logs(result.logs(), target, amount);
+    }
 }
