@@ -528,36 +528,56 @@ where
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
 
-        if exec_result.is_halt() {
-            // Post-regolith, if the transaction is a deposit transaction and it halts,
-            // we bubble up to the global return handler. The mint value will be persisted
-            // and the caller nonce will be incremented there.
-            if is_deposit && is_regolith {
-                return Err(ERROR::from(OpTransactionError::HaltedDepositPostRegolith));
-            }
-        }
-
-        // A deposit that cleanly REVERTS (post-regolith) — as opposed to halting —
-        // still persists its BVM_ETH mint and (successful) transfer per the OP
-        // deposit spec: op-geth runs them before its revert snapshot, so their
-        // `Mint`/`Transfer` logs end up in the receipt. revm's frame revert discards
-        // those logs (and their pre-frame state), and `ExecutionResult::Revert`
-        // carries no logs — so without this the receipt loses them and the receipts
-        // root diverges from op-geth (node fork). Re-apply them exactly like the halt
-        // path (see `catch_error`) and report a FailedDeposit. Unlike a halt, a revert
-        // refunds gas, so we keep the ACTUAL gas used (already in `exec_result`), NOT
-        // the gas limit.
-        if is_deposit && is_regolith && matches!(exec_result, ExecutionResult::Revert { .. }) {
+        // A deposit that REACHED EVM execution and then failed — by REVERT *or*
+        // HALT (out-of-gas / exceptional) — still persists its BVM_ETH mint and
+        // (successful) transfer per the OP deposit spec. op-geth applies the mint
+        // before its post-mint snapshot and the transfer at the top of
+        // `innerExecute` (before the EVM call), then stores the EVM call's vm error
+        // into `result.Err` with the Go `err == nil` ("vm errors do not effect
+        // consensus and are therefore not assigned to err") — so it does NOT take
+        // the rewind path for a revert OR an out-of-gas, and mint + transfer (and
+        // their `Mint`/`Transfer` logs) survive into the receipt for BOTH modes.
+        // revm's frame revert discards those logs (and pre-frame state) and the
+        // Revert/Halt variants carry no logs, so without this the receipts root (and
+        // state root) diverge from op-geth (node fork). Re-apply them and report a
+        // FailedDeposit. A revert refunds gas while a halt consumes it all; either
+        // way the gas already in `exec_result` is the actual gas used, so keep it.
+        //
+        // Deposits that fail BEFORE reaching execution (insufficient BVM_ETH
+        // transfer balance, intrinsic/gas/validation) return an error from the
+        // validation stages and are handled in `catch_error` (mint only).
+        if is_deposit
+            && is_regolith
+            && matches!(
+                exec_result,
+                ExecutionResult::Revert { .. } | ExecutionResult::Halt { .. }
+            )
+        {
             let gas_used = exec_result.gas_used();
             let caller = evm.ctx().tx().caller();
             let mint = evm.ctx().tx().mint();
 
-            // Wipe the failed tx's partial state, then re-apply the nonce bump +
-            // native mint and the BVM_ETH mint (+ best-effort transfer), capturing the
-            // resulting logs before commit_tx clears them.
+            // Wipe the failed tx's partial state, then rebuild exactly what op-geth
+            // keeps for a vm-error deposit.
             evm.ctx()
                 .journal_mut()
                 .checkpoint_revert(JournalCheckpoint::default());
+
+            // Re-apply the BVM_ETH mint and transfer FIRST, while the caller nonce is
+            // still its pre-bump value: op-geth runs `transferBVMETH` before the EVM
+            // call increments the nonce, so for a CREATE deposit the transfer
+            // recipient is `create(caller, pre-bump nonce)`. Bumping the nonce before
+            // the transfer would derive a different created address than the actual
+            // execution / op-geth and fork on receipts_root / state_root.
+            BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from)?;
+            if let Some(eth_tx_value) = evm.ctx().tx().eth_tx_value() {
+                let _ = BvmEth::transfer(evm.ctx(), U256::from(eth_tx_value));
+            }
+            // Capture the Mint/Transfer logs before commit_tx clears the journal.
+            let logs = evm.ctx().journal_mut().take_logs();
+
+            // Then bump the nonce and credit the native (MNT) mint — deposits always
+            // persist these even on failure.
             evm.ctx()
                 .journal_mut()
                 .load_account_mut(caller)
@@ -565,12 +585,6 @@ where
                     acc.bump_nonce();
                     acc.incr_balance(U256::from(mint.unwrap_or_default()));
                 })?;
-            evm.ctx().journal_mut().commit_tx();
-            BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from)?;
-            if let Some(eth_tx_value) = evm.ctx().tx().eth_tx_value() {
-                let _ = BvmEth::transfer(evm.ctx(), U256::from(eth_tx_value));
-            }
-            let logs = evm.ctx().journal_mut().take_logs();
             evm.ctx().journal_mut().commit_tx();
             evm.ctx().chain_mut().clear_tx_l1_cost();
             evm.ctx().local_mut().clear();
@@ -1837,6 +1851,11 @@ mod tests {
 
     #[test]
     fn test_halted_deposit_tx_post_regolith() {
+        // A deposit that REACHED execution and then halted (here: OOG) is now
+        // included post-regolith as a `FailedDeposit` halt directly in
+        // `execution_result` (mirroring op-geth's `err == nil` vm-error path),
+        // rather than bubbling to the global error handler. No eth_value is set, so
+        // there are no BVM_ETH logs to surface.
         let ctx = Context::op()
             .modify_tx_chained(|tx| {
                 // Set up as deposit transaction by having a deposit with source_hash
@@ -1848,8 +1867,8 @@ mod tests {
         let mut handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
 
-        assert_eq!(
-            handler.execution_result(
+        let result = handler
+            .execution_result(
                 &mut evm,
                 FrameResult::Call(CallOutcome {
                     result: InterpreterResult {
@@ -1858,12 +1877,17 @@ mod tests {
                         gas: Default::default(),
                     },
                     memory_offset: Default::default(),
-                })
-            ),
-            Err(EVMError::Transaction(
-                OpTransactionError::HaltedDepositPostRegolith
-            ))
-        )
+                }),
+            )
+            .unwrap();
+
+        match result {
+            ExecutionResult::Halt { reason, logs, .. } => {
+                assert_eq!(reason, OpHaltReason::FailedDeposit);
+                assert!(logs.is_empty(), "no eth_value -> no BVM_ETH logs");
+            }
+            other => panic!("expected FailedDeposit halt, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3329,6 +3353,176 @@ mod tests {
             bvm_balance,
             U256::from(mint_amount),
             "Committed BVM_ETH balance must survive subsequent discard_tx"
+        );
+    }
+
+    // ---- Executed-then-failed deposit keeps mint + transfer (revert AND OOG) ----
+
+    #[cfg(test)]
+    fn run_deposit_to_target(
+        target: Address,
+        code: std::vec::Vec<u8>,
+        amount: u128,
+        gas_limit: u64,
+    ) -> (ExecutionResult<OpHaltReason>, U256) {
+        use revm::{bytecode::Bytecode, primitives::TxKind, ExecuteEvm};
+
+        let caller = Address::from([0x11; 20]);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(10_000_000_000_000_000u128),
+                ..Default::default()
+            },
+        );
+        let target_code = Bytecode::new_raw(Bytes::from(code));
+        let code_hash = target_code.hash_slow();
+        db.insert_account_info(
+            target,
+            AccountInfo {
+                code_hash,
+                code: Some(target_code),
+                ..Default::default()
+            },
+        );
+
+        let ctx = Context::op()
+            .with_db(db)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(target);
+                tx.base.gas_limit = gas_limit;
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.eth_value = Some(amount);
+                tx.deposit.eth_tx_value = Some(amount);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let mut evm = ctx.build_op();
+        let out = evm.replay().unwrap();
+        let slot = BvmEth::get_balance_slot(target);
+        let to_balance = out
+            .state
+            .get(&BvmEth::ADDRESS)
+            .and_then(|acc| acc.storage.get(&slot))
+            .map(|s| s.present_value)
+            .unwrap_or_default();
+        (out.result, to_balance)
+    }
+
+    #[cfg(test)]
+    fn assert_failed_deposit_mint_and_transfer(
+        result: &ExecutionResult<OpHaltReason>,
+        to_balance: U256,
+        target: Address,
+        amount: u128,
+    ) {
+        let caller = Address::from([0x11; 20]);
+        match result {
+            ExecutionResult::Halt { reason, .. } => {
+                assert_eq!(*reason, OpHaltReason::FailedDeposit)
+            }
+            other => panic!("expected FailedDeposit halt, got {other:?}"),
+        }
+        let logs = result.logs();
+        assert_eq!(logs.len(), 2, "must keep Mint + Transfer; got {logs:?}");
+        assert_eq!(logs[0].topics()[0], BvmEth::MINT_SELECTOR, "log[0] = Mint");
+        assert_eq!(logs[0].topics()[1], caller.into_word());
+        assert_eq!(
+            logs[1].topics()[0],
+            BvmEth::TRANSFER_SELECTOR,
+            "log[1] = Transfer"
+        );
+        assert_eq!(logs[1].topics()[1], caller.into_word());
+        assert_eq!(logs[1].topics()[2], target.into_word());
+        assert_eq!(
+            to_balance,
+            U256::from(amount),
+            "transfer must persist in state"
+        );
+    }
+
+    /// Block-286456 shape: deposit ENTERS the EVM call (transfer succeeds) and the
+    /// target then REVERTs. Keeps Mint + Transfer (logs and state).
+    #[test]
+    fn test_failed_deposit_executed_then_revert_keeps_mint_and_transfer() {
+        let target = Address::from([0x42; 20]);
+        let amount = 1_000_000_000_000_000u128; // 1e15, like block 286456
+        // PUSH1 0; PUSH1 0; REVERT
+        let (result, to_balance) =
+            run_deposit_to_target(target, vec![0x60, 0x00, 0x60, 0x00, 0xfd], amount, 200_000);
+        assert_failed_deposit_mint_and_transfer(&result, to_balance, target, amount);
+    }
+
+    /// Same but the target OUT-OF-GAS halts (infinite loop). op-geth treats an
+    /// EVM-level halt like a revert for deposits (vm error -> err == nil), so it
+    /// also keeps Mint + Transfer. (The case the prior Revert-only handling missed.)
+    #[test]
+    fn test_failed_deposit_executed_then_oog_keeps_mint_and_transfer() {
+        let target = Address::from([0x43; 20]);
+        let amount = 1_000_000_000_000_000u128;
+        // JUMPDEST; PUSH1 0; JUMP -> infinite loop -> out of gas
+        let (result, to_balance) =
+            run_deposit_to_target(target, vec![0x5b, 0x60, 0x00, 0x56], amount, 200_000);
+        assert_failed_deposit_mint_and_transfer(&result, to_balance, target, amount);
+    }
+
+    /// A CREATE-kind deposit (`to == null`) that fails must transfer BVM_ETH to the
+    /// SAME created address as a successful one — the address derived from the
+    /// caller's nonce BEFORE it is bumped, matching op-geth's `transferBVMETH`
+    /// (which runs before the EVM call increments the nonce). Regression for the
+    /// prior ordering, which bumped the nonce before the transfer and so sent it to
+    /// `create(caller, N+1)` instead of `create(caller, N)`.
+    #[test]
+    fn test_failed_create_deposit_transfer_recipient_matches_success() {
+        use revm::{primitives::TxKind, ExecuteEvm};
+
+        fn transfer_recipient(init_code: std::vec::Vec<u8>) -> Option<Address> {
+            let caller = Address::from([0x11; 20]);
+            let amount = 1_000_000_000_000_000u128;
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(
+                caller,
+                AccountInfo {
+                    balance: U256::from(10_000_000_000_000_000u128),
+                    ..Default::default()
+                },
+            );
+            let ctx = Context::op()
+                .with_db(db)
+                .modify_tx_chained(|tx| {
+                    tx.base.caller = caller;
+                    tx.base.kind = TxKind::Create;
+                    tx.base.data = Bytes::from(init_code);
+                    tx.base.gas_limit = 200_000;
+                    tx.deposit.source_hash = B256::from([1u8; 32]);
+                    tx.deposit.eth_value = Some(amount);
+                    tx.deposit.eth_tx_value = Some(amount);
+                })
+                .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            let mut evm = ctx.build_op();
+            evm.replay()
+                .unwrap()
+                .result
+                .into_logs()
+                .into_iter()
+                .find(|l| l.topics()[0] == BvmEth::TRANSFER_SELECTOR)
+                .map(|l| Address::from_word(l.topics()[2]))
+        }
+
+        let caller = Address::from([0x11; 20]);
+        let to_success = transfer_recipient(vec![0x00]); // STOP -> deploys, succeeds
+        let to_revert = transfer_recipient(vec![0x60, 0x00, 0x60, 0x00, 0xfd]); // REVERT
+
+        assert_eq!(
+            to_revert,
+            Some(caller.create(0)),
+            "failed create deposit must transfer to create(caller, pre-bump nonce)"
+        );
+        assert_eq!(
+            to_success, to_revert,
+            "create deposit transfer recipient must match between success and failure"
         );
     }
 }
