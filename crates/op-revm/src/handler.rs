@@ -3525,4 +3525,56 @@ mod tests {
             "create deposit transfer recipient must match between success and failure"
         );
     }
+
+    /// CREATE-kind deposit that OOG-halts inside its init code: exercises BOTH fixes
+    /// at once. The OOG path must keep Mint + Transfer (the OOG fix), AND the transfer
+    /// recipient must be `create(caller, pre-bump nonce N)` (the CREATE-recipient fix).
+    /// The two orthogonal tests cover Call+OOG and CREATE+REVERT separately; this guards
+    /// their composition, which neither alone exercises.
+    #[test]
+    fn test_failed_create_deposit_oog_keeps_mint_and_transfer_correct_recipient() {
+        use revm::{primitives::TxKind, ExecuteEvm};
+
+        let caller = Address::from([0x11; 20]);
+        let amount = 1_000_000_000_000_000u128;
+        // Recipient op-geth's transferBVMETH targets: create(caller, nonce) with the
+        // nonce taken BEFORE the EVM call bumps it (here the caller's initial nonce 0).
+        let created = caller.create(0);
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(10_000_000_000_000_000u128),
+                ..Default::default()
+            },
+        );
+        let ctx = Context::op()
+            .with_db(db)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Create;
+                // JUMPDEST; PUSH1 0; JUMP -> infinite loop in init code -> out of gas
+                tx.base.data = Bytes::from(vec![0x5b, 0x60, 0x00, 0x56]);
+                tx.base.gas_limit = 200_000;
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.eth_value = Some(amount);
+                tx.deposit.eth_tx_value = Some(amount);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+        let mut evm = ctx.build_op();
+        let out = evm.replay().unwrap();
+
+        // BVM_ETH balance must have moved to the SAME created address as a success.
+        let slot = BvmEth::get_balance_slot(created);
+        let to_balance = out
+            .state
+            .get(&BvmEth::ADDRESS)
+            .and_then(|acc| acc.storage.get(&slot))
+            .map(|s| s.present_value)
+            .unwrap_or_default();
+
+        // FailedDeposit halt + Mint + Transfer(caller -> created) in logs AND state.
+        assert_failed_deposit_mint_and_transfer(&out.result, to_balance, created, amount);
+    }
 }
