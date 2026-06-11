@@ -74,6 +74,18 @@ pub enum ExecutionResult<HaltReasonTy = HaltReason> {
         ///
         /// Halting will spend all the gas, and will be equal to gas_limit.
         gas_used: u64,
+        /// Logs that must persist even though execution halted.
+        ///
+        /// Normally a halt discards all logs. Mantle deposit transactions are
+        /// the exception: a failed deposit still persists the pre-execution
+        /// BVM_ETH mint (matching op-geth, which emits the mint before its
+        /// revert snapshot), so the `Mint` event log must survive into the
+        /// receipt. All other halts leave this empty.
+        ///
+        /// `serde(default)` keeps older serialized halts (which predate this
+        /// field) decodable as an empty log list.
+        #[cfg_attr(feature = "serde", serde(default))]
+        logs: Vec<Log>,
     },
 }
 
@@ -107,9 +119,14 @@ impl<HaltReasonTy> ExecutionResult<HaltReasonTy> {
                 output,
             },
             Self::Revert { gas_used, output } => ExecutionResult::Revert { gas_used, output },
-            Self::Halt { reason, gas_used } => ExecutionResult::Halt {
+            Self::Halt {
+                reason,
+                gas_used,
+                logs,
+            } => ExecutionResult::Halt {
                 reason: op(reason),
                 gas_used,
+                logs,
             },
         }
     }
@@ -150,18 +167,24 @@ impl<HaltReasonTy> ExecutionResult<HaltReasonTy> {
         }
     }
 
-    /// Returns the logs if execution is successful, or an empty list otherwise.
+    /// Returns the logs emitted by the execution.
+    ///
+    /// Includes the persisted logs of a halted execution (e.g. the BVM_ETH
+    /// `Mint` log of a failed Mantle deposit); empty for reverts.
     pub fn logs(&self) -> &[Log] {
         match self {
-            Self::Success { logs, .. } => logs.as_slice(),
+            Self::Success { logs, .. } | Self::Halt { logs, .. } => logs.as_slice(),
             _ => &[],
         }
     }
 
-    /// Consumes [`self`] and returns the logs if execution is successful, or an empty list otherwise.
+    /// Consumes [`self`] and returns the logs emitted by the execution.
+    ///
+    /// Includes the persisted logs of a halted execution (e.g. the BVM_ETH
+    /// `Mint` log of a failed Mantle deposit); empty for reverts.
     pub fn into_logs(self) -> Vec<Log> {
         match self {
-            Self::Success { logs, .. } => logs,
+            Self::Success { logs, .. } | Self::Halt { logs, .. } => logs,
             _ => Vec::new(),
         }
     }
