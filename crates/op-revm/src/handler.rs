@@ -3577,4 +3577,147 @@ mod tests {
         // FailedDeposit halt + Mint + Transfer(caller -> created) in logs AND state.
         assert_failed_deposit_mint_and_transfer(&out.result, to_balance, created, amount);
     }
+
+    /// All four deposit asset flows at once on a FAILED deposit (REVERT and OOG):
+    /// native MNT mint, native MNT value transfer, BVM_ETH mint, BVM_ETH transfer.
+    /// op-geth keeps the pre-call effects (native mint + BVM_ETH mint + BVM_ETH
+    /// transfer) and rolls back the in-call native value transfer (it reverts with
+    /// the EVM frame). This guards the previously-untested matrix cell where MNT and
+    /// ETH both have mint+transfer and the call fails.
+    #[test]
+    fn test_failed_deposit_combined_mnt_eth_keeps_precall_drops_native_value() {
+        use revm::{bytecode::Bytecode, primitives::TxKind, ExecuteEvm};
+
+        let caller = Address::from([0x11; 20]);
+        let target = Address::from([0x42; 20]);
+        let init_balance = 10_000_000_000_000_000u128; // 1e16
+        let native_mint = 5_000_000_000_000_000_000u128; // 5e18, dwarfs any gas
+        let native_value = 1_000_000_000_000_000u128; // 1e15, in-call MNT transfer
+        let eth_amount = 2_000_000_000_000_000u128; // 2e15, BVM_ETH mint == transfer
+
+        // Returns (result, caller_native_balance, target_native_balance, target_eth_balance).
+        fn run(
+            code: std::vec::Vec<u8>,
+            caller: Address,
+            target: Address,
+            init_balance: u128,
+            native_mint: u128,
+            native_value: u128,
+            eth_amount: u128,
+        ) -> (ExecutionResult<OpHaltReason>, U256, U256, U256) {
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(
+                caller,
+                AccountInfo {
+                    balance: U256::from(init_balance),
+                    ..Default::default()
+                },
+            );
+            let tcode = Bytecode::new_raw(Bytes::from(code));
+            let code_hash = tcode.hash_slow();
+            db.insert_account_info(
+                target,
+                AccountInfo {
+                    code_hash,
+                    code: Some(tcode),
+                    ..Default::default()
+                },
+            );
+            let ctx = Context::op()
+                .with_db(db)
+                .modify_tx_chained(|tx| {
+                    tx.base.caller = caller;
+                    tx.base.kind = TxKind::Call(target);
+                    tx.base.value = U256::from(native_value);
+                    tx.base.gas_limit = 200_000;
+                    tx.deposit.source_hash = B256::from([1u8; 32]);
+                    tx.deposit.mint = Some(native_mint);
+                    tx.deposit.eth_value = Some(eth_amount);
+                    tx.deposit.eth_tx_value = Some(eth_amount);
+                })
+                .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            let mut evm = ctx.build_op();
+            let out = evm.replay().unwrap();
+            let eth_slot = BvmEth::get_balance_slot(target);
+            let target_eth = out
+                .state
+                .get(&BvmEth::ADDRESS)
+                .and_then(|a| a.storage.get(&eth_slot))
+                .map(|s| s.present_value)
+                .unwrap_or_default();
+            let caller_native = out
+                .state
+                .get(&caller)
+                .map(|a| a.info.balance)
+                .unwrap_or_default();
+            let target_native = out
+                .state
+                .get(&target)
+                .map(|a| a.info.balance)
+                .unwrap_or_default();
+            (out.result, caller_native, target_native, target_eth)
+        }
+
+        // PUSH1 0; PUSH1 0; REVERT  /  JUMPDEST; PUSH1 0; JUMP (infinite loop -> OOG)
+        for code in [
+            std::vec![0x60u8, 0x00, 0x60, 0x00, 0xfd],
+            std::vec![0x5bu8, 0x60, 0x00, 0x56],
+        ] {
+            let (result, caller_native, target_native, target_eth) = run(
+                code.clone(),
+                caller,
+                target,
+                init_balance,
+                native_mint,
+                native_value,
+                eth_amount,
+            );
+
+            // FailedDeposit halt carrying both BVM_ETH logs.
+            match &result {
+                ExecutionResult::Halt { reason, .. } => {
+                    assert_eq!(*reason, OpHaltReason::FailedDeposit, "code={code:?}")
+                }
+                other => panic!("expected FailedDeposit halt, got {other:?} (code={code:?})"),
+            }
+            let logs = result.logs();
+            assert_eq!(
+                logs.len(),
+                2,
+                "must keep Mint + Transfer; code={code:?} logs={logs:?}"
+            );
+            assert_eq!(logs[0].topics()[0], BvmEth::MINT_SELECTOR, "log[0] = Mint");
+            assert_eq!(
+                logs[1].topics()[0],
+                BvmEth::TRANSFER_SELECTOR,
+                "log[1] = Transfer"
+            );
+            assert_eq!(
+                logs[1].topics()[2],
+                target.into_word(),
+                "BVM_ETH transfer recipient = tx.to"
+            );
+
+            // BVM_ETH mint + transfer are pre-call -> persist in state.
+            assert_eq!(
+                target_eth,
+                U256::from(eth_amount),
+                "BVM_ETH transfer must persist in state; code={code:?}"
+            );
+            // Native MNT value transfer is in-call -> rolled back -> target gets no MNT.
+            assert_eq!(
+                target_native,
+                U256::ZERO,
+                "native MNT value transfer must roll back; code={code:?}"
+            );
+            // Native MNT mint is pre-call and re-applied on failure; the in-call value
+            // is reverted (not deducted from caller) and deposits pay no gas fee, so the
+            // caller balance is exactly initial + mint.
+            assert_eq!(
+                caller_native,
+                U256::from(init_balance) + U256::from(native_mint),
+                "native MNT mint must persist and value must not leave caller; code={code:?}"
+            );
+        }
+    }
 }
