@@ -569,7 +569,7 @@ where
         // a Go error -> RevertToSnapshot), handled in `catch_error` (mint only).
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
-        if is_deposit
+        let exec_result = if is_deposit
             && is_regolith
             && matches!(
                 exec_result,
@@ -580,17 +580,16 @@ where
             // total_gas_spent only would diverge on EIP-7623 / refunded-gas deposits.
             let gas = *exec_result.gas();
             let logs = exec_result.into_logs();
-            evm.ctx().journal_mut().commit_tx();
-            evm.ctx().chain_mut().clear_tx_l1_cost();
-            evm.ctx().local_mut().clear();
-            evm.frame_stack().clear();
-            return Ok(ExecutionResult::Halt {
+            ExecutionResult::Halt {
                 reason: OpHaltReason::FailedDeposit,
                 gas,
                 logs,
-            });
-        }
+            }
+        } else {
+            exec_result
+        };
 
+        // Single cleanup for both the failed-deposit re-label and the normal path.
         evm.ctx().journal_mut().commit_tx();
         evm.ctx().chain_mut().clear_tx_l1_cost();
         evm.ctx().local_mut().clear();
