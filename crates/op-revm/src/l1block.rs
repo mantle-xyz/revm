@@ -152,8 +152,8 @@ impl L1BlockInfo {
 
         let mut out = L1BlockInfo {
             l2_block: Some(l2_block),
-            l1_base_fee: l1_base_fee,
-            token_ratio: token_ratio,
+            l1_base_fee,
+            token_ratio,
             l1_fee_overhead: Some(l1_fee_overhead),
             l1_base_fee_scalar: l1_fee_scalar,
             ..Default::default()

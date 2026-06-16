@@ -702,7 +702,7 @@ mod tests {
         >::new();
         let result = handler.run(&mut evm).expect("deposit must execute");
 
-        let gas = result.gas_used();
+        let gas = result.tx_gas_used();
         assert_ne!(
             gas, 25_628,
             "spurious BVM_ETH_MINT_GAS_COMPENSATION (+4500) must be gone"
@@ -960,6 +960,16 @@ mod tests {
         tx_input: String,
         expected_gas_used: u64,
         expected_logs: Vec<ExpectedLog>,
+        /// Whether the deposit is expected to succeed (status=1). Defaults to `true` so the
+        /// existing successful-deposit fixtures need no change. A FAILED Mantle deposit
+        /// (status=0) still persists its BVM_ETH mint (and any successful transfer) logs
+        /// into the receipt — matching op-geth — surfaced via `ExecutionResult::Halt`'s logs.
+        #[serde(default = "default_expected_status")]
+        expected_status: bool,
+    }
+
+    fn default_expected_status() -> bool {
+        true
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -1098,30 +1108,24 @@ mod tests {
         // so we should not call it manually here to avoid duplicate process_eth_deposit
         let result = handler.run(&mut evm).unwrap();
 
-        // Verify transaction succeeds
-        let logs = match &result {
-            ExecutionResult::Success { logs, .. } => logs,
-            ExecutionResult::Halt {
-                reason,
-                gas: gas_used,
-                ..
-            } => {
-                panic!(
-                    "Transaction halted with reason: {:?}, gas_used: {}",
-                    reason, gas_used
-                );
-            }
-            ExecutionResult::Revert {
-                output,
-                gas: gas_used,
-                ..
-            } => {
-                panic!(
-                    "Transaction reverted with output: {:?}, gas_used: {}",
-                    output, gas_used
-                );
-            }
-        };
+        // Verify the result variant matches the expected status. A failed deposit halts
+        // (status=0) but still carries its BVM_ETH logs; a successful deposit returns
+        // Success.
+        assert_eq!(
+            result.is_success(),
+            test_case.expected_status,
+            "status mismatch: expected_status={}, got result={:?}",
+            test_case.expected_status,
+            result
+        );
+        match (&result, test_case.expected_status) {
+            (ExecutionResult::Success { .. }, true) => {}
+            (ExecutionResult::Halt { .. }, false) => {}
+            (other, exp) => panic!(
+                "unexpected result variant for expected_status={}: {:?}",
+                exp, other
+            ),
+        }
 
         // 1. Verify gas used (most important check - do this first)
         let actual_gas_used = result.tx_gas_used();
@@ -1131,7 +1135,9 @@ mod tests {
             test_case.expected_gas_used, actual_gas_used
         );
 
-        // 2. Verify logs
+        // 2. Verify logs. ExecutionResult::logs() returns the persisted logs for a failed
+        // deposit's Halt too, so this covers both status=1 and status=0 fixtures.
+        let logs = result.logs();
         verify_logs(logs, &test_case.expected_logs);
     }
 
@@ -1247,5 +1253,39 @@ mod tests {
         path: PathBuf,
     ) {
         run_test_fixture(path).await;
+    }
+
+    /// Real-block execution replay of Mantle Sepolia block 286456's FAILED deposit
+    /// (tx 0xbcdbae6a -> L2StandardBridge, calldata `0xdeadbeef` -> the proxy/impl reverts).
+    /// op-geth keeps the pre-snapshot BVM_ETH `Mint` AND `Transfer` logs on the failed
+    /// receipt (receiptsRoot 0x9f29d9b8…) because the transfer executed before the EVM call
+    /// and a vm error does not rewind it (op-geth's Case B). This exercises the
+    /// `execution_result` revert path, which now surfaces a `FailedDeposit` halt carrying
+    /// both logs and the actual gas (26230). Before the fix op-revm returned
+    /// `ExecutionResult::Revert` and reth/alloy-op-evm dropped the logs, forking the node.
+    ///
+    /// Kept in `src/test_data/failed/` (not the auto-globbed `src/test_data/`) so the
+    /// failed-deposit fixture is run only by this explicitly-named test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_failed_deposit_replay_block_286456() {
+        run_test_fixture(PathBuf::from(
+            "./src/test_data/failed/test_fixture_286456.tar.gz",
+        ))
+        .await;
+    }
+
+    /// Real-block execution replay of Mantle Sepolia block 286432's FAILED deposit
+    /// (tx 0x00637e34 -> L2StandardBridge, 256-byte calldata, gas_used == gas_limit ==
+    /// 30000). op-geth keeps exactly one BVM_ETH `Mint` log: the eth_tx_value transfer
+    /// does not persist here (op-geth's Case A — the transfer's own balance check fails, so
+    /// `RevertToSnapshot` undoes it leaving only the mint). Pairs with
+    /// `test_failed_deposit_replay_block_286456` (Mint + Transfer) to lock both failure
+    /// shapes against op-geth.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_failed_deposit_replay_block_286432() {
+        run_test_fixture(PathBuf::from(
+            "./src/test_data/failed/test_fixture_286432.tar.gz",
+        ))
+        .await;
     }
 }
