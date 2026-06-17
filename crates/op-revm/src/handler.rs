@@ -227,6 +227,29 @@ where
                 caller.bump_nonce();
             }
 
+            // Pre-call gates that op-geth applies inside innerExecute() and routes to the
+            // mint-only failed-deposit path (RevertToSnapshot + gasUsed=GasLimit). op-revm
+            // skips env validation for deposits ("pre-verified on L1"), so without these the
+            // condition leaks into the EVM frame and takes the wrong (success/keep-transfer)
+            // route, diverging from op-geth. See state_transition.go innerExecute().
+
+            // (#5) EIP-3860 init code size limit for CREATE deposits (state_transition.go L786).
+            if tx.kind().is_create()
+                && spec.into_eth_spec().is_enabled_in(SpecId::SHANGHAI)
+                && tx.input().len() > cfg.max_initcode_size()
+            {
+                return Err(InvalidTransaction::CreateInitCodeSizeLimit.into());
+            }
+            // (#4) Native (MNT) value transfer must be affordable (CanTransfer, L781), checked
+            // against the post-mint balance, mirroring op-geth (mint is applied pre-snapshot).
+            if !cfg.is_balance_check_disabled() && *caller.balance() < tx.value() {
+                return Err(InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(tx.value()),
+                    balance: Box::new(*caller.balance()),
+                }
+                .into());
+            }
+
             return Ok(());
         }
 
@@ -3948,5 +3971,146 @@ mod tests {
 
         // FailedDeposit halt + Mint + Transfer(caller -> created) in logs AND state.
         assert_failed_deposit_mint_and_transfer(&out.result, to_balance, created, amount);
+    }
+
+    /// (#4) Native (MNT) value transfer larger than the caller can afford after the mint.
+    /// op-geth gates this with CanTransfer inside innerExecute() -> RevertToSnapshot ->
+    /// mint-only (1 BVM_ETH Mint log, transfer + native value rolled back, native mint kept).
+    /// Without the pre-call CanTransfer gate revm would route this through the EVM frame and
+    /// keep the BVM_ETH transfer, diverging from op-geth.
+    #[test]
+    fn test_failed_deposit_native_value_too_large_keeps_eth_mint_only() {
+        use revm::{bytecode::Bytecode, primitives::TxKind, ExecuteEvm};
+
+        let caller = Address::from([0x11; 20]);
+        let target = Address::from([0x42; 20]);
+        let native_mint = 1_000_000_000_000_000u128; // 1e15
+        let native_value = 2_000_000_000_000_000u128; // 2e15 > mint, caller can't afford
+        let eth_amount = 3_000_000_000_000_000u128; // BVM_ETH mint == transfer (would succeed)
+
+        let mut db = InMemoryDB::default();
+        // caller starts at ZERO native balance, so its only MNT is the mint (1e15) < value (2e15).
+        db.insert_account_info(caller, AccountInfo::default());
+        let tcode = Bytecode::new_raw(Bytes::from(std::vec![0x00u8])); // STOP (would succeed if reached)
+        let code_hash = tcode.hash_slow();
+        db.insert_account_info(
+            target,
+            AccountInfo {
+                code_hash,
+                code: Some(tcode),
+                ..Default::default()
+            },
+        );
+        let ctx = Context::op()
+            .with_db(db)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(target);
+                tx.base.value = U256::from(native_value);
+                tx.base.gas_limit = 200_000;
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.mint = Some(native_mint);
+                tx.deposit.eth_value = Some(eth_amount);
+                tx.deposit.eth_tx_value = Some(eth_amount);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+        let mut evm = ctx.build_op();
+        let out = evm.replay().unwrap();
+
+        let logs = out.result.logs();
+        let target_eth = out
+            .state
+            .get(&BvmEth::ADDRESS)
+            .and_then(|a| a.storage.get(&BvmEth::get_balance_slot(target)))
+            .map(|s| s.present_value)
+            .unwrap_or_default();
+        let caller_native = out
+            .state
+            .get(&caller)
+            .map(|a| a.info.balance)
+            .unwrap_or_default();
+        let target_native = out
+            .state
+            .get(&target)
+            .map(|a| a.info.balance)
+            .unwrap_or_default();
+
+        // op-geth expectation: exactly ONE log = BVM_ETH Mint (transfer rolled back).
+        assert_eq!(
+            logs.len(),
+            1,
+            "expected only the BVM_ETH Mint log; got {logs:?}"
+        );
+        assert_eq!(
+            logs[0].topics()[0],
+            BvmEth::MINT_SELECTOR,
+            "the one log must be Mint"
+        );
+        // ETH transfer rolled back -> target holds no BVM_ETH.
+        assert_eq!(target_eth, U256::ZERO, "BVM_ETH transfer must be rolled back");
+        // Native MNT value transfer failed/rolled back -> target got no MNT.
+        assert_eq!(target_native, U256::ZERO, "native MNT value must not transfer");
+        // Native MNT mint persists -> caller keeps exactly the mint.
+        assert_eq!(
+            caller_native,
+            U256::from(native_mint),
+            "native MNT mint must persist"
+        );
+    }
+
+    /// (#5) CREATE deposit whose init code exceeds EIP-3860 MaxInitCodeSize (49152 bytes),
+    /// with BVM_ETH mint+transfer set and the native value affordable (so the ONLY failure
+    /// is the init-code-size limit). op-geth treats this as a pre-call Go error
+    /// (ErrMaxInitCodeSizeExceeded) -> RevertToSnapshot -> mint-only (1 Mint log, transfer
+    /// rolled back). Without the pre-call EIP-3860 gate revm keeps the transfer.
+    #[test]
+    fn test_failed_create_deposit_initcode_too_large_keeps_eth_mint_only() {
+        use revm::{primitives::TxKind, ExecuteEvm};
+
+        let caller = Address::from([0x11; 20]);
+        let amount = 1_000_000_000_000_000u128; // BVM_ETH mint == transfer
+        let created = caller.create(0);
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(10_000_000_000_000_000_000u128), // plenty (value affordable)
+                ..Default::default()
+            },
+        );
+        // 49153 bytes > MaxInitCodeSize (49152). Zero bytes (cheap calldata gas).
+        let init_code = std::vec![0x00u8; 49153];
+        let ctx = Context::op()
+            .with_db(db)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Create;
+                tx.base.data = Bytes::from(init_code);
+                tx.base.gas_limit = 5_000_000; // covers intrinsic+calldata, isolates size limit
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.eth_value = Some(amount);
+                tx.deposit.eth_tx_value = Some(amount);
+            })
+            // ARSIA -> SHANGHAI+ enabled, so EIP-3860 init code size limit is active.
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
+        let mut evm = ctx.build_op();
+        let out = evm.replay().unwrap();
+
+        let logs = out.result.logs();
+        let created_eth = out
+            .state
+            .get(&BvmEth::ADDRESS)
+            .and_then(|a| a.storage.get(&BvmEth::get_balance_slot(created)))
+            .map(|s| s.present_value)
+            .unwrap_or_default();
+        // op-geth expectation: mint-only (1 Mint log, transfer rolled back).
+        assert_eq!(logs.len(), 1, "op-geth keeps only Mint; got {} logs", logs.len());
+        assert_eq!(
+            logs[0].topics()[0],
+            BvmEth::MINT_SELECTOR,
+            "the one log must be Mint"
+        );
+        assert_eq!(created_eth, U256::ZERO, "BVM_ETH transfer must be rolled back");
     }
 }
