@@ -242,6 +242,65 @@ fn test_halted_tx_call_bn254_pair_granite() {
 }
 
 #[test]
+fn test_tx_call_bn254_pair_isthmus_unrestricted() {
+    // [mantle] Mantle maps its entire pre-Limb era to OpSpecId::ISTHMUS, whose
+    // precompile set matches op-geth `PrecompiledContractsMantleSkadi`: the bn254
+    // pairing carries NO OP Stack input-size limit. We feed an input that is a
+    // valid multiple of the pair-element length but still larger than the Granite
+    // limit, so the ONLY thing that could reject it on length grounds is the OP
+    // Granite cap. Before the fix, Isthmus inherited that cap and bailed out with
+    // the "bn254 invalid pair length" halt; after the fix it goes down the
+    // standard (unrestricted) path. This is the e2e regression for rebuilding
+    // `isthmus()` on top of `fjord()` instead of `granite()`.
+    const SPEC_ID: OpSpecId = OpSpecId::ISTHMUS;
+
+    // Smallest multiple of PAIR_ELEMENT_LEN strictly greater than the Granite cap.
+    let oversized_len =
+        (GRANITE_MAX_INPUT_SIZE / bn254::PAIR_ELEMENT_LEN + 1) * bn254::PAIR_ELEMENT_LEN;
+    assert!(oversized_len > GRANITE_MAX_INPUT_SIZE);
+    assert!(oversized_len.is_multiple_of(bn254::PAIR_ELEMENT_LEN));
+    let input = Bytes::from(vec![1u8; oversized_len]);
+
+    // Use the per-tx gas cap as the limit: it clears the EIP-7623 calldata floor
+    // (so the tx is valid under Prague) yet is below the ~20M the 587-point
+    // pairing would need, so the unrestricted path runs out of precompile gas
+    // rather than fully executing. The point is only that it gets PAST the length
+    // gate that Granite would have rejected.
+    let ctx = Context::op()
+        .with_tx(
+            OpTransaction::builder()
+                .base(
+                    TxEnv::builder()
+                        .kind(TxKind::Call(bn254::pair::ADDRESS))
+                        .data(input)
+                        .gas_limit(eip7825::TX_GAS_LIMIT_CAP),
+                )
+                .build_fill(),
+        )
+        .with_cfg(CfgEnv::new_with_spec(SPEC_ID));
+
+    let mut evm = ctx.build_op();
+    let output = evm.replay().unwrap();
+
+    // The fix: Isthmus must NOT reject the oversized (but well-formed) input with
+    // the Granite-style OP input-size halt. Any other outcome (e.g. running out
+    // of precompile gas) is fine — it just means the OP cap is gone.
+    assert!(
+        !matches!(
+            output.result,
+            ExecutionResult::Halt {
+                reason: OpHaltReason::Base(HaltReason::PrecompileErrorWithContext(ref msg)),
+                ..
+            } if msg == "bn254 invalid pair length"
+        ),
+        "Isthmus bn254 pairing must not enforce the OP input-size limit (matches op-geth MantleSkadi), got: {:?}",
+        output.result
+    );
+
+    compare_or_save_op_testdata("test_tx_call_bn254_pair_isthmus_unrestricted.json", &output);
+}
+
+#[test]
 fn test_halted_tx_call_bls12_381_g1_add_out_of_gas() {
     let ctx = Context::op()
         .with_tx(
