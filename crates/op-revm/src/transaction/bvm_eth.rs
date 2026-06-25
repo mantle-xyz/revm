@@ -118,8 +118,14 @@ impl BvmEth {
     {
         let (_, tx, _, journal, _, _) = context.all_mut();
 
-        let eth_value = tx.eth_value();
-        let eth_tx_value = tx.eth_tx_value();
+        // Treat a zero amount the same as a missing one (None), mirroring op-geth, which gates the
+        // BVM_ETH mint/transfer on `!= nil && != 0` (`core/state_transition.go`). Minting or
+        // transferring 0 is not a no-op here — it would touch the BVM_ETH storage slots and emit a
+        // zero-value Mint/Transfer log — so a stray `Some(0)` would diverge from op-geth. Filtering
+        // it out at the execution layer keeps this correct regardless of how the deposit was
+        // constructed (engine API, direct tx-env, or the conversion layer).
+        let eth_value = tx.eth_value().filter(|&v| v != 0);
+        let eth_tx_value = tx.eth_tx_value().filter(|&v| v != 0);
 
         // Only load and touch BVM_ETH account when there's actual work to do.
         // This avoids warming the contract address unnecessarily.
@@ -886,6 +892,39 @@ mod tests {
         assert!(
             acc.is_cold,
             "BVM_ETH must be cold when no eth_value/eth_tx_value"
+        );
+    }
+
+    #[test]
+    fn process_eth_deposit_zero_eth_value_treated_as_none() {
+        // A zero amount must behave exactly like a missing one (None): op-geth gates the
+        // BVM_ETH mint/transfer on `!= nil && != 0`. With `Some(0)`, process_eth_deposit must
+        // not load/warm BVM_ETH, must not touch its storage, and must not emit a zero-value
+        // Mint/Transfer log. Without the zero-filter this would warm BVM_ETH and emit a
+        // zero-value log, diverging from op-geth.
+        let caller = Address::from([0x66; 20]);
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(caller);
+                tx.deposit.source_hash = B256::from([6u8; 32]);
+                tx.deposit.eth_value = Some(0);
+                tx.deposit.eth_tx_value = Some(0);
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
+
+        // BVM_ETH account was never loaded (early return), so first access must be cold —
+        // same as the no-value case.
+        let acc = ctx
+            .journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load BVM_ETH");
+        assert!(
+            acc.is_cold,
+            "BVM_ETH must stay cold when eth_value/eth_tx_value are Some(0) (treated as None)"
         );
     }
 
