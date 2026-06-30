@@ -1,7 +1,7 @@
 [package]
 name = "revm-ee-tests"
 description = "Common test utilities for REVM crates"
-version = "0.2.0"
+version = "0.3.0"
 authors.workspace = true
 edition.workspace = true
 keywords.workspace = true
@@ -14,14 +14,13 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-serde.workspace = true
-serde_json = { workspace = true, features = ["preserve_order"] }
 revm = { workspace = true, features = ["serde", "std"] }
-op-revm = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+insta.workspace = true
 
 [features]
 default = []
 optional_balance_check = [
     "revm/optional_balance_check",
-    "op-revm/optional_balance_check",
 ]

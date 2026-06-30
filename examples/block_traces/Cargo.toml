@@ -19,8 +19,7 @@ workspace = true
 
 [dependencies]
 # revm
-revm = { workspace = true, features = ["std", "alloydb", "serde-json"] }
-op-revm = { path = "../../crates/op-revm/" }
+revm = { workspace = true, features = ["std", "alloydb", "tracer"] }
 
 # tokio
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
@@ -29,16 +28,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 alloy-eips.workspace = true
 alloy-provider = { workspace = true, default-features = true }
 alloy-consensus.workspace = true
-alloy-primitives.workspace = true
-alloy-rpc-types = { version = "1.0.27", default-features = false, features = ["eth"] }
 
-op-alloy-consensus = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v210", default-features = false, features = [
-    "k256",
-] }
-op-alloy-network = { git = "https://github.com/mantle-xyz/op-alloy", branch = "v210", default-features = false }
-
+# progress bar
+indicatif.workspace = true
 
 # misc
 anyhow.workspace = true
-dotenv = "0.15"
-serde_json = { workspace = true }

@@ -25,6 +25,11 @@ pub struct CallOutcome {
     /// Precompile call logs. Needs as revert/halt would delete them from Journal.
     /// So they can't be accessed by inspector.
     pub precompile_call_logs: Vec<Log>,
+    /// EIP-8037: copied from `CallInputs::charged_new_account_state_gas`. Tells
+    /// the parent frame whether `new_account_state_gas` was upfront-charged on
+    /// the parent's tracker for this call, so the parent can refund it when
+    /// the call reverts/halts.
+    pub charged_new_account_state_gas: bool,
 }
 
 impl CallOutcome {
@@ -36,12 +41,13 @@ impl CallOutcome {
     ///
     /// * `result` - The result of the interpreter's execution.
     /// * `memory_offset` - The range in memory indicating where the output data is stored.
-    pub fn new(result: InterpreterResult, memory_offset: Range<usize>) -> Self {
+    pub const fn new(result: InterpreterResult, memory_offset: Range<usize>) -> Self {
         Self {
             result,
             memory_offset,
             was_precompile_called: false,
             precompile_call_logs: Vec::new(),
+            charged_new_account_state_gas: false,
         }
     }
 
@@ -51,8 +57,11 @@ impl CallOutcome {
     ///
     /// * `gas_limit` - The gas limit that was exceeded.
     /// * `memory_offset` - The range in memory indicating where the output data is stored.
-    pub fn new_oog(gas_limit: u64, memory_offset: Range<usize>) -> Self {
-        Self::new(InterpreterResult::new_oog(gas_limit), memory_offset)
+    pub fn new_oog(gas_limit: u64, memory_offset: Range<usize>, reservoir: u64) -> Self {
+        Self::new(
+            InterpreterResult::new_oog(gas_limit, reservoir),
+            memory_offset,
+        )
     }
 
     /// Returns a reference to the instruction result.
@@ -62,7 +71,7 @@ impl CallOutcome {
     /// # Returns
     ///
     /// A reference to the [`InstructionResult`].
-    pub fn instruction_result(&self) -> &InstructionResult {
+    pub const fn instruction_result(&self) -> &InstructionResult {
         &self.result.result
     }
 
@@ -73,7 +82,7 @@ impl CallOutcome {
     /// # Returns
     ///
     /// An instance of [`Gas`] representing the gas usage.
-    pub fn gas(&self) -> Gas {
+    pub const fn gas(&self) -> Gas {
         self.result.gas
     }
 
@@ -84,7 +93,7 @@ impl CallOutcome {
     /// # Returns
     ///
     /// A reference to the output data as [`Bytes`].
-    pub fn output(&self) -> &Bytes {
+    pub const fn output(&self) -> &Bytes {
         &self.result.output
     }
 
@@ -95,7 +104,7 @@ impl CallOutcome {
     /// # Returns
     ///
     /// The starting index of the memory offset as [`usize`].
-    pub fn memory_start(&self) -> usize {
+    pub const fn memory_start(&self) -> usize {
         self.memory_offset.start
     }
 

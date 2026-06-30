@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [40.0.3](https://github.com/bluealloy/revm/compare/revm-v40.0.2...revm-v40.0.3) - 2026-05-26
+
+### Other
+
+- updated the following local packages: revm-database, revm-context, revm-handler, revm-inspector, revm-statetest-types
+
+## [40.0.2](https://github.com/bluealloy/revm/compare/revm-v40.0.1...revm-v40.0.2) - 2026-05-22
+
+### Other
+
+- updated the following local packages: revm-database-interface, revm-context-interface, revm-context, revm-database, revm-interpreter, revm-precompile, revm-handler, revm-inspector, revm-statetest-types
+
+## [40.0.1](https://github.com/bluealloy/revm/compare/revm-v40.0.0...revm-v40.0.1) - 2026-05-21
+
+### Other
+
+- updated the following local packages: revm-context-interface, revm-interpreter, revm-precompile, revm-handler, revm-context, revm-inspector, revm-statetest-types
+
+## [40.0.0](https://github.com/bluealloy/revm/compare/revm-v38.0.0...revm-v40.0.0) - 2026-05-19
+
+### Other
+
+- backport v107 release notes from branch ([#3617](https://github.com/bluealloy/revm/pull/3617))
+- rm op-revm (migrated to ethereum-optimism/optimism) ([#3568](https://github.com/bluealloy/revm/pull/3568))
+
 ## [38.0.0](https://github.com/bluealloy/revm/compare/revm-v37.0.0...revm-v38.0.0) - 2026-04-17
 
 ### Other

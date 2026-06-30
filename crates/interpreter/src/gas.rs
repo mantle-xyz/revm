@@ -67,9 +67,9 @@ impl Gas {
 
     /// Creates a new `Gas` struct with the given gas limit, but without any gas remaining.
     #[inline]
-    pub const fn new_spent(limit: u64) -> Self {
+    pub const fn new_spent_with_reservoir(limit: u64, reservoir: u64) -> Self {
         Self {
-            tracker: GasTracker::new(limit, 0, 0),
+            tracker: GasTracker::new(limit, 0, reservoir),
             memory: MemoryGas::new(),
         }
     }
@@ -82,13 +82,13 @@ impl Gas {
 
     /// Returns the memory gas.
     #[inline]
-    pub fn memory(&self) -> &MemoryGas {
+    pub const fn memory(&self) -> &MemoryGas {
         &self.memory
     }
 
     /// Returns the memory gas.
     #[inline]
-    pub fn memory_mut(&mut self) -> &mut MemoryGas {
+    pub const fn memory_mut(&mut self) -> &mut MemoryGas {
         &mut self.memory
     }
 
@@ -148,25 +148,37 @@ impl Gas {
 
     /// Sets the state gas reservoir (used when propagating from child frame).
     #[inline]
-    pub fn set_reservoir(&mut self, val: u64) {
+    pub const fn set_reservoir(&mut self, val: u64) {
         self.tracker.set_reservoir(val);
     }
 
     /// Returns total state gas spent so far.
+    ///
+    /// Can be negative within a call frame when 0→x→0 storage restoration
+    /// refills more state gas than this frame charged (see
+    /// [`GasTracker::refill_reservoir`]).
     #[inline]
-    pub const fn state_gas_spent(&self) -> u64 {
+    pub const fn state_gas_spent(&self) -> i64 {
         self.tracker.state_gas_spent()
     }
 
     /// Sets the total state gas spent (used when propagating from child frame).
     #[inline]
-    pub fn set_state_gas_spent(&mut self, val: u64) {
+    pub const fn set_state_gas_spent(&mut self, val: i64) {
         self.tracker.set_state_gas_spent(val);
+    }
+
+    /// Refills the reservoir with state gas returned by 0→x→0 storage restoration.
+    ///
+    /// See [`GasTracker::refill_reservoir`].
+    #[inline]
+    pub const fn refill_reservoir(&mut self, amount: u64) {
+        self.tracker.refill_reservoir(amount);
     }
 
     /// Erases a gas cost from remaining (returns gas from child frame).
     #[inline]
-    pub fn erase_cost(&mut self, returned: u64) {
+    pub const fn erase_cost(&mut self, returned: u64) {
         self.tracker.erase_cost(returned);
     }
 
@@ -177,7 +189,7 @@ impl Gas {
     ///
     /// Note that this does not affect the reservoir.
     #[inline]
-    pub fn spend_all(&mut self) {
+    pub const fn spend_all(&mut self) {
         self.tracker.spend_all();
     }
 
@@ -186,7 +198,7 @@ impl Gas {
     /// `refund` can be negative but `self.refunded` should always be positive
     /// at the end of transact.
     #[inline]
-    pub fn record_refund(&mut self, refund: i64) {
+    pub const fn record_refund(&mut self, refund: i64) {
         self.tracker.record_refund(refund);
     }
 
@@ -206,26 +218,19 @@ impl Gas {
 
     /// Set a refund value. This overrides the current refund value.
     #[inline]
-    pub fn set_refund(&mut self, refund: i64) {
+    pub const fn set_refund(&mut self, refund: i64) {
         self.tracker.set_refunded(refund);
     }
 
     /// Set a remaining value. This overrides the current remaining value.
     #[inline]
-    pub fn set_remaining(&mut self, remaining: u64) {
+    pub const fn set_remaining(&mut self, remaining: u64) {
         self.tracker.set_remaining(remaining);
-    }
-
-    /// [MANTLE] Gas::set_limit - Called by the token_ratio logic in op-revm/handler.rs
-    /// Set the limit.
-    #[inline]
-    pub fn set_limit(&mut self, limit: u64) {
-        self.tracker.set_limit(limit);
     }
 
     /// Set a spent value. This overrides the current spent value.
     #[inline]
-    pub fn set_spent(&mut self, spent: u64) {
+    pub const fn set_spent(&mut self, spent: u64) {
         self.tracker
             .set_remaining(self.tracker.limit().saturating_sub(spent));
     }
@@ -240,7 +245,7 @@ impl Gas {
     #[inline]
     #[must_use = "prefer using `gas!` instead to return an out-of-gas error on failure"]
     #[deprecated(since = "32.0.0", note = "use record_regular_cost instead")]
-    pub fn record_cost(&mut self, cost: u64) -> bool {
+    pub const fn record_cost(&mut self, cost: u64) -> bool {
         self.record_regular_cost(cost)
     }
 
@@ -251,7 +256,7 @@ impl Gas {
     /// without consequence if the caller handles it.
     #[inline(always)]
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
-    pub fn record_cost_unsafe(&mut self, cost: u64) -> bool {
+    pub const fn record_cost_unsafe(&mut self, cost: u64) -> bool {
         let remaining = self.tracker.remaining();
         let oog = remaining < cost;
         self.tracker.set_remaining(remaining.wrapping_sub(cost));
@@ -267,7 +272,7 @@ impl Gas {
     /// Returns `false` if total remaining gas is insufficient.
     #[inline]
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
-    pub fn record_state_cost(&mut self, cost: u64) -> bool {
+    pub const fn record_state_cost(&mut self, cost: u64) -> bool {
         self.tracker.record_state_cost(cost)
     }
 
@@ -276,20 +281,9 @@ impl Gas {
     /// Used for forwarding gas to child frames.
     #[inline]
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
-    pub fn record_regular_cost(&mut self, cost: u64) -> bool {
+    pub const fn record_regular_cost(&mut self, cost: u64) -> bool {
         self.tracker.record_regular_cost(cost)
     }
-}
-
-/// Result of attempting to extend memory during execution.
-#[derive(Debug)]
-pub enum MemoryExtensionResult {
-    /// Memory was extended.
-    Extended,
-    /// Memory size stayed the same.
-    Same,
-    /// Not enough gas to extend memory.
-    OutOfGas,
 }
 
 /// Utility struct that speeds up calculation of memory expansion
@@ -319,7 +313,11 @@ impl MemoryGas {
     ///
     /// Returns the difference between the new and old expansion cost.
     #[inline]
-    pub fn set_words_num(&mut self, words_num: usize, mut expansion_cost: u64) -> Option<u64> {
+    pub const fn set_words_num(
+        &mut self,
+        words_num: usize,
+        mut expansion_cost: u64,
+    ) -> Option<u64> {
         self.words_num = words_num;
         core::mem::swap(&mut self.expansion_cost, &mut expansion_cost);
         self.expansion_cost.checked_sub(expansion_cost)
@@ -413,6 +411,35 @@ mod tests {
         // On OOG, state_gas_spent is NOT incremented and reservoir is unchanged
         assert_eq!(gas.state_gas_spent(), 0);
         assert_eq!(gas.reservoir(), 20);
+    }
+
+    /// Refill reservoir restores state gas in-place (EIP-8037 0→x→0 restoration).
+    ///
+    /// The refill decrements `state_gas_spent` and may drive it negative if the
+    /// matching charge was made by a parent frame.
+    #[test]
+    fn test_refill_reservoir() {
+        // Simple case: charge then refill within the same frame.
+        let mut gas = Gas::new_with_regular_gas_and_reservoir(1000, 500);
+        assert!(gas.record_state_cost(200));
+        assert_eq!(
+            (gas.reservoir(), gas.remaining(), gas.state_gas_spent()),
+            (300, 1000, 200)
+        );
+        gas.refill_reservoir(200);
+        assert_eq!(
+            (gas.reservoir(), gas.remaining(), gas.state_gas_spent()),
+            (500, 1000, 0)
+        );
+
+        // Child-frame case: refill without a prior charge makes state_gas_spent
+        // negative. The parent's matching +charge is reconciled on return.
+        let mut gas = Gas::new_with_regular_gas_and_reservoir(1000, 100);
+        gas.refill_reservoir(300);
+        assert_eq!(
+            (gas.reservoir(), gas.remaining(), gas.state_gas_spent()),
+            (400, 1000, -300)
+        );
     }
 
     /// A.3: State gas with zero regular remaining but non-zero reservoir.

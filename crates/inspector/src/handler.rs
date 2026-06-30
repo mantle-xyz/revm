@@ -1,15 +1,15 @@
 use crate::{Inspector, InspectorEvmTr, JournalExt};
-use context::{
-    result::{ExecutionResult, ResultGas},
-    Cfg, ContextTr, JournalEntry, JournalTr, Transaction,
+use context::{result::ExecutionResult, Cfg, ContextTr, JournalEntry, JournalTr, Transaction};
+use handler::{
+    evm::FrameTr, post_execution::build_result_gas, EvmTr, FrameResult, Handler, ItemOrResult,
 };
-use handler::{evm::FrameTr, EvmTr, FrameResult, Handler, ItemOrResult};
 use interpreter::{
-    instructions::InstructionTable,
+    instructions::{GasTable, InstructionTable},
     interpreter_types::{Jumps, LoopControl},
     FrameInput, Host, InitialAndFloorGas, InstructionResult, Interpreter, InterpreterAction,
     InterpreterTypes,
 };
+use primitives::hints_util::cold_path;
 use state::bytecode::opcode;
 
 /// Trait that extends [`Handler`] with inspection functionality.
@@ -85,7 +85,6 @@ where
         let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
             evm.ctx().tx().gas_limit(),
             evm.ctx().cfg().tx_gas_limit_cap(),
-            evm.ctx().cfg().is_amsterdam_eip8037_enabled(),
         );
         let first_frame_input = self.first_frame_input(evm, gas_limit, reservoir)?;
 
@@ -93,7 +92,7 @@ where
         let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
 
         // Handle last frame result
-        self.last_frame_result(evm, &mut frame_result)?;
+        self.last_frame_result(evm, reservoir, &mut frame_result)?;
         Ok(frame_result)
     }
 
@@ -157,10 +156,7 @@ where
             .and_then(|exec_result| {
                 // System calls have no intrinsic gas; build ResultGas from frame result.
                 let gas = exec_result.gas();
-                let result_gas = ResultGas::default()
-                    .with_total_gas_spent(gas.total_gas_spent())
-                    .with_refunded(gas.refunded() as u64)
-                    .with_state_gas_spent(gas.state_gas_spent());
+                let result_gas = build_result_gas(false, gas, init_and_floor_gas);
                 self.execution_result(evm, exec_result, result_gas)
             }) {
             out @ Ok(_) => out,
@@ -232,6 +228,7 @@ pub fn inspect_instructions<CTX, IT>(
     interpreter: &mut Interpreter<IT>,
     mut inspector: impl Inspector<CTX, IT>,
     instructions: &InstructionTable<IT, CTX>,
+    gas_table: &GasTable,
 ) -> InterpreterAction
 where
     CTX: ContextTr<Journal: JournalExt> + Host,
@@ -240,11 +237,17 @@ where
     loop {
         inspector.step(interpreter, context);
         if interpreter.bytecode.is_end() {
+            cold_path();
             break;
         }
 
         let opcode = interpreter.bytecode.opcode();
-        interpreter.step(instructions, context);
+        if let Err(e) = interpreter.step(instructions, gas_table, context) {
+            cold_path();
+            if interpreter.bytecode.action().is_none() {
+                interpreter.halt(e);
+            }
+        }
 
         if (opcode::LOG0..=opcode::LOG4).contains(&opcode) {
             inspect_log(interpreter, context, &mut inspector);
@@ -253,6 +256,7 @@ where
         inspector.step_end(interpreter, context);
 
         if interpreter.bytecode.is_end() {
+            cold_path();
             break;
         }
     }

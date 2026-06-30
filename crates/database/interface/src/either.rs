@@ -3,7 +3,7 @@
 use crate::{Database, DatabaseCommit, DatabaseRef};
 use either::Either;
 use primitives::{Address, AddressMap, StorageKey, StorageValue, B256};
-use state::{Account, AccountInfo, Bytecode};
+use state::{Account, AccountId, AccountInfo, Bytecode};
 
 impl<L, R> Database for Either<L, R>
 where
@@ -47,7 +47,7 @@ where
     fn storage_by_account_id(
         &mut self,
         address: Address,
-        account_id: usize,
+        account_id: AccountId,
         storage_key: StorageKey,
     ) -> Result<StorageValue, Self::Error> {
         match self {
@@ -66,6 +66,13 @@ where
         match self {
             Self::Left(db) => db.commit(changes),
             Self::Right(db) => db.commit(changes),
+        }
+    }
+
+    fn commit_iter(&mut self, changes: &mut dyn Iterator<Item = (Address, Account)>) {
+        match self {
+            Self::Left(db) => db.commit_iter(changes),
+            Self::Right(db) => db.commit_iter(changes),
         }
     }
 }
@@ -112,7 +119,7 @@ where
     fn storage_by_account_id_ref(
         &self,
         address: Address,
-        account_id: usize,
+        account_id: AccountId,
         storage_key: StorageKey,
     ) -> Result<StorageValue, Self::Error> {
         match self {

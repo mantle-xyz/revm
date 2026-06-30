@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [19.0.3](https://github.com/bluealloy/revm/compare/revm-statetest-types-v19.0.2...revm-statetest-types-v19.0.3) - 2026-05-26
+
+### Other
+
+- updated the following local packages: revm-database, revm-context
+
+## [19.0.2](https://github.com/bluealloy/revm/compare/revm-statetest-types-v19.0.1...revm-statetest-types-v19.0.2) - 2026-05-22
+
+### Other
+
+- updated the following local packages: revm-context-interface, revm-context, revm-database
+
+## [19.0.1](https://github.com/bluealloy/revm/compare/revm-statetest-types-v19.0.0...revm-statetest-types-v19.0.1) - 2026-05-21
+
+### Other
+
+- updated the following local packages: revm-context-interface, revm-context
+
+## [19.0.0](https://github.com/bluealloy/revm/compare/revm-statetest-types-v17.0.1...revm-statetest-types-v19.0.0) - 2026-05-19
+
+### Other
+
+- backport v107 release notes from branch ([#3617](https://github.com/bluealloy/revm/pull/3617))
+- rm op-revm (migrated to ethereum-optimism/optimism) ([#3568](https://github.com/bluealloy/revm/pull/3568))
+
 ## [17.0.1](https://github.com/bluealloy/revm/compare/revm-statetest-types-v17.0.0...revm-statetest-types-v17.0.1) - 2026-04-17
 
 ### Other

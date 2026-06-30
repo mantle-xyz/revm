@@ -169,6 +169,11 @@ pub struct CallInputs {
     pub scheme: CallScheme,
     /// Whether the call is a static call, or is initiated inside a static call.
     pub is_static: bool,
+    /// EIP-8037: set when the CALL opcode upfront-charged `new_account_state_gas`
+    /// for creating an empty account at `target_address` via value transfer.
+    /// On revert/halt of the resulting frame the parent must refund this charge
+    /// to the reservoir, matching the CREATE pattern.
+    pub charged_new_account_state_gas: bool,
 }
 
 impl CallInputs {
@@ -235,22 +240,22 @@ pub enum CallScheme {
 
 impl CallScheme {
     /// Returns true if it is `CALL`.
-    pub fn is_call(&self) -> bool {
+    pub const fn is_call(&self) -> bool {
         matches!(self, Self::Call)
     }
 
     /// Returns true if it is `CALLCODE`.
-    pub fn is_call_code(&self) -> bool {
+    pub const fn is_call_code(&self) -> bool {
         matches!(self, Self::CallCode)
     }
 
     /// Returns true if it is `DELEGATECALL`.
-    pub fn is_delegate_call(&self) -> bool {
+    pub const fn is_delegate_call(&self) -> bool {
         matches!(self, Self::DelegateCall)
     }
 
     /// Returns true if it is `STATICCALL`.
-    pub fn is_static_call(&self) -> bool {
+    pub const fn is_static_call(&self) -> bool {
         matches!(self, Self::StaticCall)
     }
 }

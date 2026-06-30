@@ -7,12 +7,12 @@ use super::{
 use bytecode::Bytecode;
 use database_interface::{
     bal::{BalState, EvmDatabaseError},
-    Database, DatabaseCommit, DatabaseRef, EmptyDB,
+    Database, DatabaseCommit, DatabaseRef, EmptyDB, OnStateHook,
 };
 use primitives::{hash_map, Address, AddressMap, HashMap, StorageKey, StorageValue, B256};
 use state::{
-    bal::{alloy::AlloyBal, Bal},
-    Account, AccountInfo,
+    bal::{alloy::AlloyBal, Bal, BlockAccessIndex},
+    Account, AccountId, AccountInfo,
 };
 use std::{boxed::Box, sync::Arc};
 
@@ -28,7 +28,7 @@ pub type StateDBBox<'a, E> = State<DBBox<'a, E>>;
 ///
 /// State clear flag is handled by the EVM journal in `finalize()` based on
 /// the spec. The database layer always applies post-EIP-161 commit semantics.
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 pub struct State<DB> {
     /// Cached state contains both changed from evm execution and cached/loaded account/storages
     /// from database
@@ -70,6 +70,9 @@ pub struct State<DB> {
     ///
     /// Can contain both the BAL for reads and BAL builder that is used to build BAL.
     pub bal_state: BalState,
+    /// Hook invoked whenever state changes are committed.
+    #[debug(skip)]
+    pub state_hook: Option<Box<dyn OnStateHook>>,
 }
 
 // Have ability to call State::builder without having to specify the type.
@@ -200,7 +203,7 @@ impl<DB: Database> State<DB> {
 
     /// Takes build bal from bal state.
     #[inline]
-    pub fn take_built_bal(&mut self) -> Option<Bal> {
+    pub const fn take_built_bal(&mut self) -> Option<Bal> {
         self.bal_state.take_built_bal()
     }
 
@@ -212,19 +215,19 @@ impl<DB: Database> State<DB> {
 
     /// Bump BAL index.
     #[inline]
-    pub fn bump_bal_index(&mut self) {
+    pub const fn bump_bal_index(&mut self) {
         self.bal_state.bump_bal_index();
     }
 
     /// Set BAL index.
     #[inline]
-    pub fn set_bal_index(&mut self, index: u64) {
+    pub const fn set_bal_index(&mut self, index: BlockAccessIndex) {
         self.bal_state.bal_index = index;
     }
 
     /// Reset BAL index.
     #[inline]
-    pub fn reset_bal_index(&mut self) {
+    pub const fn reset_bal_index(&mut self) {
         self.bal_state.reset_bal_index();
     }
 
@@ -232,6 +235,26 @@ impl<DB: Database> State<DB> {
     #[inline]
     pub fn set_bal(&mut self, bal: Option<Arc<Bal>>) {
         self.bal_state.bal = bal;
+    }
+
+    /// Sets the hook invoked whenever state changes are committed.
+    #[inline]
+    pub fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
+        self.state_hook = hook;
+    }
+
+    /// Sets the hook invoked whenever state changes are committed.
+    #[inline]
+    #[must_use]
+    pub fn with_state_hook(mut self, hook: Option<Box<dyn OnStateHook>>) -> Self {
+        self.set_state_hook(hook);
+        self
+    }
+
+    /// Returns whether the state has a BAL configured.
+    #[inline]
+    pub const fn has_bal(&self) -> bool {
+        self.bal_state.bal.is_some()
     }
 
     /// Gets storage value of address at index.
@@ -287,7 +310,9 @@ impl<DB: Database> Database for State<DB> {
         // will populate account code if there was a bal change to it. If there is no change
         // it will be fetched in code_by_hash.
         if let Some(account_id) = account_id {
-            self.bal_state.basic_by_account_id(account_id, &mut basic);
+            self.bal_state
+                .basic_by_account_id(account_id, &mut basic)
+                .map_err(EvmDatabaseError::Bal)?;
         }
         Ok(basic)
     }
@@ -334,7 +359,7 @@ impl<DB: Database> Database for State<DB> {
     fn storage_by_account_id(
         &mut self,
         address: Address,
-        account_id: usize,
+        account_id: AccountId,
         key: StorageKey,
     ) -> Result<StorageValue, Self::Error> {
         if let Some(storage) = self.bal_state.storage_by_account_id(account_id, key)? {
@@ -366,6 +391,9 @@ impl<DB: Database> Database for State<DB> {
 
 impl<DB: Database> DatabaseCommit for State<DB> {
     fn commit(&mut self, changes: AddressMap<Account>) {
+        if let Some(hook) = self.state_hook.as_mut() {
+            hook.on_state(&changes);
+        }
         self.bal_state.commit(&changes);
         let transitions = self.cache.apply_evm_state_iter(changes, |_, _| {});
         if let Some(s) = self.transition_state.as_mut() {
@@ -377,6 +405,12 @@ impl<DB: Database> DatabaseCommit for State<DB> {
     }
 
     fn commit_iter(&mut self, changes: &mut dyn Iterator<Item = (Address, Account)>) {
+        if self.state_hook.is_some() {
+            let changes = changes.collect::<AddressMap<_>>();
+            self.commit(changes);
+            return;
+        }
+
         let transitions = self
             .cache
             .apply_evm_state_iter(changes, |address, account| {
@@ -425,7 +459,9 @@ impl<DB: DatabaseRef> DatabaseRef for State<DB> {
 
         // if it is inside bal, overwrite the account with the bal changes.
         if let Some(account_id) = account_id {
-            self.bal_state.basic_by_account_id(account_id, &mut account);
+            self.bal_state
+                .basic_by_account_id(account_id, &mut account)
+                .map_err(EvmDatabaseError::Bal)?;
         }
         Ok(account)
     }
@@ -497,6 +533,15 @@ mod tests {
         AccountRevert, AccountStatus, BundleAccount, RevertToSlot,
     };
     use primitives::{keccak256, BLOCK_HASH_HISTORY, U256};
+    #[test]
+    fn has_bal_helper() {
+        let state = State::builder().build();
+        assert!(!state.has_bal());
+
+        let state = State::builder().with_bal(Arc::new(Bal::new())).build();
+        assert!(state.has_bal());
+    }
+
     #[test]
     fn block_hash_cache() {
         let mut state = State::builder().build();
