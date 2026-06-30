@@ -6,6 +6,7 @@ use alloy_provider::{
     Network, Provider,
 };
 use alloy_transport::TransportError;
+use bytecode::BytecodeDecodeError;
 use core::error::Error;
 use database_interface::{async_db::DatabaseAsyncRef, DBErrorMarker};
 use primitives::{Address, StorageKey, StorageValue, B256};
@@ -23,6 +24,14 @@ pub enum AlloyDBError {
     /// - The node has pruned the block data
     /// - Using a light client that doesn't have the block
     BlockNotFound(u64),
+    /// Provider returned malformed bytecode that cannot be decoded safely.
+    ///
+    /// [MANTLE] - basic_async_ref
+    InvalidBytecode(BytecodeDecodeError),
+    /// An internal design constraint was violated (e.g. a method that should never be called was called).
+    ///
+    /// [MANTLE] - code_by_hash_async_ref
+    Internal(String),
 }
 
 impl DBErrorMarker for AlloyDBError {}
@@ -32,6 +41,8 @@ impl Display for AlloyDBError {
         match self {
             Self::Transport(err) => write!(f, "Transport error: {err}"),
             Self::BlockNotFound(number) => write!(f, "Block not found: {number}"),
+            Self::InvalidBytecode(err) => write!(f, "Invalid bytecode from provider: {err}"),
+            Self::Internal(msg) => write!(f, "Internal AlloyDB error: {msg}"),
         }
     }
 }
@@ -41,6 +52,8 @@ impl Error for AlloyDBError {
         match self {
             Self::Transport(err) => Some(err),
             Self::BlockNotFound(_) => None,
+            Self::InvalidBytecode(err) => Some(err),
+            Self::Internal(_) => None,
         }
     }
 }
@@ -99,7 +112,8 @@ impl<N: Network, P: Provider<N>> DatabaseAsyncRef for AlloyDB<N, P> {
         let (nonce, balance, code) = tokio::join!(nonce, balance, code,);
 
         let balance = balance?;
-        let code = Bytecode::new_raw(code?.0.into());
+        let code =
+            Bytecode::new_raw_checked(code?.0.into()).map_err(AlloyDBError::InvalidBytecode)?;
         let code_hash = code.hash_slow();
         let nonce = nonce?;
 
@@ -120,8 +134,11 @@ impl<N: Network, P: Provider<N>> DatabaseAsyncRef for AlloyDB<N, P> {
     }
 
     async fn code_by_hash_async_ref(&self, _code_hash: B256) -> Result<Bytecode, Self::Error> {
-        panic!("This should not be called, as the code is already loaded");
-        // This is not needed, as the code is already loaded with basic_ref
+        // Code is already loaded as part of basic_async_ref; this method should never be called.
+        Err(AlloyDBError::Internal(
+            "code_by_hash_async_ref should not be called: code is loaded with basic_async_ref"
+                .into(),
+        ))
     }
 
     async fn storage_async_ref(

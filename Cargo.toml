@@ -16,6 +16,9 @@ members = [
     "crates/context/interface",
     "crates/handler",
 
+    # [MANTLE] op-revm retained in this fork (upstream moved it out after v107)
+    "crates/op-revm",
+
     # variants
     "crates/inspector",
 
@@ -54,6 +57,8 @@ statetest-types = { path = "crates/statetest-types", package = "revm-statetest-t
 context = { path = "crates/context", package = "revm-context", version = "18.0.3", default-features = false }
 context-interface = { path = "crates/context/interface", package = "revm-context-interface", version = "19.0.3", default-features = false }
 handler = { path = "crates/handler", package = "revm-handler", version = "20.0.3", default-features = false }
+# [MANTLE] op-revm retained in this fork (upstream moved it to the optimism monorepo after v107).
+op-revm = { path = "crates/op-revm", package = "op-revm", version = "20.0.0", default-features = false }
 ee-tests = { path = "crates/ee-tests", package = "revm-ee-tests", version = "0.3.0", default-features = false }
 
 # alloy

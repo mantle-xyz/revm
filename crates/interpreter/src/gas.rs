@@ -228,6 +228,13 @@ impl Gas {
         self.tracker.set_remaining(remaining);
     }
 
+    /// [MANTLE] Gas::set_limit - Called by the token_ratio logic in op-revm/handler.rs
+    /// Set the limit.
+    #[inline]
+    pub fn set_limit(&mut self, limit: u64) {
+        self.tracker.set_limit(limit);
+    }
+
     /// Set a spent value. This overrides the current spent value.
     #[inline]
     pub const fn set_spent(&mut self, spent: u64) {

@@ -2,7 +2,7 @@
 pub use context_interface::Cfg;
 
 use context_interface::cfg::GasParams;
-use primitives::{eip170, eip3860, eip7825, eip7954, hardfork::SpecId};
+use primitives::{eip170, eip3860, eip7954, hardfork::SpecId};
 
 /// EVM configuration
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -422,12 +422,8 @@ impl<SPEC: Into<SpecId> + Clone> Cfg for CfgEnv<SPEC> {
 
     #[inline]
     fn tx_gas_limit_cap(&self) -> u64 {
-        self.tx_gas_limit_cap
-            .unwrap_or(if self.spec.clone().into().is_enabled_in(SpecId::OSAKA) {
-                eip7825::TX_GAS_LIMIT_CAP
-            } else {
-                u64::MAX
-            })
+        // [MANTLE] disable tx gas limit cap for EIP-7825
+        self.tx_gas_limit_cap.unwrap_or(u64::MAX)
     }
 
     #[inline]
