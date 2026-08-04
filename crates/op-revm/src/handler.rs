@@ -3898,7 +3898,7 @@ mod tests {
     }
 
     /// Block-286456 shape: deposit ENTERS the EVM call (transfer succeeds) and the target
-    /// then REVERTs. Keeps Mint + Transfer (logs and state).
+    /// then reverts. Keeps Mint + Transfer (logs and state).
     #[test]
     fn test_failed_deposit_executed_then_revert_keeps_mint_and_transfer() {
         let target = Address::from([0x42; 20]);

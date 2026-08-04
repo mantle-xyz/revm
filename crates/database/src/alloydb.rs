@@ -26,11 +26,11 @@ pub enum AlloyDBError {
     BlockNotFound(u64),
     /// Provider returned malformed bytecode that cannot be decoded safely.
     ///
-    /// [MANTLE] - basic_async_ref
+    /// `[MANTLE]` - basic_async_ref
     InvalidBytecode(BytecodeDecodeError),
     /// An internal design constraint was violated (e.g. a method that should never be called was called).
     ///
-    /// [MANTLE] - code_by_hash_async_ref
+    /// `[MANTLE]` - code_by_hash_async_ref
     Internal(String),
 }
 
