@@ -597,8 +597,7 @@ where
             && matches!(
                 exec_result,
                 ExecutionResult::Revert { .. } | ExecutionResult::Halt { .. }
-            )
-        {
+            ) {
             // Carry the full ResultGas unchanged (floor/state-gas aware) — collapsing it to
             // total_gas_spent only would diverge on EIP-7623 / refunded-gas deposits.
             let gas = *exec_result.gas();
@@ -3252,16 +3251,23 @@ mod tests {
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             caller,
-            AccountInfo { balance: U256::from(10_000_000u64), ..Default::default() },
+            AccountInfo {
+                balance: U256::from(10_000_000u64),
+                ..Default::default()
+            },
         );
         let l1_block = db.load_account(L1_BLOCK_CONTRACT).unwrap();
         l1_block.storage.insert(L1_BASE_FEE_SLOT, U256::from(1_000));
-        l1_block.storage.insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
         l1_block
             .storage
             .insert(ECOTONE_L1_FEE_SCALARS_SLOT, U256::from(1_000) << 128);
         let gas_oracle = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
-        gas_oracle.storage.insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
+        gas_oracle
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
 
         let ctx = Context::op()
             .with_db(db)
@@ -3310,16 +3316,23 @@ mod tests {
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             caller,
-            AccountInfo { balance: U256::from(10_000_000_000u64), ..Default::default() },
+            AccountInfo {
+                balance: U256::from(10_000_000_000u64),
+                ..Default::default()
+            },
         );
         let l1_block = db.load_account(L1_BLOCK_CONTRACT).unwrap();
         l1_block.storage.insert(L1_BASE_FEE_SLOT, U256::from(1_000));
-        l1_block.storage.insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
         l1_block
             .storage
             .insert(ECOTONE_L1_FEE_SCALARS_SLOT, U256::from(1_000) << 128);
         let gas_oracle = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
-        gas_oracle.storage.insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
+        gas_oracle
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
 
         let mut info_new = L1BlockInfo {
             l1_base_fee: U256::from(1_000),
@@ -3330,11 +3343,16 @@ mod tests {
             ..Default::default()
         };
         let cost_new = info_new.calculate_tx_l1_cost(&bytes!("FACADE"), OpSpecId::ARSIA);
-        let mut info_old =
-            L1BlockInfo { token_ratio: U256::from(OLD_TOKEN_RATIO), ..info_new.clone() };
+        let mut info_old = L1BlockInfo {
+            token_ratio: U256::from(OLD_TOKEN_RATIO),
+            ..info_new.clone()
+        };
         info_old.tx_l1_cost = None;
         let cost_old = info_old.calculate_tx_l1_cost(&bytes!("FACADE"), OpSpecId::ARSIA);
-        assert_ne!(cost_new, cost_old, "precondition: different ratios produce different costs");
+        assert_ne!(
+            cost_new, cost_old,
+            "precondition: different ratios produce different costs"
+        );
 
         let ctx = Context::op()
             .with_db(db)
@@ -3384,16 +3402,23 @@ mod tests {
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             caller,
-            AccountInfo { balance: U256::from(INITIAL_BALANCE), ..Default::default() },
+            AccountInfo {
+                balance: U256::from(INITIAL_BALANCE),
+                ..Default::default()
+            },
         );
         let l1_block = db.load_account(L1_BLOCK_CONTRACT).unwrap();
         l1_block.storage.insert(L1_BASE_FEE_SLOT, U256::from(1_000));
-        l1_block.storage.insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
         l1_block
             .storage
             .insert(ECOTONE_L1_FEE_SCALARS_SLOT, U256::from(1_000) << 128);
         let gas_oracle = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
-        gas_oracle.storage.insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
+        gas_oracle
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
 
         let mut info = L1BlockInfo {
             l1_base_fee: U256::from(1_000),
@@ -3453,20 +3478,29 @@ mod tests {
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             caller,
-            AccountInfo { balance: U256::from(10_000_000_000u64), ..Default::default() },
+            AccountInfo {
+                balance: U256::from(10_000_000_000u64),
+                ..Default::default()
+            },
         );
         let l1_block = db.load_account(L1_BLOCK_CONTRACT).unwrap();
         l1_block.storage.insert(L1_BASE_FEE_SLOT, U256::from(7));
-        l1_block.storage.insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(1));
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(1));
         l1_block.storage.insert(
             ECOTONE_L1_FEE_SCALARS_SLOT,
             U256::from(1368u64) << 128 | U256::from(810949u64) << 64,
         );
         l1_block.storage.insert(L1_OVERHEAD_SLOT, U256::ZERO);
         l1_block.storage.insert(L1_SCALAR_SLOT, U256::ZERO);
-        l1_block.storage.insert(OPERATOR_FEE_SCALARS_SLOT, U256::ZERO);
+        l1_block
+            .storage
+            .insert(OPERATOR_FEE_SCALARS_SLOT, U256::ZERO);
         let gas_oracle = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
-        gas_oracle.storage.insert(TOKEN_RATIO_SLOT, U256::from(TOKEN_RATIO));
+        gas_oracle
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(TOKEN_RATIO));
 
         let ctx = Context::op()
             .with_db(db)
@@ -3475,7 +3509,10 @@ mod tests {
                 token_ratio: U256::from(9999),
                 ..Default::default()
             })
-            .with_block(BlockEnv { number: BLOCK_NUM, ..Default::default() })
+            .with_block(BlockEnv {
+                number: BLOCK_NUM,
+                ..Default::default()
+            })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
             .with_tx(
                 OpTransaction::builder()
@@ -3519,20 +3556,29 @@ mod tests {
         let mut db = InMemoryDB::default();
         db.insert_account_info(
             caller,
-            AccountInfo { balance: U256::from(10_000_000_000u64), ..Default::default() },
+            AccountInfo {
+                balance: U256::from(10_000_000_000u64),
+                ..Default::default()
+            },
         );
         let l1_block = db.load_account(L1_BLOCK_CONTRACT).unwrap();
         l1_block.storage.insert(L1_BASE_FEE_SLOT, U256::from(7));
-        l1_block.storage.insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(1));
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(1));
         l1_block.storage.insert(
             ECOTONE_L1_FEE_SCALARS_SLOT,
             U256::from(1368u64) << 128 | U256::from(810949u64) << 64,
         );
         l1_block.storage.insert(L1_OVERHEAD_SLOT, U256::ZERO);
         l1_block.storage.insert(L1_SCALAR_SLOT, U256::ZERO);
-        l1_block.storage.insert(OPERATOR_FEE_SCALARS_SLOT, U256::ZERO);
+        l1_block
+            .storage
+            .insert(OPERATOR_FEE_SCALARS_SLOT, U256::ZERO);
         let gas_oracle = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
-        gas_oracle.storage.insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
+        gas_oracle
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
 
         let ctx = Context::op()
             .with_db(db)
@@ -3547,7 +3593,10 @@ mod tests {
                 operator_fee_constant: Some(U256::ZERO),
                 ..Default::default()
             })
-            .with_block(BlockEnv { number: BLOCK_NUM, ..Default::default() })
+            .with_block(BlockEnv {
+                number: BLOCK_NUM,
+                ..Default::default()
+            })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
 
         let mut evm = ctx.build_op();
@@ -3571,10 +3620,17 @@ mod tests {
         );
 
         // Simulate tx1 SSTORE: update token_ratio in journal
-        evm.ctx().journal_mut().load_account(GAS_ORACLE_CONTRACT).unwrap();
         evm.ctx()
             .journal_mut()
-            .sstore(GAS_ORACLE_CONTRACT, TOKEN_RATIO_SLOT, U256::from(NEW_TOKEN_RATIO))
+            .load_account(GAS_ORACLE_CONTRACT)
+            .unwrap();
+        evm.ctx()
+            .journal_mut()
+            .sstore(
+                GAS_ORACLE_CONTRACT,
+                TOKEN_RATIO_SLOT,
+                U256::from(NEW_TOKEN_RATIO),
+            )
             .unwrap();
         evm.ctx().journal_mut().commit_tx();
         evm.ctx().chain_mut().clear_tx_l1_cost();
@@ -4047,9 +4103,17 @@ mod tests {
             "the one log must be Mint"
         );
         // ETH transfer rolled back -> target holds no BVM_ETH.
-        assert_eq!(target_eth, U256::ZERO, "BVM_ETH transfer must be rolled back");
+        assert_eq!(
+            target_eth,
+            U256::ZERO,
+            "BVM_ETH transfer must be rolled back"
+        );
         // Native MNT value transfer failed/rolled back -> target got no MNT.
-        assert_eq!(target_native, U256::ZERO, "native MNT value must not transfer");
+        assert_eq!(
+            target_native,
+            U256::ZERO,
+            "native MNT value must not transfer"
+        );
         // Native MNT mint persists -> caller keeps exactly the mint.
         assert_eq!(
             caller_native,
@@ -4105,12 +4169,21 @@ mod tests {
             .map(|s| s.present_value)
             .unwrap_or_default();
         // op-geth expectation: mint-only (1 Mint log, transfer rolled back).
-        assert_eq!(logs.len(), 1, "op-geth keeps only Mint; got {} logs", logs.len());
+        assert_eq!(
+            logs.len(),
+            1,
+            "op-geth keeps only Mint; got {} logs",
+            logs.len()
+        );
         assert_eq!(
             logs[0].topics()[0],
             BvmEth::MINT_SELECTOR,
             "the one log must be Mint"
         );
-        assert_eq!(created_eth, U256::ZERO, "BVM_ETH transfer must be rolled back");
+        assert_eq!(
+            created_eth,
+            U256::ZERO,
+            "BVM_ETH transfer must be rolled back"
+        );
     }
 }

@@ -396,7 +396,17 @@ pub enum ExecutionResult<HaltReasonTy = HaltReason> {
         /// For standard EVM halts, gas used typically equals the gas limit.
         /// Some system- or L2-specific halts may intentionally report less gas used.
         gas: ResultGas,
-        /// Logs emitted before the halt.
+        /// Logs that must persist even though execution halted.
+        ///
+        /// Normally a halt discards all logs. Mantle deposit transactions are
+        /// the exception: a failed deposit still persists the pre-execution
+        /// BVM_ETH mint (matching op-geth, which emits the mint before its
+        /// revert snapshot), so the `Mint` event log must survive into the
+        /// receipt. All other halts leave this empty.
+        ///
+        /// `serde(default)` keeps older serialized halts (which predate this
+        /// field) decodable as an empty log list.
+        #[cfg_attr(feature = "serde", serde(default))]
         logs: Vec<Log>,
     },
 }
@@ -474,6 +484,12 @@ impl<HaltReasonTy> ExecutionResult<HaltReasonTy> {
     }
 
     /// Returns the logs emitted during execution.
+    ///
+    /// Includes the logs that survive a failed execution — e.g. the BVM_ETH
+    /// `Mint`/`Transfer` logs of a failed Mantle deposit, which are applied
+    /// before the top-level frame checkpoint and therefore outlive the frame's
+    /// revert or halt (matching op-geth, which emits the mint before its revert
+    /// snapshot).
     pub fn logs(&self) -> &[Log] {
         match self {
             Self::Success { logs, .. } | Self::Revert { logs, .. } | Self::Halt { logs, .. } => {
@@ -483,6 +499,8 @@ impl<HaltReasonTy> ExecutionResult<HaltReasonTy> {
     }
 
     /// Consumes [`self`] and returns the logs emitted during execution.
+    ///
+    /// See [`ExecutionResult::logs`] for which logs survive a failed execution.
     pub fn into_logs(self) -> Vec<Log> {
         match self {
             Self::Success { logs, .. } | Self::Revert { logs, .. } | Self::Halt { logs, .. } => {
