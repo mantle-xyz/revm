@@ -80,7 +80,7 @@ pub fn granite() -> &'static Precompiles {
 
 /// Returns precompiles for isthmus spec.
 ///
-/// [mantle] Mantle maps its entire pre-Limb era (Skadi and genesis) to
+/// `[mantle]` Mantle maps its entire pre-Limb era (Skadi and genesis) to
 /// `OpSpecId::ISTHMUS`. op-geth's `PrecompiledContractsMantleSkadi` is the
 /// standard Prague precompile set plus secp256r1 `p256verify`, using the
 /// standard EIP-2537 BLS12-381 precompiles and the standard Istanbul bn254

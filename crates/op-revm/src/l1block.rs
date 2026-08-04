@@ -182,7 +182,7 @@ impl L1BlockInfo {
         self.operator_fee_charge_inner(gas_limit)
     }
 
-    /// [MANTLE] spec_id not used in operator_fee_charge_inner
+    /// `[MANTLE]` spec_id not used in operator_fee_charge_inner
     /// Calculate the operator fee for the given `gas`.
     fn operator_fee_charge_inner(&self, gas: U256) -> U256 {
         let operator_fee_scalar = self
@@ -316,9 +316,9 @@ impl L1BlockInfo {
         self.calculate_tx_l1_cost_arsia_with_delta(input, 0)
     }
 
-    /// [MANTLE] - for reth calculate_tx_l1_cost_for_estimate
+    /// `[MANTLE]` - for reth calculate_tx_l1_cost_for_estimate
     ///
-    /// Like [`calculate_tx_l1_cost_arsia`] but adds `fastlz_delta` to compressed size (e.g. +80 for geth alignment).
+    /// Like [`Self::calculate_tx_l1_cost_arsia`] but adds `fastlz_delta` to compressed size (e.g. +80 for geth alignment).
     /// Uses geth Fjord formula: estimatedDASizeScaled = max(MinTxSizeScaled, intercept + coef*fastLzSize).
     /// [`estimate_tx_compressed_size_with_delta`] already returns that scaled value; use it directly.
     fn calculate_tx_l1_cost_arsia_with_delta(&self, input: &[u8], fastlz_delta: u64) -> U256 {
