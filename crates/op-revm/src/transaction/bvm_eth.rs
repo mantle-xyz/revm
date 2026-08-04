@@ -699,7 +699,10 @@ mod tests {
             .with_db(InMemoryDB::default())
             .with_chain(l1_block_info)
             .with_block(block_env)
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            // Block 59294 — and every deployed Mantle deposit — executes under ARSIA
+            // (eth_spec OSAKA). ISTHMUS is a different gas regime and leaves the
+            // is_arsia branches uncovered, so this replay must run under ARSIA.
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
             .with_tx(op_tx);
         let mut evm = ctx.build_op();
         let mut handler = OpHandler::<
