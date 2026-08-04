@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.0.1](https://github.com/bluealloy/revm/compare/revm-database-interface-v11.0.0...revm-database-interface-v11.0.1) - 2026-04-17
+
+### Other
+
+- updated the following local packages: revm-state
+
+## [11.0.0](https://github.com/bluealloy/revm/compare/revm-database-interface-v10.0.0...revm-database-interface-v11.0.0) - 2026-04-10
+
+### Added
+
+- add crate-level re-exports for all revm-* dependencies ([#3507](https://github.com/bluealloy/revm/pull/3507))
+
+## [10.0.0](https://github.com/bluealloy/revm/compare/revm-database-interface-v9.0.1...revm-database-interface-v10.0.0) - 2026-03-04
+
+### Other
+
+- bump revm-database-interface major version
+
+## [9.0.1](https://github.com/bluealloy/revm/compare/revm-database-interface-v9.0.0...revm-database-interface-v9.0.1) - 2026-03-02
+
+### Fixed
+
+- forward storage_by_account_id in WrapDatabaseRef ([#3441](https://github.com/bluealloy/revm/pull/3441))
+- *(bal)* fix populated account if pre-state was none ([#3357](https://github.com/bluealloy/revm/pull/3357))
+
+### Other
+
+- remove GPL mention and update gmp feature comments ([#3383](https://github.com/bluealloy/revm/pull/3383))
+- use fixed bytes hashmaps from alloy-core ([#3358](https://github.com/bluealloy/revm/pull/3358))
+
+## [9.0.0](https://github.com/bluealloy/revm/compare/revm-database-interface-v8.0.5...revm-database-interface-v9.0.0) - 2026-01-15
+
+### Added
+
+- BAL EIP-7928 ([#3070](https://github.com/bluealloy/revm/pull/3070))
+- DatabaseCommitExt::drain_balances ([#3205](https://github.com/bluealloy/revm/pull/3205))
+- DatabaseCommitExt + increment_balances ([#3195](https://github.com/bluealloy/revm/pull/3195))
+- DatabaseCommit::commit_iter ([#3197](https://github.com/bluealloy/revm/pull/3197))
+- Restrict Database::Error. JournaledAccountTr ([#3199](https://github.com/bluealloy/revm/pull/3199))
+
+### Fixed
+
+- *(database)* make DatabaseCommit dyn-compatible ([#3264](https://github.com/bluealloy/revm/pull/3264))
+- *(database)* prevent deadlock in ([#3251](https://github.com/bluealloy/revm/pull/3251))
+- *(database)* verify handle belongs to current runtime before block_in_place ([#3212](https://github.com/bluealloy/revm/pull/3212))
+
+### Other
+
+- fix typos, grammar errors, and improve documentation consistency ([#3294](https://github.com/bluealloy/revm/pull/3294))
+- fix typos and grammar in database crate ([#3279](https://github.com/bluealloy/revm/pull/3279))
+- happy new year, 2026 licence ([#3272](https://github.com/bluealloy/revm/pull/3272))
+- *(fmt)* merge all imports ([#3184](https://github.com/bluealloy/revm/pull/3184))
+
 ## [8.0.5](https://github.com/bluealloy/revm/compare/revm-database-interface-v8.0.4...revm-database-interface-v8.0.5) - 2025-11-07
 
 ### Other

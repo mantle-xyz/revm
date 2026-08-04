@@ -20,10 +20,13 @@ pub mod eip170;
 pub mod eip3860;
 pub mod eip4844;
 pub mod eip7702;
+pub mod eip7708;
 pub mod eip7823;
 pub mod eip7825;
 pub mod eip7907;
+pub mod eip7954;
 pub mod hardfork;
+pub mod hints_util;
 mod once_lock;
 
 pub use constants::*;
@@ -31,10 +34,13 @@ pub use once_lock::OnceLock;
 
 // Reexport alloy primitives.
 
-pub use alloy_primitives::map::{self, hash_map, hash_set, HashMap, HashSet};
 pub use alloy_primitives::{
-    self, address, b256, bytes, fixed_bytes, hex, hex_literal, keccak256, ruint, uint, Address,
-    Bytes, FixedBytes, Log, LogData, TxKind, B256, I128, I256, U128, U256,
+    self, address, b256, bytes, fixed_bytes, hex, hex_literal, keccak256,
+    map::{
+        self, hash_map, hash_set, indexmap, AddressIndexMap, AddressMap, AddressSet, B256Map,
+        HashMap, HashSet, IndexMap, U256Map,
+    },
+    ruint, uint, Address, Bytes, FixedBytes, Log, LogData, TxKind, B256, I128, I256, U128, U256,
 };
 
 /// Type alias for EVM storage keys (256-bit unsigned integers).
@@ -44,6 +50,9 @@ pub type StorageKey = U256;
 /// Type alias for EVM storage values (256-bit unsigned integers).
 /// Used to store data values in smart contract storage slots.
 pub type StorageValue = U256;
+
+/// Type alias for a map with storage keys (U256) as keys.
+pub type StorageKeyMap<V> = U256Map<V>;
 
 /// Optimize short address access.
 pub const SHORT_ADDRESS_CAP: usize = 300;

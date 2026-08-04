@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [15.0.0](https://github.com/bluealloy/revm/compare/revme-v14.0.0...revme-v15.0.0) - 2026-04-17
+
+### Other
+
+- updated the following local packages: revm
+
+## [14.0.0](https://github.com/bluealloy/revm/compare/revme-v13.0.0...revme-v14.0.0) - 2026-04-10
+
+### Added
+
+- add EIP-8037 / TIP-1016 state gas support ([#3406](https://github.com/bluealloy/revm/pull/3406))
+- *(revme)* list all failed tests at the end with --keep-going ([#3491](https://github.com/bluealloy/revm/pull/3491))
+
+### Fixed
+
+- *(revme)* use transact state for debug "State after" output ([#3498](https://github.com/bluealloy/revm/pull/3498))
+- *(revme)* guard unconditional println in blockchaintest for --json mode ([#3500](https://github.com/bluealloy/revm/pull/3500))
+
+### Other
+
+- *(revme)* use alloy-trie instead of triehash ([#3488](https://github.com/bluealloy/revm/pull/3488))
+
+## [13.0.0](https://github.com/bluealloy/revm/compare/revme-v12.0.0...revme-v13.0.0) - 2026-03-04
+
+### Other
+
+- bump revm-database-interface to v10.0.0
+
+## [12.0.0](https://github.com/bluealloy/revm/compare/revme-v11.0.0...revme-v12.0.0) - 2026-03-02
+
+### Added
+
+- *(precompile)* add aws-lc-rs as alternative backend for secp256r1 ([#3451](https://github.com/bluealloy/revm/pull/3451))
+- *(revme)* add --json output flag to evmrunner command ([#3428](https://github.com/bluealloy/revm/pull/3428))
+- *(revme)* validate block gas used in blockchain tests ([#3416](https://github.com/bluealloy/revm/pull/3416))
+- *(revme)* add --omit-progress flag to statetest command ([#3419](https://github.com/bluealloy/revm/pull/3419))
+
+### Other
+
+- move EIP-161 state clear into journal finalize ([#3444](https://github.com/bluealloy/revm/pull/3444))
+- add subcall benchmarks (1000-call variants) ([#3427](https://github.com/bluealloy/revm/pull/3427))
+- use fixed bytes hashmaps from alloy-core ([#3358](https://github.com/bluealloy/revm/pull/3358))
+- update default hardfork to Osaka (Ethereum) and Jovian (Optimism) ([#3326](https://github.com/bluealloy/revm/pull/3326))
+
+## [11.0.0](https://github.com/bluealloy/revm/compare/revme-v10.0.2...revme-v11.0.0) - 2026-01-15
+
+### Added
+
+- move GasParams to Cfg ([#3229](https://github.com/bluealloy/revm/pull/3229))
+- Propagate `map-foldhash` Feature Through Dependency Chain ([#3252](https://github.com/bluealloy/revm/pull/3252))
+- BAL EIP-7928 ([#3070](https://github.com/bluealloy/revm/pull/3070))
+- DatabaseCommitExt + increment_balances ([#3195](https://github.com/bluealloy/revm/pull/3195))
+- sort accounts by address in blockchaintest output ([#3182](https://github.com/bluealloy/revm/pull/3182))
+
+### Fixed
+
+- incorrect bytecode value in blockchain test error output ([#3288](https://github.com/bluealloy/revm/pull/3288))
+- use expected_exception instead of error field for unexpected_success status ([#3244](https://github.com/bluealloy/revm/pull/3244))
+- deduplicate post-state validation error handling ([#3228](https://github.com/bluealloy/revm/pull/3228))
+- *(revme)* incorrect debug log message in btest ([#3233](https://github.com/bluealloy/revm/pull/3233))
+- *(statetest)* use spec-aware blob base fee update fraction ([#3210](https://github.com/bluealloy/revm/pull/3210))
+
+### Other
+
+- apply improvements from ai-bot labeled PRs ([#3297](https://github.com/bluealloy/revm/pull/3297))
+- *(revme)* consolidate find_all_json_tests into dir_utils ([#3262](https://github.com/bluealloy/revm/pull/3262))
+- happy new year, 2026 licence ([#3272](https://github.com/bluealloy/revm/pull/3272))
+- *(revme)* use unwrap_or_default for non-UTF8 path safety ([#3259](https://github.com/bluealloy/revm/pull/3259))
+- sort storage keys and test files in blockchaintest output ([#3186](https://github.com/bluealloy/revm/pull/3186))
+- *(revme)* extract JSON printing helper in blockchaintest ([#3257](https://github.com/bluealloy/revm/pull/3257))
+- remove redundant clone calls ([#3258](https://github.com/bluealloy/revm/pull/3258))
+- re-export statetest-types from revm crate behind test-types feature ([#3247](https://github.com/bluealloy/revm/pull/3247))
+- *(fmt)* merge all imports ([#3184](https://github.com/bluealloy/revm/pull/3184))
+
+## [10.0.2](https://github.com/bluealloy/revm/compare/revme-v10.0.0...revme-v10.0.2) - 2025-11-14
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [10.0.0](https://github.com/bluealloy/revm/compare/revme-v9.0.2...revme-v10.0.0) - 2025-11-10
+
+### Other
+
+- updated the following local packages: revm, revm-statetest-types
+
 ## [9.0.2](https://github.com/bluealloy/revm/compare/revme-v9.0.1...revme-v9.0.2) - 2025-11-10
 
 ### Other

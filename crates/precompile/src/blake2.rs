@@ -1,35 +1,42 @@
 //! Blake2 precompile. More details in [`run`]
 
 use crate::{
-    crypto, Precompile, PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult,
+    crypto, eth_precompile_fn, EthPrecompileOutput, EthPrecompileResult, Precompile,
+    PrecompileHalt, PrecompileId,
 };
 
 const F_ROUND: u64 = 1;
 const INPUT_LENGTH: usize = 213;
 
+eth_precompile_fn!(blake2_precompile, run);
+
 /// Blake2 precompile
-pub const FUN: Precompile = Precompile::new(PrecompileId::Blake2F, crate::u64_to_address(9), run);
+pub const FUN: Precompile = Precompile::new(
+    PrecompileId::Blake2F,
+    crate::u64_to_address(9),
+    blake2_precompile,
+);
 
 /// reference: <https://eips.ethereum.org/EIPS/eip-152>
 /// input format:
 /// [4 bytes for rounds][64 bytes for h][128 bytes for m][8 bytes for t_0][8 bytes for t_1][1 byte for f]
-pub fn run(input: &[u8], gas_limit: u64) -> PrecompileResult {
+pub fn run(input: &[u8], gas_limit: u64) -> EthPrecompileResult {
     if input.len() != INPUT_LENGTH {
-        return Err(PrecompileError::Blake2WrongLength);
+        return Err(PrecompileHalt::Blake2WrongLength);
     }
 
     // Parse number of rounds (4 bytes)
     let rounds = u32::from_be_bytes(input[..4].try_into().unwrap());
     let gas_used = rounds as u64 * F_ROUND;
     if gas_used > gas_limit {
-        return Err(PrecompileError::OutOfGas);
+        return Err(PrecompileHalt::OutOfGas);
     }
 
     // Parse final block flag
     let f = match input[212] {
         0 => false,
         1 => true,
-        _ => return Err(PrecompileError::Blake2WrongFinalIndicatorFlag),
+        _ => return Err(PrecompileHalt::Blake2WrongFinalIndicatorFlag),
     };
 
     // Parse state vector h (8 × u64)
@@ -54,14 +61,14 @@ pub fn run(input: &[u8], gas_limit: u64) -> PrecompileResult {
     let t_0 = u64::from_le_bytes(input[196..204].try_into().unwrap());
     let t_1 = u64::from_le_bytes(input[204..212].try_into().unwrap());
 
-    crypto().blake2_compress(rounds, &mut h, m, [t_0, t_1], f);
+    crypto().blake2_compress(rounds, &mut h, &m, &[t_0, t_1], f);
 
     let mut out = [0u8; 64];
     for (i, h) in (0..64).step_by(8).zip(h.iter()) {
         out[i..i + 8].copy_from_slice(&h.to_le_bytes());
     }
 
-    Ok(PrecompileOutput::new(gas_used, out.into()))
+    Ok(EthPrecompileOutput::new(gas_used, out.into()))
 }
 
 /// Blake2 algorithm
@@ -124,7 +131,7 @@ pub mod algo {
     /// returns a new state vector.  The number of rounds, "r", is 12 for
     /// BLAKE2b and 10 for BLAKE2s.  Rounds are numbered from 0 to r - 1.
     #[allow(clippy::many_single_char_names)]
-    pub fn compress(rounds: usize, h: &mut [u64; 8], m: [u64; 16], t: [u64; 2], f: bool) {
+    pub fn compress(rounds: usize, h: &mut [u64; 8], m: &[u64; 16], t: &[u64; 2], f: bool) {
         #[cfg(all(target_feature = "avx2", feature = "std"))]
         {
             // only if it is compiled with avx2 flag and it is std, we can use avx2.
@@ -133,7 +140,7 @@ pub mod algo {
                 unsafe {
                     super::avx2::compress_block(
                         rounds,
-                        &m,
+                        m,
                         h,
                         ((t[1] as u128) << 64) | (t[0] as u128),
                         if f { !0 } else { 0 },
@@ -157,7 +164,7 @@ pub mod algo {
             v[14] = !v[14] // Invert all bits if the last-block-flag is set.
         }
         for i in 0..rounds {
-            round(&mut v, &m, i);
+            round(&mut v, m, i);
         }
 
         for i in 0..8 {

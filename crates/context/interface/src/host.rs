@@ -1,11 +1,12 @@
 //! Host interface for external blockchain state access.
 
 use crate::{
+    cfg::GasParams,
     context::{SStoreResult, SelfDestructResult, StateLoad},
     journaled_state::{AccountInfoLoad, AccountLoad},
 };
 use auto_impl::auto_impl;
-use primitives::{Address, Bytes, Log, StorageKey, StorageValue, B256, U256};
+use primitives::{hardfork::SpecId, Address, Bytes, Log, StorageKey, StorageValue, B256, U256};
 use state::Bytecode;
 
 /// Error that can happen when loading account info.
@@ -43,6 +44,8 @@ pub trait Host {
     fn timestamp(&self) -> U256;
     /// Block beneficiary, calls ContextTr::block().beneficiary()
     fn beneficiary(&self) -> Address;
+    /// Block slot number, calls ContextTr::block().slot_num()
+    fn slot_num(&self) -> U256;
     /// Chain id, calls ContextTr::cfg().chain_id()
     fn chain_id(&self) -> U256;
 
@@ -60,6 +63,12 @@ pub trait Host {
     /// Max initcode size, calls `ContextTr::cfg().max_code_size().saturating_mul(2)`
     fn max_initcode_size(&self) -> usize;
 
+    /// Gas params contains the dynamic gas constants for the EVM.
+    fn gas_params(&self) -> &GasParams;
+
+    /// Returns whether state gas (EIP-8037) is enabled.
+    fn is_amsterdam_eip8037_enabled(&self) -> bool;
+
     /* Database */
 
     /// Block hash, calls `ContextTr::journal_mut().db().block_hash(number)`
@@ -72,7 +81,8 @@ pub trait Host {
         &mut self,
         address: Address,
         target: Address,
-    ) -> Option<StateLoad<SelfDestructResult>>;
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SelfDestructResult>, LoadError>;
 
     /// Log, calls `ContextTr::journal_mut().log(log)`
     fn log(&mut self, log: Log);
@@ -154,8 +164,7 @@ pub trait Host {
         );
 
         // load delegate code if account is EIP-7702
-        if let Some(Bytecode::Eip7702(code)) = &account.code {
-            let address = code.address();
+        if let Some(address) = account.code.as_ref().and_then(Bytecode::eip7702_address) {
             let delegate_account = self
                 .load_account_info_skip_cold_load(address, true, false)
                 .ok()?;
@@ -199,8 +208,19 @@ pub trait Host {
 }
 
 /// Dummy host that implements [`Host`] trait and  returns all default values.
-#[derive(Debug)]
-pub struct DummyHost;
+#[derive(Default, Debug)]
+pub struct DummyHost {
+    gas_params: GasParams,
+}
+
+impl DummyHost {
+    /// Create a new dummy host with the given spec.
+    pub fn new(spec: SpecId) -> Self {
+        Self {
+            gas_params: GasParams::new_spec(spec),
+        }
+    }
+}
 
 impl Host for DummyHost {
     fn basefee(&self) -> U256 {
@@ -213,6 +233,14 @@ impl Host for DummyHost {
 
     fn gas_limit(&self) -> U256 {
         U256::ZERO
+    }
+
+    fn gas_params(&self) -> &GasParams {
+        &self.gas_params
+    }
+
+    fn is_amsterdam_eip8037_enabled(&self) -> bool {
+        false
     }
 
     fn difficulty(&self) -> U256 {
@@ -233,6 +261,10 @@ impl Host for DummyHost {
 
     fn beneficiary(&self) -> Address {
         Address::ZERO
+    }
+
+    fn slot_num(&self) -> U256 {
+        U256::ZERO
     }
 
     fn chain_id(&self) -> U256 {
@@ -263,8 +295,9 @@ impl Host for DummyHost {
         &mut self,
         _address: Address,
         _target: Address,
-    ) -> Option<StateLoad<SelfDestructResult>> {
-        None
+        _skip_cold_load: bool,
+    ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
+        Ok(Default::default())
     }
 
     fn log(&mut self, _log: Log) {}
@@ -281,7 +314,7 @@ impl Host for DummyHost {
         _load_code: bool,
         _skip_cold_load: bool,
     ) -> Result<AccountInfoLoad<'_>, LoadError> {
-        Err(LoadError::DBError)
+        Ok(Default::default())
     }
 
     fn sstore_skip_cold_load(
@@ -291,7 +324,7 @@ impl Host for DummyHost {
         _value: StorageValue,
         _skip_cold_load: bool,
     ) -> Result<StateLoad<SStoreResult>, LoadError> {
-        Err(LoadError::DBError)
+        Ok(Default::default())
     }
 
     fn sload_skip_cold_load(
@@ -300,6 +333,6 @@ impl Host for DummyHost {
         _key: StorageKey,
         _skip_cold_load: bool,
     ) -> Result<StateLoad<StorageValue>, LoadError> {
-        Err(LoadError::DBError)
+        Ok(Default::default())
     }
 }

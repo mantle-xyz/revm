@@ -2,7 +2,7 @@
 
 use crate::{Database, DatabaseCommit, DatabaseRef};
 use either::Either;
-use primitives::{Address, HashMap, StorageKey, StorageValue, B256};
+use primitives::{Address, AddressMap, StorageKey, StorageValue, B256};
 use state::{Account, AccountInfo, Bytecode};
 
 impl<L, R> Database for Either<L, R>
@@ -43,6 +43,18 @@ where
             Self::Right(db) => db.block_hash(number),
         }
     }
+
+    fn storage_by_account_id(
+        &mut self,
+        address: Address,
+        account_id: usize,
+        storage_key: StorageKey,
+    ) -> Result<StorageValue, Self::Error> {
+        match self {
+            Self::Left(db) => db.storage_by_account_id(address, account_id, storage_key),
+            Self::Right(db) => db.storage_by_account_id(address, account_id, storage_key),
+        }
+    }
 }
 
 impl<L, R> DatabaseCommit for Either<L, R>
@@ -50,7 +62,7 @@ where
     L: DatabaseCommit,
     R: DatabaseCommit,
 {
-    fn commit(&mut self, changes: HashMap<Address, Account>) {
+    fn commit(&mut self, changes: AddressMap<Account>) {
         match self {
             Self::Left(db) => db.commit(changes),
             Self::Right(db) => db.commit(changes),
@@ -94,6 +106,18 @@ where
         match self {
             Self::Left(db) => db.block_hash_ref(number),
             Self::Right(db) => db.block_hash_ref(number),
+        }
+    }
+
+    fn storage_by_account_id_ref(
+        &self,
+        address: Address,
+        account_id: usize,
+        storage_key: StorageKey,
+    ) -> Result<StorageValue, Self::Error> {
+        match self {
+            Self::Left(db) => db.storage_by_account_id_ref(address, account_id, storage_key),
+            Self::Right(db) => db.storage_by_account_id_ref(address, account_id, storage_key),
         }
     }
 }

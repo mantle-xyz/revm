@@ -1,6 +1,8 @@
 use crate::{CallInput, InstructionResult, InterpreterAction};
-use core::cell::Ref;
-use core::ops::{Deref, Range};
+use core::{
+    cell::Ref,
+    ops::{Deref, Range},
+};
 use primitives::{hardfork::SpecId, Address, Bytes, B256, U256};
 
 /// Helper function to read immediates data from the bytecode
@@ -225,6 +227,7 @@ pub trait StackTr {
     /// Exchanges two values on the stack.
     ///
     /// Indexes are based from the top of the stack.
+    /// `n` is the first index, and the second index is calculated as `n + m`.
     ///
     /// Returns `true` if swap was successful, `false` if stack underflow.
     #[must_use]

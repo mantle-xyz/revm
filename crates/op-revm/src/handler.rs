@@ -10,10 +10,14 @@ use crate::{
     BvmEth, L1BlockInfo, OpHaltReason, OpSpecId,
 };
 use revm::{
-    context::{journaled_state::JournalCheckpoint, result::InvalidTransaction, LocalContextTr},
+    context::{
+        journaled_state::{account::JournaledAccountTr, JournalCheckpoint},
+        result::InvalidTransaction,
+        LocalContextTr,
+    },
     context_interface::{
-        context::ContextError,
-        result::{EVMError, ExecutionResult, FromStringError},
+        context::take_error,
+        result::{EVMError, ExecutionResult, FromStringError, ResultGas},
         Block, Cfg, ContextTr, JournalTr, Transaction,
     },
     handler::{
@@ -158,9 +162,9 @@ where
             if !cfg.spec().is_enabled_in(OpSpecId::ARSIA) {
                 // if the tx is not a deposit transaction and ARSIA is not enabled, we need to multiply the initial gas by the token ratio
                 // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to low 64 bits.
-                let token_ratio = chain.token_ratio.as_limbs()[0];
-                initial_gas.initial_gas = initial_gas
-                    .initial_gas
+                let token_ratio = chain.token_ratio.as_limbs()[0].max(1);
+                initial_gas.initial_total_gas = initial_gas
+                    .initial_total_gas
                     .checked_mul(token_ratio)
                     .ok_or(InvalidTransaction::CallerGasLimitMoreThanBlock)?;
 
@@ -177,6 +181,7 @@ where
     fn validate_against_state_and_deduct_caller(
         &self,
         evm: &mut Self::Evm,
+        _init_and_floor_gas: &mut InitialAndFloorGas,
     ) -> Result<(), Self::Error> {
         let ctx = evm.ctx();
         let is_deposit = ctx.tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
@@ -222,23 +227,50 @@ where
                 caller.bump_nonce();
             }
 
+            // Pre-call gates that op-geth applies inside innerExecute() and routes to the
+            // mint-only failed-deposit path (RevertToSnapshot + gasUsed=GasLimit). op-revm
+            // skips env validation for deposits ("pre-verified on L1"), so without these the
+            // condition leaks into the EVM frame and takes the wrong (success/keep-transfer)
+            // route, diverging from op-geth. See state_transition.go innerExecute().
+
+            // (#5) EIP-3860 init code size limit for CREATE deposits (state_transition.go L786).
+            if tx.kind().is_create()
+                && spec.into_eth_spec().is_enabled_in(SpecId::SHANGHAI)
+                && tx.input().len() > cfg.max_initcode_size()
+            {
+                return Err(InvalidTransaction::CreateInitCodeSizeLimit.into());
+            }
+            // (#4) Native (MNT) value transfer must be affordable (CanTransfer, L781), checked
+            // against the post-mint balance, mirroring op-geth (mint is applied pre-snapshot).
+            if !cfg.is_balance_check_disabled() && *caller.balance() < tx.value() {
+                return Err(InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(tx.value()),
+                    balance: Box::new(*caller.balance()),
+                }
+                .into());
+            }
+
             return Ok(());
         }
+
+        // NOTE: L1BlockInfo refresh is handled by validate_initial_tx_gas (which runs
+        // before this function). That function calls try_fetch when l2_block is stale and
+        // reset_l2_block when the tx targets GAS_ORACLE_CONTRACT. Do NOT re-fetch here
+        // via journal.db_mut() — it bypasses the journal and reads stale storage, missing
+        // intra-block setTokenRatio updates that are only visible through journal.sload().
 
         let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
 
         // validates account nonce and code
-        validate_account_nonce_and_code_with_components(&caller_account.info, tx, cfg)?;
+        validate_account_nonce_and_code_with_components(&caller_account.account().info, tx, cfg)?;
 
         // check additional cost and deduct it from the caller's balances
-        let mut balance = caller_account.info.balance;
+        let mut balance = caller_account.account().info.balance;
 
-        // if ARSIA is enabled, we need to calculate the additional cost and deduct it from the caller's balances
+        // [MANTLE] - if ARSIA is enabled, we need to calculate the additional cost and deduct it from the caller's balances
         if !cfg.is_fee_charge_disabled() && cfg.spec().is_enabled_in(OpSpecId::ARSIA) {
             let Some(additional_cost) = chain.tx_cost_with_tx(tx, spec) else {
-                return Err(ERROR::from_string(
-                    "[OPTIMISM] Failed to load enveloped transaction.".into(),
-                ));
+                return Err(OpTransactionError::MissingEnvelopedTx.into());
             };
             let Some(new_balance) = balance.checked_sub(additional_cost) else {
                 return Err(InvalidTransaction::LackOfFundForMaxFee {
@@ -276,6 +308,8 @@ where
         let gas = frame_result.gas_mut();
         let remaining = gas.remaining();
         let refunded = gas.refunded();
+        let reservoir = gas.reservoir();
+        let state_gas_spent = gas.state_gas_spent();
 
         // Spend the gas limit. Gas is reimbursed when the tx returns successfully.
         *gas = Gas::new_spent(tx_gas_limit);
@@ -295,17 +329,13 @@ where
             //     enabled.
             //   - Regular transactions report their gas used as normal.
             if !is_deposit || is_regolith {
-                // For regular transactions prior to Regolith and all transactions after
-                // Regolith, gas is reported as normal.
+                // Return unused regular gas and unused reservoir gas.
                 gas.erase_cost(remaining);
                 gas.record_refund(refunded);
-            } else if is_deposit {
-                let tx = ctx.tx();
-                if tx.is_system_transaction() {
-                    // System transactions were a special type of deposit transaction in
-                    // the Bedrock hardfork that did not incur any gas costs.
-                    gas.erase_cost(tx_gas_limit);
-                }
+            } else if is_deposit && tx.is_system_transaction() {
+                // System transactions were a special type of deposit transaction in
+                // the Bedrock hardfork that did not incur any gas costs.
+                gas.erase_cost(tx_gas_limit);
             }
         } else if instruction_result.is_revert() {
             // On Optimism, deposit transactions report gas usage uniquely to other
@@ -321,9 +351,15 @@ where
             //     gas used on failure. Refunds on remaining gas enabled.
             //   - Regular transactions receive a refund on remaining gas as normal.
             if !is_deposit || is_regolith {
+                // Return unused regular gas.
                 gas.erase_cost(remaining);
             }
         }
+
+        // Restore state_gas_spent on all paths (lost by Gas::new_spent overwrite).
+        gas.set_state_gas_spent(state_gas_spent);
+        gas.set_reservoir(reservoir);
+
         Ok(())
     }
 
@@ -359,7 +395,7 @@ where
         }
 
         let is_deposit = tx.tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let mut gas_limit = tx.gas_limit() - init_and_floor_gas.initial_gas;
+        let mut gas_limit = tx.gas_limit() - init_and_floor_gas.initial_total_gas;
 
         // l1cost = l1cost / effective_gas_price
         // gas_limit = gas_limit - l1cost
@@ -382,7 +418,7 @@ where
             if tx_l1_cost.gt(&U256::from(gas_limit)) {
                 return Err(ERROR::from(OpTransactionError::Base(
                     InvalidTransaction::CallGasCostMoreThanGasLimit {
-                        initial_gas: init_and_floor_gas.initial_gas,
+                        initial_gas: init_and_floor_gas.initial_total_gas,
                         gas_limit,
                     },
                 )));
@@ -402,7 +438,7 @@ where
         }
 
         // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let first_frame_input = self.first_frame_input(evm, gas_limit, 0)?;
 
         // Run execution loop
         let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
@@ -432,7 +468,7 @@ where
 
         let limit = gas.limit();
         // Keep behavior aligned with op-geth: Uint256 token ratio is truncated to low 64 bits.
-        let token_ratio_u64 = chain.token_ratio.as_limbs()[0];
+        let token_ratio_u64 = chain.token_ratio.as_limbs()[0].max(1);
 
         let is_arsia = cfg.spec().is_enabled_in(OpSpecId::ARSIA);
 
@@ -449,7 +485,10 @@ where
 
             if !is_arsia {
                 // scale refund and remaining by token_ratio, restore limit
-                gas.set_refund(scale_refund_with_token_ratio(gas.refunded(), token_ratio_u64));
+                gas.set_refund(scale_refund_with_token_ratio(
+                    gas.refunded(),
+                    token_ratio_u64,
+                ));
                 gas.set_remaining(gas.remaining().saturating_mul(token_ratio_u64));
                 gas.set_limit(limit);
             }
@@ -477,26 +516,30 @@ where
 
         // If the transaction is not a deposit transaction, fees are paid out
         // to both the Base Fee Vault as well as the L1 Fee Vault.
-        let ctx = evm.ctx();
-        let enveloped = ctx.tx().enveloped_tx().cloned();
-        let spec = ctx.cfg().spec();
-        let l1_block_info = ctx.chain_mut();
+        // Use all_mut() to simultaneously borrow tx (immutable) and chain (mutable),
+        // avoiding an unnecessary clone of the enveloped transaction bytes.
+        let (_, tx, cfg, journal, l1_block_info, _) = evm.ctx().all_mut();
+        let spec = cfg.spec();
 
-        let Some(enveloped_tx) = &enveloped else {
-            return Err(ERROR::from_string(
-                "[OPTIMISM] Failed to load enveloped transaction.".into(),
-            ));
+        let Some(enveloped_tx) = tx.enveloped_tx() else {
+            return Err(OpTransactionError::MissingEnvelopedTx.into());
         };
 
         let l1_cost = l1_block_info.calculate_tx_l1_cost(enveloped_tx, spec);
+        // Exclude reservoir gas (EIP-8037) from used gas — reservoir is unused and reimbursed.
+        let effective_used = frame_result
+            .gas()
+            .used()
+            .saturating_sub(frame_result.gas().reservoir());
+        // [MANTLE] - operator_fee_cost enable after arsia
         let operator_fee_cost = if spec.is_enabled_in(OpSpecId::ARSIA) {
-            l1_block_info.operator_fee_charge(enveloped_tx, U256::from(frame_result.gas().used()))
+            l1_block_info.operator_fee_charge(enveloped_tx, U256::from(effective_used))
         } else {
             U256::ZERO
         };
-        let base_fee_amount = U256::from(basefee.saturating_mul(frame_result.gas().used() as u128));
+        let base_fee_amount = U256::from(basefee.saturating_mul(effective_used as u128));
 
-        // Send fees to their respective recipients
+        // [MANTLE] - Send fees to their respective recipients
         let mut recipients = vec![(BASE_FEE_RECIPIENT, base_fee_amount)];
         if spec.is_enabled_in(OpSpecId::ARSIA) {
             recipients.extend([
@@ -505,7 +548,7 @@ where
             ]);
         }
         for (recipient, amount) in recipients {
-            ctx.journal_mut().balance_incr(recipient, amount)?;
+            journal.balance_incr(recipient, amount)?;
         }
 
         Ok(())
@@ -515,87 +558,60 @@ where
         &mut self,
         evm: &mut Self::Evm,
         frame_result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        match core::mem::replace(evm.ctx().error(), Ok(())) {
-            Err(ContextError::Db(e)) => return Err(e.into()),
-            Err(ContextError::Custom(e)) => return Err(Self::Error::from_string(e)),
-            Ok(_) => (),
-        }
+        take_error::<Self::Error, _>(evm.ctx().error())?;
 
-        let exec_result =
-            post_execution::output(evm.ctx(), frame_result).map_haltreason(OpHaltReason::Base);
+        let exec_result = post_execution::output(evm.ctx(), frame_result, result_gas)
+            .map_haltreason(OpHaltReason::Base);
 
+        // [MANTLE] - failed deposit that ENTERED EVM execution (op-geth's "Case B").
+        //
+        // A deposit whose EVM frame fails by REVERT or HALT (out-of-gas / exceptional)
+        // is, in op-geth, a "vm error" stored in `result.Err` with the Go `err == nil`
+        // ("vm errors do not effect consensus and are therefore not assigned to err"), so
+        // op-geth does NOT rewind: the BVM_ETH mint + transfer applied before the EVM call
+        // (mintBVMETH before the revert snapshot, transferBVMETH at the top of innerExecute)
+        // — and their Mint/Transfer logs — survive into the receipt, with the ACTUAL gas
+        // used (a revert refunds, a halt consumes all). op-geth treats REVERT and OOG
+        // identically here, so both surface as a status-0 failed deposit.
+        //
+        // On revm those mint/transfer state changes and logs are emitted in
+        // `validate_against_state_and_deduct_caller` BEFORE the top-level frame checkpoint,
+        // so the frame's revert/halt (which truncates the journal entries + logs back to
+        // that checkpoint) leaves them intact, and `post_execution::output` already
+        // collected the surviving logs into `exec_result` via `take_logs()`. We therefore
+        // only (1) keep the surviving logs + actual gas and (2) re-label the result as a
+        // `FailedDeposit` halt — the consistent receipt shape op-geth produces for both
+        // failure modes. No checkpoint_revert and no re-mint: the surviving state is already
+        // correct (including the CREATE transfer recipient `create(caller, pre-bump nonce)`
+        // and the caller nonce bump), so rebuilding it would only risk divergence.
+        //
+        // Deposits that fail BEFORE reaching execution (insufficient BVM_ETH transfer
+        // balance, intrinsic/gas/validation) are op-geth's "Case A" (`innerExecute` returns
+        // a Go error -> RevertToSnapshot), handled in `catch_error` (mint only).
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let is_regolith = evm.ctx().cfg().spec().is_enabled_in(OpSpecId::REGOLITH);
-
-        // A deposit that REACHED EVM execution and then failed — by REVERT *or*
-        // HALT (out-of-gas / exceptional) — still persists its BVM_ETH mint and
-        // (successful) transfer per the OP deposit spec. op-geth applies the mint
-        // before its post-mint snapshot and the transfer at the top of
-        // `innerExecute` (before the EVM call), then stores the EVM call's vm error
-        // into `result.Err` with the Go `err == nil` ("vm errors do not effect
-        // consensus and are therefore not assigned to err") — so it does NOT take
-        // the rewind path for a revert OR an out-of-gas, and mint + transfer (and
-        // their `Mint`/`Transfer` logs) survive into the receipt for BOTH modes.
-        // revm's frame revert discards those logs (and pre-frame state) and the
-        // Revert/Halt variants carry no logs, so without this the receipts root (and
-        // state root) diverge from op-geth (node fork). Re-apply them and report a
-        // FailedDeposit. A revert refunds gas while a halt consumes it all; either
-        // way the gas already in `exec_result` is the actual gas used, so keep it.
-        //
-        // Deposits that fail BEFORE reaching execution (insufficient BVM_ETH
-        // transfer balance, intrinsic/gas/validation) return an error from the
-        // validation stages and are handled in `catch_error` (mint only).
-        if is_deposit
+        let exec_result = if is_deposit
             && is_regolith
             && matches!(
                 exec_result,
                 ExecutionResult::Revert { .. } | ExecutionResult::Halt { .. }
-            )
-        {
-            let gas_used = exec_result.gas_used();
-            let caller = evm.ctx().tx().caller();
-            let mint = evm.ctx().tx().mint();
-
-            // Wipe the failed tx's partial state, then rebuild exactly what op-geth
-            // keeps for a vm-error deposit.
-            evm.ctx()
-                .journal_mut()
-                .checkpoint_revert(JournalCheckpoint::default());
-
-            // Re-apply the BVM_ETH mint and transfer FIRST, while the caller nonce is
-            // still its pre-bump value: op-geth runs `transferBVMETH` before the EVM
-            // call increments the nonce, so for a CREATE deposit the transfer
-            // recipient is `create(caller, pre-bump nonce)`. Bumping the nonce before
-            // the transfer would derive a different created address than the actual
-            // execution / op-geth and fork on receipts_root / state_root.
-            BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from)?;
-            if let Some(eth_tx_value) = evm.ctx().tx().eth_tx_value() {
-                let _ = BvmEth::transfer(evm.ctx(), U256::from(eth_tx_value));
-            }
-            // Capture the Mint/Transfer logs before commit_tx clears the journal.
-            let logs = evm.ctx().journal_mut().take_logs();
-
-            // Then bump the nonce and credit the native (MNT) mint — deposits always
-            // persist these even on failure.
-            evm.ctx()
-                .journal_mut()
-                .load_account_mut(caller)
-                .map(|mut acc| {
-                    acc.bump_nonce();
-                    acc.incr_balance(U256::from(mint.unwrap_or_default()));
-                })?;
-            evm.ctx().journal_mut().commit_tx();
-            evm.ctx().chain_mut().clear_tx_l1_cost();
-            evm.ctx().local_mut().clear();
-            evm.frame_stack().clear();
-            return Ok(ExecutionResult::Halt {
+            ) {
+            // Carry the full ResultGas unchanged (floor/state-gas aware) — collapsing it to
+            // total_gas_spent only would diverge on EIP-7623 / refunded-gas deposits.
+            let gas = *exec_result.gas();
+            let logs = exec_result.into_logs();
+            ExecutionResult::Halt {
                 reason: OpHaltReason::FailedDeposit,
-                gas_used,
+                gas,
                 logs,
-            });
-        }
+            }
+        } else {
+            exec_result
+        };
 
+        // Single cleanup for both the failed-deposit re-label and the normal path.
         evm.ctx().journal_mut().commit_tx();
         evm.ctx().chain_mut().clear_tx_l1_cost();
         evm.ctx().local_mut().clear();
@@ -610,7 +626,10 @@ where
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         let is_deposit = evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
-        let output = if error.is_tx_error() && is_deposit {
+        let is_tx_error = error.is_tx_error();
+
+        // Deposit transaction can't fail so we manually handle it here.
+        let output = if is_tx_error && is_deposit {
             let ctx = evm.ctx();
             let spec = ctx.cfg().spec();
             let tx = ctx.tx();
@@ -625,6 +644,7 @@ where
                 .journal_mut()
                 .checkpoint_revert(JournalCheckpoint::default());
 
+            // [MANTLE] - BVM_ETH
             // If the transaction is a deposit transaction and it failed
             // for any reason, the caller nonce must be bumped, and the
             // gas reported must be altered depending on the Hardfork. This is
@@ -654,21 +674,19 @@ where
                     // discard_tx() cannot revert them.
                     evm.ctx().journal_mut().commit_tx();
 
-                    // Mint BVM_ETH tokens for the failed deposit.
+                    // Mint BVM_ETH tokens for the failed deposit (no transfer).
+                    //
+                    // This is op-geth's Case A (innerExecute returns a Go error, e.g. the
+                    // BVM_ETH transfer's ErrEthTxValueTooLarge, or intrinsic/validation):
+                    // execute() RevertToSnapshot(snap) undoes the transfer but the snapshot
+                    // is taken AFTER mintBVMETH, so only the Mint (and its log) persists.
                     match BvmEth::process_eth_deposit(evm.ctx(), true).map_err(ERROR::from) {
                         Ok(()) => {
-                            // HALT path (out-of-gas / exceptional): op-geth keeps only the
-                            // BVM_ETH mint, NOT the transfer. The eth_tx_value transfer is
-                            // part of the gas-metered execution that the halt rolls back, so
-                            // it does not persist (confirmed on-chain: Sepolia block 286432,
-                            // mainnet 96442768 — both halted failed deposits carry exactly one
-                            // Mint log). The transfer only survives on the REVERT path, which
-                            // is handled in `execution_result`. So mint only here.
-
                             // Capture the BVM_ETH Mint log BEFORE commit_tx clears the journal
-                            // logs. op-geth emits the mint before its revert snapshot, so a
-                            // failed deposit still persists it into the receipt; it must
-                            // survive the halt to match op-geth's receipts root.
+                            // logs (see JournalInner::commit_tx). op-geth emits the mint before
+                            // its revert snapshot, so a failed deposit still persists the Mint
+                            // log into the receipt; it must survive here to match op-geth's
+                            // receipts root. Mint only (no transfer) on this path.
                             let logs = evm.ctx().journal_mut().take_logs();
                             evm.ctx().journal_mut().commit_tx();
 
@@ -684,7 +702,7 @@ where
                                 };
                             Ok(ExecutionResult::Halt {
                                 reason: OpHaltReason::FailedDeposit,
-                                gas_used,
+                                gas: ResultGas::default().with_total_gas_spent(gas_used),
                                 logs,
                             })
                         }
@@ -737,7 +755,7 @@ mod tests {
     };
     use alloy_primitives::uint;
     use revm::{
-        context::{BlockEnv, Context, TxEnv},
+        context::{BlockEnv, CfgEnv, Context, TxEnv},
         context_interface::result::InvalidTransaction,
         database::InMemoryDB,
         database_interface::EmptyDB,
@@ -817,6 +835,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_chain(
         spec: OpSpecId,
         l2_block: U256,
@@ -847,6 +866,7 @@ mod tests {
         chain
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn l1_cost_for(
         spec: OpSpecId,
         input: &[u8],
@@ -870,7 +890,12 @@ mod tests {
         info.calculate_tx_l1_cost(input, spec)
     }
 
-    fn regular_tx(caller: Address, to: Address, gas_limit: u64, input: &[u8]) -> OpTransaction<TxEnv> {
+    fn regular_tx(
+        caller: Address,
+        to: Address,
+        gas_limit: u64,
+        input: &[u8],
+    ) -> OpTransaction<TxEnv> {
         OpTransaction::builder()
             .base(
                 TxEnv::builder()
@@ -891,11 +916,11 @@ mod tests {
                     .base(TxEnv::builder().gas_limit(100))
                     .build_fill(),
             )
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::BEDROCK);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::BEDROCK));
 
         let gas = call_last_frame_return(ctx, InstructionResult::Revert, Gas::new(90));
-        assert_eq!(gas.remaining(), 0);
-        assert_eq!(gas.spent(), 100);
+        assert_eq!(gas.remaining(), 90);
+        assert_eq!(gas.total_gas_spent(), 10);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -910,7 +935,7 @@ mod tests {
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
         let gas = call_last_frame_return(ctx, InstructionResult::Revert, Gas::new(90));
         assert_eq!(gas.remaining(), 90);
-        assert_eq!(gas.spent(), 10);
+        assert_eq!(gas.total_gas_spent(), 10);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -922,11 +947,11 @@ mod tests {
                     .base(TxEnv::builder().gas_limit(100))
                     .build_fill(),
             )
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA));
 
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(90));
         assert_eq!(gas.remaining(), 90);
-        assert_eq!(gas.spent(), 10);
+        assert_eq!(gas.total_gas_spent(), 10);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -946,19 +971,19 @@ mod tests {
                 token_ratio: U256::from(1),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut ret_gas = Gas::new(90);
         ret_gas.record_refund(20);
 
         let gas = call_last_frame_return(ctx.clone(), InstructionResult::Stop, ret_gas);
         assert_eq!(gas.remaining(), 90);
-        assert_eq!(gas.spent(), 10);
+        assert_eq!(gas.total_gas_spent(), 10);
         assert_eq!(gas.refunded(), 2); // min(20, 10/5)
 
         let gas = call_last_frame_return(ctx, InstructionResult::Revert, ret_gas);
         assert_eq!(gas.remaining(), 90);
-        assert_eq!(gas.spent(), 10);
+        assert_eq!(gas.total_gas_spent(), 10);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -997,7 +1022,7 @@ mod tests {
         let mut evm_truncated = mk_ctx(truncated_ratio).build_op();
         let truncated_gas = handler.validate_initial_tx_gas(&mut evm_truncated).unwrap();
 
-        assert_eq!(huge_gas.initial_gas, truncated_gas.initial_gas);
+        assert_eq!(huge_gas.initial_total_gas, truncated_gas.initial_total_gas);
         assert_eq!(huge_gas.floor_gas, truncated_gas.floor_gas);
     }
 
@@ -1032,7 +1057,7 @@ mod tests {
 
         assert_eq!(gas_huge.remaining(), gas_truncated.remaining());
         assert_eq!(gas_huge.refunded(), gas_truncated.refunded());
-        assert_eq!(gas_huge.spent(), gas_truncated.spent());
+        assert_eq!(gas_huge.total_gas_spent(), gas_truncated.total_gas_spent());
     }
 
     #[test]
@@ -1106,10 +1131,10 @@ mod tests {
                     .source_hash(B256::from([1u8; 32]))
                     .build_fill(),
             )
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::BEDROCK);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::BEDROCK));
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(90));
         assert_eq!(gas.remaining(), 0);
-        assert_eq!(gas.spent(), 100);
+        assert_eq!(gas.total_gas_spent(), 100);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -1123,10 +1148,10 @@ mod tests {
                     .is_system_transaction()
                     .build_fill(),
             )
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::BEDROCK);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::BEDROCK));
         let gas = call_last_frame_return(ctx, InstructionResult::Stop, Gas::new(90));
         assert_eq!(gas.remaining(), 100);
-        assert_eq!(gas.spent(), 0);
+        assert_eq!(gas.total_gas_spent(), 0);
         assert_eq!(gas.refunded(), 0);
     }
 
@@ -1150,7 +1175,7 @@ mod tests {
                 l1_base_fee_scalar: U256::from(1_000),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
         ctx.modify_tx(|tx| {
             tx.deposit.source_hash = B256::from([1u8; 32]);
             tx.deposit.mint = Some(10);
@@ -1161,7 +1186,7 @@ mod tests {
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         // Check the account balance is updated.
@@ -1209,7 +1234,7 @@ mod tests {
                 token_ratio: U256::from(1),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA))
             .with_tx(
                 OpTransaction::builder()
                     .base(TxEnv::builder().gas_limit(100))
@@ -1224,7 +1249,7 @@ mod tests {
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         // Check the account balance is updated.
@@ -1262,7 +1287,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ISTHMUS));
 
         let mut evm = ctx.build_op();
 
@@ -1273,7 +1298,7 @@ mod tests {
         // Call validate_initial_tx_gas first to load L1BlockInfo
         handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert_eq!(
@@ -1346,7 +1371,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA))
             // set the operator fee to a low value
             .with_tx(
                 OpTransaction::builder()
@@ -1364,7 +1389,7 @@ mod tests {
         // Call validate_initial_tx_gas first to load L1BlockInfo
         handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert_eq!(
@@ -1425,7 +1450,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut evm = ctx.build_op();
         assert_ne!(evm.ctx().chain().l2_block, Some(BLOCK_NUM));
@@ -1435,7 +1460,7 @@ mod tests {
         // Call validate_initial_tx_gas first to load L1BlockInfo
         handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert_eq!(
@@ -1495,7 +1520,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ECOTONE);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ECOTONE));
 
         let mut evm = ctx.build_op();
         assert_ne!(evm.ctx().chain().l2_block, Some(BLOCK_NUM));
@@ -1505,7 +1530,7 @@ mod tests {
         // Call validate_initial_tx_gas first to load L1BlockInfo
         handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert_eq!(
@@ -1551,7 +1576,7 @@ mod tests {
                 number: BLOCK_NUM,
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ISTHMUS));
 
         let mut evm = ctx.build_op();
 
@@ -1562,7 +1587,7 @@ mod tests {
         // Call validate_initial_tx_gas first to load L1BlockInfo
         handler.validate_initial_tx_gas(&mut evm).unwrap();
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert_eq!(
@@ -1619,7 +1644,7 @@ mod tests {
                 token_ratio: U256::from(1),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA))
             .with_tx(
                 OpTransaction::builder()
                     .base(TxEnv::builder().gas_limit(100))
@@ -1635,7 +1660,7 @@ mod tests {
 
         // l1block cost is 1600 fee.
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         // Check the account balance is updated.
@@ -1662,7 +1687,7 @@ mod tests {
                 l2_block: Some(U256::from(0)),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ISTHMUS))
             .with_tx(
                 OpTransaction::builder()
                     .base(TxEnv::builder().gas_limit(10))
@@ -1677,7 +1702,7 @@ mod tests {
         // Under Isthmus the operator fee cost is operator_fee_scalar * gas_limit / 1e6 + operator_fee_constant
         // 10_000_000 * 10 / 1_000_000 + 50 = 150
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         // Check the account balance is updated.
@@ -1704,7 +1729,7 @@ mod tests {
                 l2_block: Some(U256::from(0)),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA))
             .with_tx(
                 OpTransaction::builder()
                     .base(TxEnv::builder().gas_limit(10))
@@ -1719,7 +1744,7 @@ mod tests {
         // Under Jovian the operator fee cost is operator_fee_scalar * gas_limit * 100 + operator_fee_constant
         // 2 * 10 * 100 + 50 = 2_050
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         let account = evm.ctx().journal_mut().load_account(caller).unwrap();
@@ -1766,7 +1791,7 @@ mod tests {
                 token_ratio: U256::from(1),
                 ..Default::default()
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA))
             .modify_tx_chained(|tx| {
                 tx.enveloped_tx = Some(bytes!("FACADE"));
             });
@@ -1778,7 +1803,7 @@ mod tests {
 
         // l1block cost is 1600 fee.
         assert_eq!(
-            handler.validate_against_state_and_deduct_caller(&mut evm),
+            handler.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default()),
             Err(EVMError::Transaction(
                 InvalidTransaction::LackOfFundForMaxFee {
                     fee: Box::new(U256::from(1600)),
@@ -1797,7 +1822,7 @@ mod tests {
                 tx.deposit.source_hash = B256::from([1u8; 32]);
                 tx.deposit.is_system_transaction = true;
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut evm = ctx.build_op();
         let handler =
@@ -1810,7 +1835,11 @@ mod tests {
             ))
         );
 
-        evm.ctx().modify_cfg(|cfg| cfg.spec = OpSpecId::BEDROCK);
+        // With BEDROCK spec.
+        let ctx = evm.into_context();
+        let mut evm = ctx
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::BEDROCK))
+            .build_op();
 
         // Pre-regolith system transactions should be allowed.
         assert!(handler.validate_env(&mut evm).is_ok());
@@ -1823,7 +1852,7 @@ mod tests {
             .modify_tx_chained(|tx| {
                 tx.deposit.source_hash = B256::from([1u8; 32]);
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut evm = ctx.build_op();
         let handler =
@@ -1839,7 +1868,7 @@ mod tests {
             .modify_tx_chained(|tx| {
                 tx.deposit.source_hash = B256::from([1u8; 32]);
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut evm = ctx.build_op();
         let handler =
@@ -1851,17 +1880,16 @@ mod tests {
 
     #[test]
     fn test_halted_deposit_tx_post_regolith() {
-        // A deposit that REACHED execution and then halted (here: OOG) is now
-        // included post-regolith as a `FailedDeposit` halt directly in
-        // `execution_result` (mirroring op-geth's `err == nil` vm-error path),
-        // rather than bubbling to the global error handler. No eth_value is set, so
-        // there are no BVM_ETH logs to surface.
+        // A deposit that REACHED execution and then halted (here: OOG) is now included
+        // post-regolith as a `FailedDeposit` halt directly in `execution_result`
+        // (mirroring op-geth's `err == nil` vm-error path), rather than bubbling to the
+        // global error handler. No eth_value is set, so there are no BVM_ETH logs.
         let ctx = Context::op()
             .modify_tx_chained(|tx| {
                 // Set up as deposit transaction by having a deposit with source_hash
                 tx.deposit.source_hash = B256::from([1u8; 32]);
             })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::REGOLITH));
 
         let mut evm = ctx.build_op();
         let mut handler =
@@ -1870,14 +1898,15 @@ mod tests {
         let result = handler
             .execution_result(
                 &mut evm,
-                FrameResult::Call(CallOutcome {
-                    result: InterpreterResult {
+                FrameResult::Call(CallOutcome::new(
+                    InterpreterResult {
                         result: InstructionResult::OutOfGas,
                         output: Default::default(),
                         gas: Default::default(),
                     },
-                    memory_offset: Default::default(),
-                }),
+                    Default::default(),
+                )),
+                ResultGas::default(),
             )
             .unwrap();
 
@@ -1908,7 +1937,7 @@ mod tests {
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
 
         handler
-            .validate_against_state_and_deduct_caller(&mut evm)
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
             .unwrap();
 
         assert!(evm
@@ -1949,7 +1978,7 @@ mod tests {
                     })
                     .build_fill(),
             )
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
+            .with_cfg(CfgEnv::new_with_spec(OpSpecId::ARSIA));
 
         let mut evm = ctx.build_op();
         let handler =
@@ -2013,7 +2042,8 @@ mod tests {
         let caller = Address::from_str("0x1000000000000000000000000000000000000001").unwrap();
         let recipient = Address::from_str("0x2000000000000000000000000000000000000002").unwrap();
         let regular_input = bytes!("faca01");
-        let deposit_caller = Address::from_str("0x9000000000000000000000000000000000000009").unwrap();
+        let deposit_caller =
+            Address::from_str("0x9000000000000000000000000000000000000009").unwrap();
 
         let mut db = InMemoryDB::default();
         update_fee_params_in_db(
@@ -2059,7 +2089,7 @@ mod tests {
             )
             .build_op();
         let initial_gas1 = handler.validate_initial_tx_gas(&mut evm1).unwrap();
-        assert_eq!(initial_gas1.initial_gas, 21000);
+        assert_eq!(initial_gas1.initial_total_gas, 21000);
 
         if spec.is_enabled_in(OpSpecId::ARSIA) {
             let l1_block_contract = evm1
@@ -2071,9 +2101,10 @@ mod tests {
             l1_block_contract
                 .storage
                 .insert(L1_BASE_FEE_SLOT, U256::from(NEW_L1_BASE_FEE));
-            l1_block_contract
-                .storage
-                .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(NEW_L1_BLOB_BASE_FEE));
+            l1_block_contract.storage.insert(
+                ECOTONE_L1_BLOB_BASE_FEE_SLOT,
+                U256::from(NEW_L1_BLOB_BASE_FEE),
+            );
             l1_block_contract.storage.insert(
                 ECOTONE_L1_FEE_SCALARS_SLOT,
                 ecotone_fee_scalars(
@@ -2117,7 +2148,10 @@ mod tests {
         assert_eq!(chain.token_ratio, U256::from(TOKEN_RATIO));
         assert_eq!(chain.l1_base_fee, U256::from(NEW_L1_BASE_FEE));
         if spec.is_enabled_in(OpSpecId::ARSIA) {
-            assert_eq!(chain.l1_blob_base_fee, Some(U256::from(NEW_L1_BLOB_BASE_FEE)));
+            assert_eq!(
+                chain.l1_blob_base_fee,
+                Some(U256::from(NEW_L1_BLOB_BASE_FEE))
+            );
             assert_eq!(
                 chain.l1_blob_base_fee_scalar,
                 Some(U256::from(NEW_L1_BLOB_BASE_FEE_SCALAR))
@@ -2233,7 +2267,7 @@ mod tests {
         assert_eq!(evm2.ctx().chain().token_ratio, U256::from(OLD_TOKEN_RATIO));
         assert_eq!(evm2.ctx().chain().l2_block, None);
         if !spec.is_enabled_in(OpSpecId::ARSIA) {
-            assert_eq!(initial_gas2.initial_gas % OLD_TOKEN_RATIO, 0);
+            assert_eq!(initial_gas2.initial_total_gas % OLD_TOKEN_RATIO, 0);
         }
         evm2.ctx()
             .journal_mut()
@@ -2274,7 +2308,7 @@ mod tests {
         assert_eq!(evm3.ctx().chain().token_ratio, U256::from(NEW_TOKEN_RATIO));
         assert_eq!(evm3.ctx().chain().l2_block, Some(BLOCK_NUM));
         if !spec.is_enabled_in(OpSpecId::ARSIA) {
-            assert_eq!(initial_gas3.initial_gas % NEW_TOKEN_RATIO, 0);
+            assert_eq!(initial_gas3.initial_total_gas % NEW_TOKEN_RATIO, 0);
         }
 
         let mut tx3_chain = evm3.ctx().chain().clone();
@@ -2315,7 +2349,8 @@ mod tests {
 
         let caller = Address::from_str("0x5000000000000000000000000000000000000005").unwrap();
         let recipient = Address::from_str("0x6000000000000000000000000000000000000006").unwrap();
-        let deposit_caller = Address::from_str("0x7000000000000000000000000000000000000007").unwrap();
+        let deposit_caller =
+            Address::from_str("0x7000000000000000000000000000000000000007").unwrap();
         let regular_input = bytes!("faca03");
         let set_token_ratio_input =
             bytes!("e38e91f900000000000000000000000000000000000000000000000000000000000010cc");
@@ -2364,7 +2399,7 @@ mod tests {
             )
             .build_op();
         let initial_gas1 = handler.validate_initial_tx_gas(&mut evm1).unwrap();
-        assert_eq!(initial_gas1.initial_gas, 21000);
+        assert_eq!(initial_gas1.initial_total_gas, 21000);
 
         if spec.is_enabled_in(OpSpecId::ARSIA) {
             let l1_block_contract = evm1
@@ -2376,9 +2411,10 @@ mod tests {
             l1_block_contract
                 .storage
                 .insert(L1_BASE_FEE_SLOT, U256::from(NEW_L1_BASE_FEE));
-            l1_block_contract
-                .storage
-                .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(NEW_L1_BLOB_BASE_FEE));
+            l1_block_contract.storage.insert(
+                ECOTONE_L1_BLOB_BASE_FEE_SLOT,
+                U256::from(NEW_L1_BLOB_BASE_FEE),
+            );
             l1_block_contract.storage.insert(
                 ECOTONE_L1_FEE_SCALARS_SLOT,
                 ecotone_fee_scalars(
@@ -2454,7 +2490,7 @@ mod tests {
         assert_eq!(evm3.ctx().chain().l2_block, None);
         assert_eq!(evm3.ctx().chain().l1_base_fee, U256::from(NEW_L1_BASE_FEE));
         if !spec.is_enabled_in(OpSpecId::ARSIA) {
-            assert_eq!(initial_gas3.initial_gas % OLD_TOKEN_RATIO, 0);
+            assert_eq!(initial_gas3.initial_total_gas % OLD_TOKEN_RATIO, 0);
         }
         evm3.ctx()
             .journal_mut()
@@ -2496,7 +2532,7 @@ mod tests {
         assert_eq!(evm4.ctx().chain().l2_block, Some(BLOCK_NUM));
         assert_eq!(evm4.ctx().chain().l1_base_fee, U256::from(NEW_L1_BASE_FEE));
         if !spec.is_enabled_in(OpSpecId::ARSIA) {
-            assert_eq!(initial_gas4.initial_gas % NEW_TOKEN_RATIO, 0);
+            assert_eq!(initial_gas4.initial_total_gas % NEW_TOKEN_RATIO, 0);
         }
 
         let mut tx4_chain = evm4.ctx().chain().clone();
@@ -2528,7 +2564,8 @@ mod tests {
         let handler =
             OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
 
-        let result = handler.validate_against_state_and_deduct_caller(&mut evm);
+        let result =
+            handler.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default());
 
         assert!(matches!(
             result.err().unwrap(),
@@ -2575,9 +2612,10 @@ mod tests {
     fn test_halted_deposit_bvm_eth_mint_only() {
         let caller = Address::from([0x01; 20]);
         let mint_amount = 100u64;
-        // Transfer exceeds the minted balance, so the BVM_ETH transfer fails and
-        // is skipped (mirroring op-geth's RevertToSnapshot): only the mint and its
-        // Mint log persist. This is the block-96442768 shape (eth_tx_value > mint).
+        // Transfer exceeds the minted balance, so the BVM_ETH transfer fails and is
+        // skipped during deduct_caller (op-geth's Case A -> RevertToSnapshot): only the
+        // mint and its Mint log persist. This is the block-96442768 shape (eth_tx_value
+        // > mint).
         let transfer_amount = 150u64;
 
         let ctx = Context::op()
@@ -2608,10 +2646,10 @@ mod tests {
             _ => panic!("Expected Halt result"),
         }
 
-        // The failed deposit must still surface the BVM_ETH `Mint` log into the
-        // receipt (op-geth emits it before its revert snapshot). Assert the log
-        // matches op-geth's format exactly: BVM_ETH address, Mint selector,
-        // minter = caller (left-padded), data = eth_value as 32-byte big-endian.
+        // The failed deposit must still surface the BVM_ETH `Mint` log into the receipt
+        // (op-geth emits it before its revert snapshot). Assert the log matches op-geth's
+        // format exactly: BVM_ETH address, Mint selector, minter = caller (left-padded),
+        // data = eth_value as 32-byte big-endian.
         let logs = result.logs();
         assert_eq!(
             logs.len(),
@@ -2651,11 +2689,7 @@ mod tests {
 
         // Verify caller nonce was bumped and mint balance was credited.
         // Per the OP deposit spec, these must persist even on deposit failure.
-        let caller_acc = evm
-            .ctx()
-            .journal_mut()
-            .load_account(caller)
-            .unwrap();
+        let caller_acc = evm.ctx().journal_mut().load_account(caller).unwrap();
         assert_eq!(
             caller_acc.info.nonce, 1,
             "Caller nonce must be bumped for failed deposits"
@@ -2664,167 +2698,6 @@ mod tests {
             caller_acc.info.balance,
             U256::from(mint_amount),
             "Caller balance must include mint for failed deposits"
-        );
-    }
-
-    /// A failed deposit that HALTS (the `catch_error` path) persists only the
-    /// BVM_ETH Mint — NOT the transfer — even when eth_tx_value would be
-    /// transferable. op-geth's transfer is part of the gas-metered execution that
-    /// the halt rolls back, so a halted failed deposit keeps exactly one Mint log
-    /// (confirmed on-chain: Sepolia 286432, mainnet 96442768). The transfer only
-    /// survives on the REVERT path — see the real-block replay
-    /// `test_failed_deposit_replay_block_286456` (REVERT -> Mint + Transfer).
-    #[test]
-    fn test_failed_deposit_halt_persists_mint_only_not_transfer() {
-        let caller = Address::from([0x11; 20]);
-        let recipient = Address::from([0x42; 20]);
-        // transfer == mint: the transfer WOULD succeed on balance, yet a halt must
-        // still drop it (only the mint persists).
-        let amount = 1_000_000_000_000_000u128; // 0.001 ETH, like block 286432
-
-        let ctx = Context::op()
-            .modify_tx_chained(|tx| {
-                tx.base.caller = caller;
-                tx.base.kind = revm::primitives::TxKind::Call(recipient);
-                tx.deposit.source_hash = B256::from([1u8; 32]);
-                tx.deposit.eth_value = Some(amount); // mint
-                tx.deposit.eth_tx_value = Some(amount); // transfer (dropped on halt)
-            })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
-
-        let mut evm = ctx.build_op();
-        let handler =
-            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
-
-        let error = EVMError::Transaction(OpTransactionError::HaltedDepositPostRegolith);
-        let result = handler.catch_error(&mut evm, error).unwrap();
-
-        assert!(
-            matches!(
-                &result,
-                ExecutionResult::Halt {
-                    reason: OpHaltReason::FailedDeposit,
-                    ..
-                }
-            ),
-            "failed deposit must Halt with FailedDeposit"
-        );
-
-        // HALT keeps exactly the Mint log — the transfer does not persist.
-        let logs = result.logs();
-        assert_eq!(
-            logs.len(),
-            1,
-            "halted failed deposit persists only the Mint log (transfer dropped)"
-        );
-        assert_eq!(logs[0].address, BvmEth::ADDRESS);
-        assert_eq!(logs[0].topics()[0], BvmEth::MINT_SELECTOR, "topic0 = Mint");
-        assert_eq!(logs[0].topics()[1], caller.into_word(), "minter = caller");
-
-        // Balances: minted to caller; nothing transferred out (transfer dropped).
-        let caller_bal = evm
-            .ctx()
-            .journal_mut()
-            .sload(BvmEth::ADDRESS, BvmEth::get_balance_slot(caller))
-            .unwrap()
-            .data;
-        let recip_bal = evm
-            .ctx()
-            .journal_mut()
-            .sload(BvmEth::ADDRESS, BvmEth::get_balance_slot(recipient))
-            .unwrap()
-            .data;
-        assert_eq!(
-            caller_bal,
-            U256::from(amount),
-            "caller keeps the minted BVM_ETH (no transfer on halt)"
-        );
-        assert_eq!(
-            recip_bal,
-            U256::ZERO,
-            "recipient receives nothing on a halted deposit"
-        );
-    }
-
-    /// Reproduces Mantle mainnet block 96442768, tx index 1
-    /// (0x6b7cbdddeae0c93405abb79fd4f18eb162377efc3a39d50a3412dbe58e427482):
-    /// a failed deposit (status=0) to an EOA with empty calldata that still
-    /// mints `eth_value` of BVM_ETH. op-geth emits the ERC20 `Mint` event before
-    /// its revert snapshot, so the mint log survives the failure and appears in
-    /// the receipt (1 log, non-zero logsBloom). op-revm previously dropped it,
-    /// producing a different receipts root and forking the node.
-    ///
-    /// This asserts op-revm now surfaces a Mint log byte-for-byte identical to
-    /// the canonical (op-geth) log observed on-chain for this transaction.
-    #[test]
-    fn test_failed_deposit_persists_mint_log_like_geth_block_96442768() {
-        // Exact on-chain values for the failing deposit.
-        let caller =
-            Address::from_str("0xc214b42e093c7739179833496791fbd50ec68de4").unwrap();
-        // eth_value = 0.001 ETH = 1_000_000_000_000_000 wei = 0x38d7ea4c68000.
-        let eth_value: u128 = 1_000_000_000_000_000;
-
-        let ctx = Context::op()
-            .modify_tx_chained(|tx| {
-                tx.base.caller = caller;
-                tx.deposit.source_hash = B256::from([1u8; 32]);
-                tx.deposit.mint = Some(eth_value);
-                tx.deposit.eth_value = Some(eth_value);
-            })
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
-
-        let mut evm = ctx.build_op();
-        let handler =
-            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
-
-        let error = EVMError::Transaction(OpTransactionError::HaltedDepositPostRegolith);
-        let result = handler.catch_error(&mut evm, error).unwrap();
-
-        // status = 0 (Halt) but the receipt still carries the Mint log.
-        assert!(
-            matches!(
-                &result,
-                ExecutionResult::Halt {
-                    reason: OpHaltReason::FailedDeposit,
-                    ..
-                }
-            ),
-            "failed deposit must Halt with FailedDeposit"
-        );
-
-        let logs = result.logs();
-        assert_eq!(logs.len(), 1, "exactly one Mint log, matching op-geth");
-        let mint = &logs[0];
-
-        // Byte-for-byte equality with the canonical op-geth log.
-        assert_eq!(
-            mint.address,
-            Address::from_str("0xdeaddeaddeaddeaddeaddeaddeaddeaddead1111").unwrap(),
-            "address = BVM_ETH"
-        );
-        assert_eq!(
-            mint.topics()[0],
-            B256::from_str(
-                "0x0f6798a560793a54c3bcfe86a93cde1e73087d944c0ea20544137d4121396885"
-            )
-            .unwrap(),
-            "topic0 = keccak(Mint(address,uint256))"
-        );
-        assert_eq!(
-            mint.topics()[1],
-            B256::from_str(
-                "0x000000000000000000000000c214b42e093c7739179833496791fbd50ec68de4"
-            )
-            .unwrap(),
-            "topic1 = minter, left-padded"
-        );
-        assert_eq!(
-            mint.data.data,
-            Bytes::from_str(
-                "0x00000000000000000000000000000000000000000000000000038d7ea4c68000"
-            )
-            .unwrap(),
-            "data = 0.001 ETH as 32-byte big-endian"
         );
     }
 
@@ -2952,7 +2825,7 @@ mod tests {
         let initial_gas1 = handler.validate_initial_tx_gas(&mut evm1).unwrap();
         // Deposit tx should not multiply by token ratio
         assert_eq!(
-            initial_gas1.initial_gas, 21000,
+            initial_gas1.initial_total_gas, 21000,
             "Deposit transaction should not multiply by token ratio"
         );
 
@@ -3007,22 +2880,22 @@ mod tests {
 
         // Calculate expected gas with old token ratio (3045)
         // The base gas (before multiplying by token_ratio) should be consistent
-        let base_gas_before = initial_gas2.initial_gas / INITIAL_TOKEN_RATIO;
+        let base_gas_before = initial_gas2.initial_total_gas / INITIAL_TOKEN_RATIO;
         let expected_gas_before = base_gas_before * INITIAL_TOKEN_RATIO;
 
         // Should use old token ratio (3045) before the reset
         assert_eq!(
-            initial_gas2.initial_gas,
+            initial_gas2.initial_total_gas,
             expected_gas_before,
             "Transaction 4 should use old token ratio (3045) before reset. Gas: {}, Base: {}, Token ratio: {}",
-            initial_gas2.initial_gas,
+            initial_gas2.initial_total_gas,
             base_gas_before,
             INITIAL_TOKEN_RATIO
         );
 
         // Verify the gas calculation uses INITIAL_TOKEN_RATIO
         assert_eq!(
-            initial_gas2.initial_gas % INITIAL_TOKEN_RATIO,
+            initial_gas2.initial_total_gas % INITIAL_TOKEN_RATIO,
             0,
             "Gas should be divisible by INITIAL_TOKEN_RATIO"
         );
@@ -3092,15 +2965,15 @@ mod tests {
         // Calculate expected gas with new token ratio (3040)
         // The base gas (before multiplying by token_ratio) should be the same as before
         // Only the token_ratio multiplier changes from 3045 to 3040
-        let base_gas_after = initial_gas3.initial_gas / NEW_TOKEN_RATIO;
+        let base_gas_after = initial_gas3.initial_total_gas / NEW_TOKEN_RATIO;
         let expected_gas_after = base_gas_after * NEW_TOKEN_RATIO;
 
         // Should use new token ratio (3040) after reload
         assert_eq!(
-            initial_gas3.initial_gas,
+            initial_gas3.initial_total_gas,
             expected_gas_after,
             "Transaction 5 should use new token ratio (3040) after reload. Gas: {}, Base: {}, Token ratio: {}",
-            initial_gas3.initial_gas,
+            initial_gas3.initial_total_gas,
             base_gas_after,
             NEW_TOKEN_RATIO
         );
@@ -3108,20 +2981,20 @@ mod tests {
         // Verify that gas calculation changed due to token ratio change
         // Since token_ratio decreased from 3045 to 3040, gas should decrease
         assert!(
-            initial_gas3.initial_gas < initial_gas2.initial_gas,
+            initial_gas3.initial_total_gas < initial_gas2.initial_total_gas,
             "Gas should decrease after token ratio change: {} (with ratio {}) -> {} (with ratio {})",
-            initial_gas2.initial_gas,
+            initial_gas2.initial_total_gas,
             INITIAL_TOKEN_RATIO,
-            initial_gas3.initial_gas,
+            initial_gas3.initial_total_gas,
             NEW_TOKEN_RATIO
         );
 
         // Verify the base gas calculation and token ratio multiplier
-        let base_gas_before = initial_gas2.initial_gas / INITIAL_TOKEN_RATIO;
-        let base_gas_after = initial_gas3.initial_gas / NEW_TOKEN_RATIO;
+        let base_gas_before = initial_gas2.initial_total_gas / INITIAL_TOKEN_RATIO;
+        let base_gas_after = initial_gas3.initial_total_gas / NEW_TOKEN_RATIO;
 
         // Calculate the actual difference due to token ratio change
-        let gas_diff = initial_gas2.initial_gas - initial_gas3.initial_gas;
+        let gas_diff = initial_gas2.initial_total_gas - initial_gas3.initial_total_gas;
         let ratio_diff = INITIAL_TOKEN_RATIO - NEW_TOKEN_RATIO;
 
         // Verify that the gas difference is consistent with token ratio difference
@@ -3138,12 +3011,12 @@ mod tests {
 
         // Verify token ratio multiplier is correctly applied
         assert_eq!(
-            initial_gas2.initial_gas % INITIAL_TOKEN_RATIO,
+            initial_gas2.initial_total_gas % INITIAL_TOKEN_RATIO,
             0,
             "Gas should be divisible by INITIAL_TOKEN_RATIO"
         );
         assert_eq!(
-            initial_gas3.initial_gas % NEW_TOKEN_RATIO,
+            initial_gas3.initial_total_gas % NEW_TOKEN_RATIO,
             0,
             "Gas should be divisible by NEW_TOKEN_RATIO"
         );
@@ -3225,11 +3098,15 @@ mod tests {
         let error = EVMError::Transaction(OpTransactionError::HaltedDepositPostRegolith);
         let result = handler.catch_error(&mut evm, error);
 
-        assert!(result.is_ok(), "Failed deposit should return Ok(FailedDeposit)");
+        assert!(
+            result.is_ok(),
+            "Failed deposit should return Ok(FailedDeposit)"
+        );
 
         // Verify cleanup was performed.
         assert_eq!(
-            evm.ctx().chain.tx_l1_cost, None,
+            evm.ctx().chain.tx_l1_cost,
+            None,
             "clear_tx_l1_cost must be called after catch_error"
         );
     }
@@ -3272,12 +3149,11 @@ mod tests {
         assert_eq!(nonce_before, 1, "Nonce should be 1 before catch_error");
 
         // catch_error for non-deposit should return Err and call discard_tx().
-        let error = EVMError::Transaction(
-            OpTransactionError::Base(InvalidTransaction::NonceTooLow {
+        let error =
+            EVMError::Transaction(OpTransactionError::Base(InvalidTransaction::NonceTooLow {
                 tx: 0,
                 state: 1,
-            }),
-        );
+            }));
         let result = handler.catch_error(&mut evm, error);
 
         assert!(result.is_err(), "Non-deposit error should propagate as Err");
@@ -3326,11 +3202,7 @@ mod tests {
         // This must NOT revert the previously committed nonce/mint.
         evm.ctx().journal_mut().discard_tx();
 
-        let caller_acc = evm
-            .ctx()
-            .journal_mut()
-            .load_account(caller)
-            .unwrap();
+        let caller_acc = evm.ctx().journal_mut().load_account(caller).unwrap();
         assert_eq!(
             caller_acc.info.nonce, 1,
             "Committed nonce must survive subsequent discard_tx"
@@ -3356,9 +3228,592 @@ mod tests {
         );
     }
 
+    // ==================== Intra-block token_ratio regression tests ====================
+    //
+    // op-gas-oracle calls setTokenRatio on GasOracle (0x42..000F) mid-block.
+    // op-geth reads tokenRatio from statedb on every L1 cost call (rollup_cost.go:316),
+    // so subsequent txs see the updated value. op-revm caches L1BlockInfo at block start.
+    // The v107 merge added a redundant try_fetch(journal.db_mut()) guard in
+    // validate_against_state_and_deduct_caller; journal.db_mut() bypasses journal state
+    // → reads stale underlying-DB values → silently reverts the ratio → stateRoot mismatch.
+    //
+    // Fix: remove the try_fetch guard from validate_against_state_and_deduct_caller.
+    // validate_initial_tx_gas already handles L1BlockInfo reload via reset_l2_block().
+
+    /// Test 1: validate_against_state_and_deduct_caller must preserve token_ratio
+    /// even when l2_block is None (which would have triggered the removed guard).
+    #[test]
+    fn test_no_stale_refetch_preserves_token_ratio() {
+        const OLD_TOKEN_RATIO: u64 = 3000;
+        const NEW_TOKEN_RATIO: u64 = 2500;
+
+        let caller = Address::ZERO;
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(10_000_000u64),
+                ..Default::default()
+            },
+        );
+        let l1_block = db.load_account(L1_BLOCK_CONTRACT).unwrap();
+        l1_block.storage.insert(L1_BASE_FEE_SLOT, U256::from(1_000));
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_FEE_SCALARS_SLOT, U256::from(1_000) << 128);
+        let gas_oracle = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
+        gas_oracle
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(L1BlockInfo {
+                l1_base_fee: U256::from(1_000),
+                l1_base_fee_scalar: U256::from(1_000),
+                l1_blob_base_fee: Some(U256::ZERO),
+                l1_blob_base_fee_scalar: Some(U256::ZERO),
+                l2_block: None,
+                operator_fee_scalar: Some(U256::ZERO),
+                operator_fee_constant: Some(U256::ZERO),
+                token_ratio: U256::from(NEW_TOKEN_RATIO),
+                ..Default::default()
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_tx(
+                OpTransaction::builder()
+                    .base(TxEnv::builder().gas_limit(100))
+                    .enveloped_tx(Some(bytes!("FACADE")))
+                    .source_hash(B256::ZERO)
+                    .build()
+                    .unwrap(),
+            );
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+        handler
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
+            .unwrap();
+
+        assert_eq!(
+            evm.ctx().chain().token_ratio,
+            U256::from(NEW_TOKEN_RATIO),
+            "token_ratio must not be overwritten by stale db_mut() read"
+        );
+    }
+
+    /// Test 2: Cached tx_l1_cost must reflect the live token_ratio, not the stale one.
+    #[test]
+    fn test_l1_cost_uses_live_token_ratio() {
+        const OLD_TOKEN_RATIO: u64 = 3000;
+        const NEW_TOKEN_RATIO: u64 = 2000;
+
+        let caller = Address::ZERO;
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(10_000_000_000u64),
+                ..Default::default()
+            },
+        );
+        let l1_block = db.load_account(L1_BLOCK_CONTRACT).unwrap();
+        l1_block.storage.insert(L1_BASE_FEE_SLOT, U256::from(1_000));
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_FEE_SCALARS_SLOT, U256::from(1_000) << 128);
+        let gas_oracle = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
+        gas_oracle
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
+
+        let mut info_new = L1BlockInfo {
+            l1_base_fee: U256::from(1_000),
+            l1_base_fee_scalar: U256::from(1_000),
+            l1_blob_base_fee: Some(U256::ZERO),
+            l1_blob_base_fee_scalar: Some(U256::ZERO),
+            token_ratio: U256::from(NEW_TOKEN_RATIO),
+            ..Default::default()
+        };
+        let cost_new = info_new.calculate_tx_l1_cost(&bytes!("FACADE"), OpSpecId::ARSIA);
+        let mut info_old = L1BlockInfo {
+            token_ratio: U256::from(OLD_TOKEN_RATIO),
+            ..info_new.clone()
+        };
+        info_old.tx_l1_cost = None;
+        let cost_old = info_old.calculate_tx_l1_cost(&bytes!("FACADE"), OpSpecId::ARSIA);
+        assert_ne!(
+            cost_new, cost_old,
+            "precondition: different ratios produce different costs"
+        );
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(L1BlockInfo {
+                l1_base_fee: U256::from(1_000),
+                l1_base_fee_scalar: U256::from(1_000),
+                l1_blob_base_fee: Some(U256::ZERO),
+                l1_blob_base_fee_scalar: Some(U256::ZERO),
+                l2_block: None,
+                operator_fee_scalar: Some(U256::ZERO),
+                operator_fee_constant: Some(U256::ZERO),
+                token_ratio: U256::from(NEW_TOKEN_RATIO),
+                ..Default::default()
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_tx(
+                OpTransaction::builder()
+                    .base(TxEnv::builder().gas_limit(100))
+                    .enveloped_tx(Some(bytes!("FACADE")))
+                    .source_hash(B256::ZERO)
+                    .build()
+                    .unwrap(),
+            );
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+        handler
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
+            .unwrap();
+
+        assert_eq!(
+            evm.ctx().chain().tx_l1_cost,
+            Some(cost_new),
+            "L1 cost must use NEW ratio ({NEW_TOKEN_RATIO}), not stale OLD ({OLD_TOKEN_RATIO})"
+        );
+    }
+
+    /// Test 3: Sender balance after deduction must match L1 cost with live token_ratio.
+    #[test]
+    fn test_sender_balance_reflects_live_token_ratio() {
+        const OLD_TOKEN_RATIO: u64 = 3000;
+        const NEW_TOKEN_RATIO: u64 = 2000;
+        const INITIAL_BALANCE: u64 = 10_000_000_000;
+
+        let caller = Address::ZERO;
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(INITIAL_BALANCE),
+                ..Default::default()
+            },
+        );
+        let l1_block = db.load_account(L1_BLOCK_CONTRACT).unwrap();
+        l1_block.storage.insert(L1_BASE_FEE_SLOT, U256::from(1_000));
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO);
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_FEE_SCALARS_SLOT, U256::from(1_000) << 128);
+        let gas_oracle = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
+        gas_oracle
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
+
+        let mut info = L1BlockInfo {
+            l1_base_fee: U256::from(1_000),
+            l1_base_fee_scalar: U256::from(1_000),
+            l1_blob_base_fee: Some(U256::ZERO),
+            l1_blob_base_fee_scalar: Some(U256::ZERO),
+            token_ratio: U256::from(NEW_TOKEN_RATIO),
+            ..Default::default()
+        };
+        let expected_l1_cost = info.calculate_tx_l1_cost(&bytes!("FACADE"), OpSpecId::ARSIA);
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(L1BlockInfo {
+                l1_base_fee: U256::from(1_000),
+                l1_base_fee_scalar: U256::from(1_000),
+                l1_blob_base_fee: Some(U256::ZERO),
+                l1_blob_base_fee_scalar: Some(U256::ZERO),
+                l2_block: None,
+                operator_fee_scalar: Some(U256::ZERO),
+                operator_fee_constant: Some(U256::ZERO),
+                token_ratio: U256::from(NEW_TOKEN_RATIO),
+                ..Default::default()
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_tx(
+                OpTransaction::builder()
+                    .base(TxEnv::builder().gas_limit(100))
+                    .enveloped_tx(Some(bytes!("FACADE")))
+                    .source_hash(B256::ZERO)
+                    .build()
+                    .unwrap(),
+            );
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+        handler
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
+            .unwrap();
+
+        let account = evm.ctx().journal_mut().load_account(caller).unwrap();
+        let expected_balance = U256::from(INITIAL_BALANCE) - expected_l1_cost;
+        assert_eq!(
+            account.info.balance, expected_balance,
+            "balance must reflect L1 cost with NEW ratio. l1_cost={expected_l1_cost}"
+        );
+    }
+
+    /// Test 4: Normal reload via validate_initial_tx_gas still works for new blocks.
+    #[test]
+    fn test_l1_block_info_still_reloads_on_new_block() {
+        const BLOCK_NUM: U256 = uint!(200_U256);
+        const TOKEN_RATIO: u64 = 4000;
+
+        let caller = Address::ZERO;
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(10_000_000_000u64),
+                ..Default::default()
+            },
+        );
+        let l1_block = db.load_account(L1_BLOCK_CONTRACT).unwrap();
+        l1_block.storage.insert(L1_BASE_FEE_SLOT, U256::from(7));
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(1));
+        l1_block.storage.insert(
+            ECOTONE_L1_FEE_SCALARS_SLOT,
+            U256::from(1368u64) << 128 | U256::from(810949u64) << 64,
+        );
+        l1_block.storage.insert(L1_OVERHEAD_SLOT, U256::ZERO);
+        l1_block.storage.insert(L1_SCALAR_SLOT, U256::ZERO);
+        l1_block
+            .storage
+            .insert(OPERATOR_FEE_SCALARS_SLOT, U256::ZERO);
+        let gas_oracle = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
+        gas_oracle
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(TOKEN_RATIO));
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(L1BlockInfo {
+                l2_block: Some(BLOCK_NUM + U256::from(1)),
+                token_ratio: U256::from(9999),
+                ..Default::default()
+            })
+            .with_block(BlockEnv {
+                number: BLOCK_NUM,
+                ..Default::default()
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
+            .with_tx(
+                OpTransaction::builder()
+                    .base(TxEnv::builder().gas_limit(100_000))
+                    .enveloped_tx(Some(bytes!("FACADE")))
+                    .source_hash(B256::ZERO)
+                    .build()
+                    .unwrap(),
+            );
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+        handler.validate_initial_tx_gas(&mut evm).unwrap();
+
+        assert_eq!(evm.ctx().chain().l2_block, Some(BLOCK_NUM));
+        assert_eq!(
+            evm.ctx().chain().token_ratio,
+            U256::from(TOKEN_RATIO),
+            "validate_initial_tx_gas must reload from DB on new block"
+        );
+
+        handler
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
+            .unwrap();
+        assert_eq!(
+            evm.ctx().chain().token_ratio,
+            U256::from(TOKEN_RATIO),
+            "validate_against_state must not alter token_ratio"
+        );
+    }
+
+    /// Test 5: Two-tx flow — setTokenRatio then normal tx in the same block.
+    #[test]
+    fn test_two_tx_set_token_ratio_then_normal_tx() {
+        const BLOCK_NUM: U256 = uint!(300_U256);
+        const OLD_TOKEN_RATIO: u64 = 2984;
+        const NEW_TOKEN_RATIO: u64 = 2980;
+
+        let caller = Address::ZERO;
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(10_000_000_000u64),
+                ..Default::default()
+            },
+        );
+        let l1_block = db.load_account(L1_BLOCK_CONTRACT).unwrap();
+        l1_block.storage.insert(L1_BASE_FEE_SLOT, U256::from(7));
+        l1_block
+            .storage
+            .insert(ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::from(1));
+        l1_block.storage.insert(
+            ECOTONE_L1_FEE_SCALARS_SLOT,
+            U256::from(1368u64) << 128 | U256::from(810949u64) << 64,
+        );
+        l1_block.storage.insert(L1_OVERHEAD_SLOT, U256::ZERO);
+        l1_block.storage.insert(L1_SCALAR_SLOT, U256::ZERO);
+        l1_block
+            .storage
+            .insert(OPERATOR_FEE_SCALARS_SLOT, U256::ZERO);
+        let gas_oracle = db.load_account(GAS_ORACLE_CONTRACT).unwrap();
+        gas_oracle
+            .storage
+            .insert(TOKEN_RATIO_SLOT, U256::from(OLD_TOKEN_RATIO));
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(L1BlockInfo {
+                l2_block: Some(BLOCK_NUM),
+                token_ratio: U256::from(OLD_TOKEN_RATIO),
+                l1_base_fee: U256::from(7),
+                l1_base_fee_scalar: U256::from(1368),
+                l1_blob_base_fee: Some(U256::from(1)),
+                l1_blob_base_fee_scalar: Some(U256::from(810949)),
+                operator_fee_scalar: Some(U256::ZERO),
+                operator_fee_constant: Some(U256::ZERO),
+                ..Default::default()
+            })
+            .with_block(BlockEnv {
+                number: BLOCK_NUM,
+                ..Default::default()
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        // --- tx1: targets GAS_ORACLE_CONTRACT ---
+        evm.ctx().modify_tx(|tx| {
+            tx.base = TxEnv::builder()
+                .gas_limit(100_000)
+                .to(GAS_ORACLE_CONTRACT)
+                .build()
+                .unwrap();
+            tx.enveloped_tx = Some(bytes!("FACADE"));
+        });
+        handler.validate_initial_tx_gas(&mut evm).unwrap();
+        assert_eq!(
+            evm.ctx().chain().l2_block,
+            None,
+            "reset_l2_block must fire for GAS_ORACLE_CONTRACT tx"
+        );
+
+        // Simulate tx1 SSTORE: update token_ratio in journal
+        evm.ctx()
+            .journal_mut()
+            .load_account(GAS_ORACLE_CONTRACT)
+            .unwrap();
+        evm.ctx()
+            .journal_mut()
+            .sstore(
+                GAS_ORACLE_CONTRACT,
+                TOKEN_RATIO_SLOT,
+                U256::from(NEW_TOKEN_RATIO),
+            )
+            .unwrap();
+        evm.ctx().journal_mut().commit_tx();
+        evm.ctx().chain_mut().clear_tx_l1_cost();
+
+        // --- tx2: normal transfer ---
+        evm.ctx().modify_tx(|tx| {
+            tx.base = TxEnv::builder()
+                .gas_limit(100_000)
+                .to(Address::from([0x42; 20]))
+                .build()
+                .unwrap();
+            tx.enveloped_tx = Some(bytes!("FACADE"));
+        });
+        handler.validate_initial_tx_gas(&mut evm).unwrap();
+        assert_eq!(evm.ctx().chain().l2_block, Some(BLOCK_NUM));
+
+        let ratio_before = evm.ctx().chain().token_ratio;
+        handler
+            .validate_against_state_and_deduct_caller(&mut evm, &mut Default::default())
+            .unwrap();
+        let ratio_after = evm.ctx().chain().token_ratio;
+
+        assert_eq!(
+            ratio_before, ratio_after,
+            "validate_against_state must not change token_ratio"
+        );
+    }
+
+    /// A failed deposit that takes the `catch_error` path (op-geth's Case A: the BVM_ETH
+    /// transfer fails its balance check, so `innerExecute` returns a Go error and op-geth
+    /// `RevertToSnapshot`s) persists only the BVM_ETH Mint — NOT the transfer — even when
+    /// eth_tx_value would otherwise be transferable. The transfer only survives op-geth's
+    /// Case B (vm error after the transfer executed), handled in `execution_result` — see
+    /// `test_failed_deposit_executed_then_revert_keeps_mint_and_transfer`.
+    #[test]
+    fn test_failed_deposit_halt_persists_mint_only_not_transfer() {
+        let caller = Address::from([0x11; 20]);
+        let recipient = Address::from([0x42; 20]);
+        // transfer == mint: the transfer WOULD succeed on balance, yet the catch_error
+        // path must still drop it (only the mint persists).
+        let amount = 1_000_000_000_000_000u128; // 0.001 ETH, like block 286432
+
+        let ctx = Context::op()
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = revm::primitives::TxKind::Call(recipient);
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.eth_value = Some(amount); // mint
+                tx.deposit.eth_tx_value = Some(amount); // transfer (dropped on this path)
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        let error = EVMError::Transaction(OpTransactionError::HaltedDepositPostRegolith);
+        let result = handler.catch_error(&mut evm, error).unwrap();
+
+        assert!(
+            matches!(
+                &result,
+                ExecutionResult::Halt {
+                    reason: OpHaltReason::FailedDeposit,
+                    ..
+                }
+            ),
+            "failed deposit must Halt with FailedDeposit"
+        );
+
+        // catch_error keeps exactly the Mint log — the transfer does not persist.
+        let logs = result.logs();
+        assert_eq!(
+            logs.len(),
+            1,
+            "catch_error failed deposit persists only the Mint log (transfer dropped)"
+        );
+        assert_eq!(logs[0].address, BvmEth::ADDRESS);
+        assert_eq!(logs[0].topics()[0], BvmEth::MINT_SELECTOR, "topic0 = Mint");
+        assert_eq!(logs[0].topics()[1], caller.into_word(), "minter = caller");
+
+        // Balances: minted to caller; nothing transferred out (transfer dropped).
+        let caller_bal = evm
+            .ctx()
+            .journal_mut()
+            .sload(BvmEth::ADDRESS, BvmEth::get_balance_slot(caller))
+            .unwrap()
+            .data;
+        let recip_bal = evm
+            .ctx()
+            .journal_mut()
+            .sload(BvmEth::ADDRESS, BvmEth::get_balance_slot(recipient))
+            .unwrap()
+            .data;
+        assert_eq!(
+            caller_bal,
+            U256::from(amount),
+            "caller keeps the minted BVM_ETH (no transfer on this path)"
+        );
+        assert_eq!(
+            recip_bal,
+            U256::ZERO,
+            "recipient receives nothing on a catch_error failed deposit"
+        );
+    }
+
+    /// Reproduces Mantle mainnet block 96442768, tx index 1
+    /// (0x6b7cbdddeae0c93405abb79fd4f18eb162377efc3a39d50a3412dbe58e427482):
+    /// a failed deposit (status=0) to an EOA with empty calldata that still mints
+    /// `eth_value` of BVM_ETH. op-geth emits the ERC20 `Mint` event before its revert
+    /// snapshot, so the mint log survives the failure and appears in the receipt (1 log,
+    /// non-zero logsBloom). op-revm previously dropped it (`logs: Vec::new()`), producing
+    /// a different receipts root and forking the node.
+    ///
+    /// Asserts op-revm now surfaces a Mint log byte-for-byte identical to the canonical
+    /// (op-geth) log observed on-chain for this transaction.
+    #[test]
+    fn test_failed_deposit_persists_mint_log_like_geth_block_96442768() {
+        // Exact on-chain values for the failing deposit.
+        let caller = Address::from_str("0xc214b42e093c7739179833496791fbd50ec68de4").unwrap();
+        // eth_value = 0.001 ETH = 1_000_000_000_000_000 wei = 0x38d7ea4c68000.
+        let eth_value: u128 = 1_000_000_000_000_000;
+
+        let ctx = Context::op()
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.mint = Some(eth_value);
+                tx.deposit.eth_value = Some(eth_value);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+
+        let mut evm = ctx.build_op();
+        let handler =
+            OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();
+
+        let error = EVMError::Transaction(OpTransactionError::HaltedDepositPostRegolith);
+        let result = handler.catch_error(&mut evm, error).unwrap();
+
+        // status = 0 (Halt) but the receipt still carries the Mint log.
+        assert!(
+            matches!(
+                &result,
+                ExecutionResult::Halt {
+                    reason: OpHaltReason::FailedDeposit,
+                    ..
+                }
+            ),
+            "failed deposit must Halt with FailedDeposit"
+        );
+
+        let logs = result.logs();
+        assert_eq!(logs.len(), 1, "exactly one Mint log, matching op-geth");
+        let mint = &logs[0];
+
+        // Byte-for-byte equality with the canonical op-geth log.
+        assert_eq!(
+            mint.address,
+            Address::from_str("0xdeaddeaddeaddeaddeaddeaddeaddeaddead1111").unwrap(),
+            "address = BVM_ETH"
+        );
+        assert_eq!(
+            mint.topics()[0],
+            B256::from_str("0x0f6798a560793a54c3bcfe86a93cde1e73087d944c0ea20544137d4121396885")
+                .unwrap(),
+            "topic0 = keccak(Mint(address,uint256))"
+        );
+        assert_eq!(
+            mint.topics()[1],
+            B256::from_str("0x000000000000000000000000c214b42e093c7739179833496791fbd50ec68de4")
+                .unwrap(),
+            "topic1 = minter, left-padded"
+        );
+        assert_eq!(
+            mint.data.data,
+            Bytes::from_str("0x00000000000000000000000000000000000000000000000000038d7ea4c68000")
+                .unwrap(),
+            "data = 0.001 ETH as 32-byte big-endian"
+        );
+    }
+
     // ---- Executed-then-failed deposit keeps mint + transfer (revert AND OOG) ----
 
-    #[cfg(test)]
     fn run_deposit_to_target(
         target: Address,
         code: std::vec::Vec<u8>,
@@ -3411,7 +3866,6 @@ mod tests {
         (out.result, to_balance)
     }
 
-    #[cfg(test)]
     fn assert_failed_deposit_mint_and_transfer(
         result: &ExecutionResult<OpHaltReason>,
         to_balance: U256,
@@ -3443,21 +3897,21 @@ mod tests {
         );
     }
 
-    /// Block-286456 shape: deposit ENTERS the EVM call (transfer succeeds) and the
-    /// target then REVERTs. Keeps Mint + Transfer (logs and state).
+    /// Block-286456 shape: deposit ENTERS the EVM call (transfer succeeds) and the target
+    /// then reverts. Keeps Mint + Transfer (logs and state).
     #[test]
     fn test_failed_deposit_executed_then_revert_keeps_mint_and_transfer() {
         let target = Address::from([0x42; 20]);
         let amount = 1_000_000_000_000_000u128; // 1e15, like block 286456
-        // PUSH1 0; PUSH1 0; REVERT
+                                                // PUSH1 0; PUSH1 0; REVERT
         let (result, to_balance) =
             run_deposit_to_target(target, vec![0x60, 0x00, 0x60, 0x00, 0xfd], amount, 200_000);
         assert_failed_deposit_mint_and_transfer(&result, to_balance, target, amount);
     }
 
-    /// Same but the target OUT-OF-GAS halts (infinite loop). op-geth treats an
-    /// EVM-level halt like a revert for deposits (vm error -> err == nil), so it
-    /// also keeps Mint + Transfer. (The case the prior Revert-only handling missed.)
+    /// Same but the target OUT-OF-GAS halts (infinite loop). op-geth treats an EVM-level
+    /// halt like a revert for deposits (vm error -> err == nil), so it also keeps Mint +
+    /// Transfer. (The case the prior Halt-bubbles-to-catch_error handling dropped.)
     #[test]
     fn test_failed_deposit_executed_then_oog_keeps_mint_and_transfer() {
         let target = Address::from([0x43; 20]);
@@ -3468,12 +3922,11 @@ mod tests {
         assert_failed_deposit_mint_and_transfer(&result, to_balance, target, amount);
     }
 
-    /// A CREATE-kind deposit (`to == null`) that fails must transfer BVM_ETH to the
-    /// SAME created address as a successful one — the address derived from the
-    /// caller's nonce BEFORE it is bumped, matching op-geth's `transferBVMETH`
-    /// (which runs before the EVM call increments the nonce). Regression for the
-    /// prior ordering, which bumped the nonce before the transfer and so sent it to
-    /// `create(caller, N+1)` instead of `create(caller, N)`.
+    /// A CREATE-kind deposit (`to == null`) that fails must transfer BVM_ETH to the SAME
+    /// created address as a successful one — the address derived from the caller's nonce
+    /// BEFORE it is bumped, matching op-geth's `transferBVMETH` (which runs before the EVM
+    /// call increments the nonce). On v38 the transfer is applied pre-frame at the un-bumped
+    /// nonce on BOTH the success and the failure path, so the recipients coincide.
     #[test]
     fn test_failed_create_deposit_transfer_recipient_matches_success() {
         use revm::{primitives::TxKind, ExecuteEvm};
@@ -3526,19 +3979,17 @@ mod tests {
         );
     }
 
-    /// CREATE-kind deposit that OOG-halts inside its init code: exercises BOTH fixes
-    /// at once. The OOG path must keep Mint + Transfer (the OOG fix), AND the transfer
-    /// recipient must be `create(caller, pre-bump nonce N)` (the CREATE-recipient fix).
-    /// The two orthogonal tests cover Call+OOG and CREATE+REVERT separately; this guards
-    /// their composition, which neither alone exercises.
+    /// CREATE-kind deposit that OOG-halts inside its init code: composes BOTH behaviors.
+    /// The OOG path must keep Mint + Transfer, AND the transfer recipient must be
+    /// `create(caller, pre-bump nonce N)`.
     #[test]
     fn test_failed_create_deposit_oog_keeps_mint_and_transfer_correct_recipient() {
         use revm::{primitives::TxKind, ExecuteEvm};
 
         let caller = Address::from([0x11; 20]);
         let amount = 1_000_000_000_000_000u128;
-        // Recipient op-geth's transferBVMETH targets: create(caller, nonce) with the
-        // nonce taken BEFORE the EVM call bumps it (here the caller's initial nonce 0).
+        // Recipient op-geth's transferBVMETH targets: create(caller, nonce) with the nonce
+        // taken BEFORE the EVM call bumps it (here the caller's initial nonce 0).
         let created = caller.create(0);
 
         let mut db = InMemoryDB::default();
@@ -3576,5 +4027,163 @@ mod tests {
 
         // FailedDeposit halt + Mint + Transfer(caller -> created) in logs AND state.
         assert_failed_deposit_mint_and_transfer(&out.result, to_balance, created, amount);
+    }
+
+    /// (#4) Native (MNT) value transfer larger than the caller can afford after the mint.
+    /// op-geth gates this with CanTransfer inside innerExecute() -> RevertToSnapshot ->
+    /// mint-only (1 BVM_ETH Mint log, transfer + native value rolled back, native mint kept).
+    /// Without the pre-call CanTransfer gate revm would route this through the EVM frame and
+    /// keep the BVM_ETH transfer, diverging from op-geth.
+    #[test]
+    fn test_failed_deposit_native_value_too_large_keeps_eth_mint_only() {
+        use revm::{bytecode::Bytecode, primitives::TxKind, ExecuteEvm};
+
+        let caller = Address::from([0x11; 20]);
+        let target = Address::from([0x42; 20]);
+        let native_mint = 1_000_000_000_000_000u128; // 1e15
+        let native_value = 2_000_000_000_000_000u128; // 2e15 > mint, caller can't afford
+        let eth_amount = 3_000_000_000_000_000u128; // BVM_ETH mint == transfer (would succeed)
+
+        let mut db = InMemoryDB::default();
+        // caller starts at ZERO native balance, so its only MNT is the mint (1e15) < value (2e15).
+        db.insert_account_info(caller, AccountInfo::default());
+        let tcode = Bytecode::new_raw(Bytes::from(std::vec![0x00u8])); // STOP (would succeed if reached)
+        let code_hash = tcode.hash_slow();
+        db.insert_account_info(
+            target,
+            AccountInfo {
+                code_hash,
+                code: Some(tcode),
+                ..Default::default()
+            },
+        );
+        let ctx = Context::op()
+            .with_db(db)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(target);
+                tx.base.value = U256::from(native_value);
+                tx.base.gas_limit = 200_000;
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.mint = Some(native_mint);
+                tx.deposit.eth_value = Some(eth_amount);
+                tx.deposit.eth_tx_value = Some(eth_amount);
+            })
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
+        let mut evm = ctx.build_op();
+        let out = evm.replay().unwrap();
+
+        let logs = out.result.logs();
+        let target_eth = out
+            .state
+            .get(&BvmEth::ADDRESS)
+            .and_then(|a| a.storage.get(&BvmEth::get_balance_slot(target)))
+            .map(|s| s.present_value)
+            .unwrap_or_default();
+        let caller_native = out
+            .state
+            .get(&caller)
+            .map(|a| a.info.balance)
+            .unwrap_or_default();
+        let target_native = out
+            .state
+            .get(&target)
+            .map(|a| a.info.balance)
+            .unwrap_or_default();
+
+        // op-geth expectation: exactly ONE log = BVM_ETH Mint (transfer rolled back).
+        assert_eq!(
+            logs.len(),
+            1,
+            "expected only the BVM_ETH Mint log; got {logs:?}"
+        );
+        assert_eq!(
+            logs[0].topics()[0],
+            BvmEth::MINT_SELECTOR,
+            "the one log must be Mint"
+        );
+        // ETH transfer rolled back -> target holds no BVM_ETH.
+        assert_eq!(
+            target_eth,
+            U256::ZERO,
+            "BVM_ETH transfer must be rolled back"
+        );
+        // Native MNT value transfer failed/rolled back -> target got no MNT.
+        assert_eq!(
+            target_native,
+            U256::ZERO,
+            "native MNT value must not transfer"
+        );
+        // Native MNT mint persists -> caller keeps exactly the mint.
+        assert_eq!(
+            caller_native,
+            U256::from(native_mint),
+            "native MNT mint must persist"
+        );
+    }
+
+    /// (#5) CREATE deposit whose init code exceeds EIP-3860 MaxInitCodeSize (49152 bytes),
+    /// with BVM_ETH mint+transfer set and the native value affordable (so the ONLY failure
+    /// is the init-code-size limit). op-geth treats this as a pre-call Go error
+    /// (ErrMaxInitCodeSizeExceeded) -> RevertToSnapshot -> mint-only (1 Mint log, transfer
+    /// rolled back). Without the pre-call EIP-3860 gate revm keeps the transfer.
+    #[test]
+    fn test_failed_create_deposit_initcode_too_large_keeps_eth_mint_only() {
+        use revm::{primitives::TxKind, ExecuteEvm};
+
+        let caller = Address::from([0x11; 20]);
+        let amount = 1_000_000_000_000_000u128; // BVM_ETH mint == transfer
+        let created = caller.create(0);
+
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            caller,
+            AccountInfo {
+                balance: U256::from(10_000_000_000_000_000_000u128), // plenty (value affordable)
+                ..Default::default()
+            },
+        );
+        // 49153 bytes > MaxInitCodeSize (49152). Zero bytes (cheap calldata gas).
+        let init_code = std::vec![0x00u8; 49153];
+        let ctx = Context::op()
+            .with_db(db)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Create;
+                tx.base.data = Bytes::from(init_code);
+                tx.base.gas_limit = 5_000_000; // covers intrinsic+calldata, isolates size limit
+                tx.deposit.source_hash = B256::from([1u8; 32]);
+                tx.deposit.eth_value = Some(amount);
+                tx.deposit.eth_tx_value = Some(amount);
+            })
+            // ARSIA -> SHANGHAI+ enabled, so EIP-3860 init code size limit is active.
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
+        let mut evm = ctx.build_op();
+        let out = evm.replay().unwrap();
+
+        let logs = out.result.logs();
+        let created_eth = out
+            .state
+            .get(&BvmEth::ADDRESS)
+            .and_then(|a| a.storage.get(&BvmEth::get_balance_slot(created)))
+            .map(|s| s.present_value)
+            .unwrap_or_default();
+        // op-geth expectation: mint-only (1 Mint log, transfer rolled back).
+        assert_eq!(
+            logs.len(),
+            1,
+            "op-geth keeps only Mint; got {} logs",
+            logs.len()
+        );
+        assert_eq!(
+            logs[0].topics()[0],
+            BvmEth::MINT_SELECTOR,
+            "the one log must be Mint"
+        );
+        assert_eq!(
+            created_eth,
+            U256::ZERO,
+            "BVM_ETH transfer must be rolled back"
+        );
     }
 }

@@ -118,8 +118,14 @@ impl BvmEth {
     {
         let (_, tx, _, journal, _, _) = context.all_mut();
 
-        let eth_value = tx.eth_value();
-        let eth_tx_value = tx.eth_tx_value();
+        // Treat a zero amount the same as a missing one (None), mirroring op-geth, which gates the
+        // BVM_ETH mint/transfer on `!= nil && != 0` (`core/state_transition.go`). Minting or
+        // transferring 0 is not a no-op here — it would touch the BVM_ETH storage slots and emit a
+        // zero-value Mint/Transfer log — so a stray `Some(0)` would diverge from op-geth. Filtering
+        // it out at the execution layer keeps this correct regardless of how the deposit was
+        // constructed (engine API, direct tx-env, or the conversion layer).
+        let eth_value = tx.eth_value().filter(|&v| v != 0);
+        let eth_tx_value = tx.eth_tx_value().filter(|&v| v != 0);
 
         // Only load and touch BVM_ETH account when there's actual work to do.
         // This avoids warming the contract address unnecessarily.
@@ -693,6 +699,9 @@ mod tests {
             .with_db(InMemoryDB::default())
             .with_chain(l1_block_info)
             .with_block(block_env)
+            // Block 59294 — and every deployed Mantle deposit — executes under ARSIA
+            // (eth_spec OSAKA). ISTHMUS is a different gas regime and leaves the
+            // is_arsia branches uncovered, so this replay must run under ARSIA.
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA)
             .with_tx(op_tx);
         let mut evm = ctx.build_op();
@@ -703,7 +712,7 @@ mod tests {
         >::new();
         let result = handler.run(&mut evm).expect("deposit must execute");
 
-        let gas = result.gas_used();
+        let gas = result.tx_gas_used();
         assert_ne!(
             gas, 25_628,
             "spurious BVM_ETH_MINT_GAS_COMPENSATION (+4500) must be gone"
@@ -891,6 +900,39 @@ mod tests {
     }
 
     #[test]
+    fn process_eth_deposit_zero_eth_value_treated_as_none() {
+        // A zero amount must behave exactly like a missing one (None): op-geth gates the
+        // BVM_ETH mint/transfer on `!= nil && != 0`. With `Some(0)`, process_eth_deposit must
+        // not load/warm BVM_ETH, must not touch its storage, and must not emit a zero-value
+        // Mint/Transfer log. Without the zero-filter this would warm BVM_ETH and emit a
+        // zero-value log, diverging from op-geth.
+        let caller = Address::from([0x66; 20]);
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = TxKind::Call(caller);
+                tx.deposit.source_hash = B256::from([6u8; 32]);
+                tx.deposit.eth_value = Some(0);
+                tx.deposit.eth_tx_value = Some(0);
+            });
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
+
+        // BVM_ETH account was never loaded (early return), so first access must be cold —
+        // same as the no-value case.
+        let acc = ctx
+            .journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load BVM_ETH");
+        assert!(
+            acc.is_cold,
+            "BVM_ETH must stay cold when eth_value/eth_tx_value are Some(0) (treated as None)"
+        );
+    }
+
+    #[test]
     fn process_eth_deposit_state_changes_persist_after_cold_reset() {
         // mark_address_cold must NOT undo the balance/totalSupply state changes.
         // Only the warm/cold flags should be reset.
@@ -948,6 +990,348 @@ mod tests {
         );
     }
 
+    #[derive(Debug, Serialize, Deserialize)]
+    struct BvmEthDepositTestCase {
+        block_number: u64,
+        tx_hash: String,
+        from: String,
+        to: String,
+        source_hash: String,
+        eth_value: String,
+        eth_tx_value: String,
+        gas_limit: u64,
+        tx_input: String,
+        expected_gas_used: u64,
+        expected_logs: Vec<ExpectedLog>,
+        /// Whether the deposit is expected to succeed (status=1). Defaults to `true` so the
+        /// existing successful-deposit fixtures need no change. A FAILED Mantle deposit
+        /// (status=0) still persists its BVM_ETH mint (and any successful transfer) logs
+        /// into the receipt — matching op-geth — surfaced via `ExecutionResult::Halt`'s logs.
+        #[serde(default = "default_expected_status")]
+        expected_status: bool,
+    }
+
+    fn default_expected_status() -> bool {
+        true
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct ExpectedLog {
+        address: String,
+        topics: Vec<String>,
+        data: String,
+    }
+
+    /// Load cache_db data from exported JSON file and build InMemoryDB
+    fn load_cache_db_from_file(fixture_dir: &Path, block_number: u64) -> InMemoryDB {
+        let cache_db_file = fixture_dir.join(format!("block_{}.json", block_number));
+
+        let json_content = fs::read_to_string(&cache_db_file).unwrap_or_else(|e| {
+            panic!(
+                "Failed to read cache_db file from {}: {}",
+                cache_db_file.display(),
+                e
+            )
+        });
+
+        let cache: Cache = serde_json::from_str(&json_content)
+            .unwrap_or_else(|e| panic!("Failed to parse cache_db JSON: {}", e));
+
+        let mut db = InMemoryDB::default();
+
+        // Load contracts into cache (they are indexed by code_hash)
+        // Since InMemoryDB is CacheDB<EmptyDB>, we can access cache directly
+        for (code_hash, bytecode) in &cache.contracts {
+            db.cache.contracts.insert(*code_hash, bytecode.clone());
+        }
+
+        // Load accounts from cache
+        for (address, db_account) in &cache.accounts {
+            let account_info = db_account.info.clone();
+            db.insert_account_info(*address, account_info);
+
+            // Load storage
+            let account = db.load_account(*address).unwrap();
+            for (key, value) in &db_account.storage {
+                account.storage.insert(*key, *value);
+            }
+        }
+
+        db
+    }
+
+    /// Load test case data from JSON file
+    fn load_test_case(fixture_dir: &Path, test_file: &str) -> BvmEthDepositTestCase {
+        let test_case_path = fixture_dir.join(test_file);
+        let json_content = fs::read_to_string(&test_case_path).unwrap_or_else(|e| {
+            panic!(
+                "Failed to read test case from {}: {}",
+                test_case_path.display(),
+                e
+            )
+        });
+
+        serde_json::from_str(&json_content)
+            .unwrap_or_else(|e| panic!("Failed to parse test case JSON: {}", e))
+    }
+
+    /// Run BVM_ETH deposit transaction test
+    fn run_bvm_eth_deposit_test(fixture_dir: &Path, test_case: BvmEthDepositTestCase) {
+        let from = Address::from_str(&test_case.from).unwrap();
+        let to = Address::from_str(&test_case.to).unwrap();
+        let source_hash = B256::from_str(&test_case.source_hash).unwrap();
+        let eth_value =
+            U256::from_str_radix(test_case.eth_value.trim_start_matches("0x"), 16).unwrap();
+        let eth_tx_value =
+            U256::from_str_radix(test_case.eth_tx_value.trim_start_matches("0x"), 16).unwrap();
+        let tx_input = hex::decode(test_case.tx_input.trim_start_matches("0x")).unwrap();
+
+        // Load cache_db data
+        let db = load_cache_db_from_file(fixture_dir, test_case.block_number);
+
+        // Create block_env
+        let block_env = BlockEnv {
+            number: U256::from(test_case.block_number),
+            beneficiary: Address::from_str("0x4200000000000000000000000000000000000011").unwrap(),
+            timestamp: U256::from(1735128000u64),
+            gas_limit: 30_000_000u64,
+            basefee: 1_000_000_000u64,
+            ..Default::default()
+        };
+
+        // Create L1BlockInfo
+        let l1_block_info = L1BlockInfo {
+            l2_block: Some(U256::from(test_case.block_number)),
+            token_ratio: U256::from(3040),
+            l1_base_fee: U256::from(1_000_000_000),
+            l1_fee_overhead: Some(U256::from(188)),
+            l1_base_fee_scalar: U256::from(10000),
+            ..Default::default()
+        };
+
+        // Build deposit transaction parts
+        let deposit = DepositTransactionParts {
+            source_hash,
+            mint: Some(0),
+            is_system_transaction: false,
+            eth_value: Some(eth_value.to::<u128>()),
+            eth_tx_value: Some(eth_tx_value.to::<u128>()),
+        };
+
+        // Build complete OpTransaction
+        let op_tx = OpTransaction {
+            base: TxEnv {
+                caller: from,
+                kind: revm::primitives::TxKind::Call(to),
+                gas_limit: test_case.gas_limit,
+                gas_price: 0,
+                value: U256::ZERO,
+                data: Bytes::from(tx_input),
+                ..Default::default()
+            },
+            enveloped_tx: None,
+            deposit,
+        };
+
+        let ctx = Context::op()
+            .with_db(db)
+            .with_chain(l1_block_info)
+            .with_block(block_env)
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .with_tx(op_tx);
+
+        let mut evm = ctx.build_op();
+        let mut handler = OpHandler::<
+            _,
+            EVMError<_, crate::transaction::error::OpTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
+
+        // handler.run() will internally call validate_against_state_and_deduct_caller
+        // so we should not call it manually here to avoid duplicate process_eth_deposit
+        let result = handler.run(&mut evm).unwrap();
+
+        // Verify the result variant matches the expected status. A failed deposit halts
+        // (status=0) but still carries its BVM_ETH logs; a successful deposit returns
+        // Success.
+        assert_eq!(
+            result.is_success(),
+            test_case.expected_status,
+            "status mismatch: expected_status={}, got result={:?}",
+            test_case.expected_status,
+            result
+        );
+        match (&result, test_case.expected_status) {
+            (ExecutionResult::Success { .. }, true) => {}
+            (ExecutionResult::Halt { .. }, false) => {}
+            (other, exp) => panic!(
+                "unexpected result variant for expected_status={}: {:?}",
+                exp, other
+            ),
+        }
+
+        // 1. Verify gas used (most important check - do this first)
+        let actual_gas_used = result.tx_gas_used();
+        assert_eq!(
+            actual_gas_used, test_case.expected_gas_used,
+            "Gas used mismatch! Expected: {}, Actual: {}",
+            test_case.expected_gas_used, actual_gas_used
+        );
+
+        // 2. Verify logs. ExecutionResult::logs() returns the persisted logs for a failed
+        // deposit's Halt too, so this covers both status=1 and status=0 fixtures.
+        let logs = result.logs();
+        verify_logs(logs, &test_case.expected_logs);
+    }
+
+    /// Verify that expected logs exist in actual logs
+    fn verify_logs(logs: &[revm::primitives::Log], expected: &[ExpectedLog]) {
+        // First verify that the number of logs matches
+        assert_eq!(
+            logs.len(),
+            expected.len(),
+            "Log count mismatch. Expected: {}, Actual: {}",
+            expected.len(),
+            logs.len()
+        );
+
+        // Parse all expected logs first
+        let expected_logs_parsed: Vec<_> = expected
+            .iter()
+            .map(|e| {
+                let address = Address::from_str(&e.address).unwrap();
+                let topics: Vec<B256> = e
+                    .topics
+                    .iter()
+                    .map(|t| B256::from_str(t).unwrap())
+                    .collect();
+                let data = hex::decode(e.data.trim_start_matches("0x")).unwrap();
+                (address, topics, data)
+            })
+            .collect();
+
+        // Track which logs have been matched to avoid duplicate matches
+        let mut matched_indices = HashSet::new();
+
+        for (i, (expected_address, expected_topics, expected_data)) in
+            expected_logs_parsed.iter().enumerate()
+        {
+            // Find matching log by address, all topics, and data
+            let matching_log_idx = logs.iter().enumerate().find(|(idx, log)| {
+                !matched_indices.contains(idx)
+                    && log.address == *expected_address
+                    && log.topics().len() == expected_topics.len()
+                    && log.topics() == expected_topics.as_slice()
+                    && log.data.data.as_ref() == expected_data.as_slice()
+            });
+
+            assert!(
+                matching_log_idx.is_some(),
+                "Expected log {} not found. Address: {:?}, Topics: {:?}, Data: {}",
+                i,
+                expected_address,
+                expected_topics.iter().map(hex::encode).collect::<Vec<_>>(),
+                hex::encode(expected_data)
+            );
+
+            matched_indices.insert(matching_log_idx.unwrap().0);
+        }
+    }
+
+    /// Executes a BVM_ETH deposit test fixture stored at the passed `fixture_path` (tar.gz file)
+    /// and asserts that the execution results match the expected values.
+    async fn run_test_fixture(fixture_path: PathBuf) {
+        // First, untar the fixture
+        let fixture_dir = tempdir().expect("Failed to create temporary directory");
+        let output = tokio::process::Command::new("tar")
+            .arg("-xzf")
+            .arg(fixture_path.as_path())
+            .arg("-C")
+            .arg(fixture_dir.path())
+            .output()
+            .await
+            .expect("Failed to untar fixture");
+
+        if !output.status.success() {
+            panic!(
+                "Failed to untar fixture: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Find all bvm_eth_deposit_*.json files in the fixture directory
+        let test_files: Vec<_> = fs::read_dir(fixture_dir.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.is_file() {
+                    let file_name = path.file_name()?.to_str()?;
+                    if file_name.starts_with("bvm_eth_deposit_") && file_name.ends_with(".json") {
+                        return Some(file_name.to_string());
+                    }
+                }
+                None
+            })
+            .collect();
+
+        assert!(
+            !test_files.is_empty(),
+            "No bvm_eth_deposit_*.json files found in fixture directory: {}",
+            fixture_dir.path().display()
+        );
+
+        // Run test for each test file
+        for test_file in test_files {
+            let test_case = load_test_case(fixture_dir.path(), &test_file);
+            run_bvm_eth_deposit_test(fixture_dir.path(), test_case);
+        }
+    }
+
+    #[rstest]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_bvm_eth_deposit(
+        #[base_dir = "./src/test_data"]
+        #[files("*.tar.gz")]
+        path: PathBuf,
+    ) {
+        run_test_fixture(path).await;
+    }
+
+    /// Real-block execution replay of Mantle Sepolia block 286456's FAILED deposit
+    /// (tx 0xbcdbae6a -> L2StandardBridge, calldata `0xdeadbeef` -> the proxy/impl reverts).
+    /// op-geth keeps the pre-snapshot BVM_ETH `Mint` AND `Transfer` logs on the failed
+    /// receipt (receiptsRoot 0x9f29d9b8…) because the transfer executed before the EVM call
+    /// and a vm error does not rewind it (op-geth's Case B). This exercises the
+    /// `execution_result` revert path, which now surfaces a `FailedDeposit` halt carrying
+    /// both logs and the actual gas (26230). Before the fix op-revm returned
+    /// `ExecutionResult::Revert` and reth/alloy-op-evm dropped the logs, forking the node.
+    ///
+    /// Kept in `src/test_data/failed/` (not the auto-globbed `src/test_data/`) so the
+    /// failed-deposit fixture is run only by this explicitly-named test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_failed_deposit_replay_block_286456() {
+        run_test_fixture(PathBuf::from(
+            "./src/test_data/failed/test_fixture_286456.tar.gz",
+        ))
+        .await;
+    }
+
+    /// Real-block execution replay of Mantle Sepolia block 286432's FAILED deposit
+    /// (tx 0x00637e34 -> L2StandardBridge, 256-byte calldata, gas_used == gas_limit ==
+    /// 30000). op-geth keeps exactly one BVM_ETH `Mint` log: the eth_tx_value transfer
+    /// does not persist here (op-geth's Case A — the transfer's own balance check fails, so
+    /// `RevertToSnapshot` undoes it leaving only the mint). Pairs with
+    /// `test_failed_deposit_replay_block_286456` (Mint + Transfer) to lock both failure
+    /// shapes against op-geth.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_failed_deposit_replay_block_286432() {
+        run_test_fixture(PathBuf::from(
+            "./src/test_data/failed/test_fixture_286432.tar.gz",
+        ))
+        .await;
+    }
+
     // -----------------------------------------------------------------------
     // Additional coverage for JournalColdExt cooling.
     //
@@ -969,9 +1353,7 @@ mod tests {
     /// Inspect cold state without warming the account/slots (which the
     /// journal API would do as a side-effect of load_account/sload).
     fn assert_bvm_eth_and_slots_cold(state: &revm::state::EvmState, expected_cold_slots: &[U256]) {
-        let acc = state
-            .get(&BvmEth::ADDRESS)
-            .expect("BVM_ETH must be loaded");
+        let acc = state.get(&BvmEth::ADDRESS).expect("BVM_ETH must be loaded");
         assert!(
             acc.status.contains(AccountStatus::Cold),
             "BVM_ETH account must be cold"
@@ -1097,7 +1479,8 @@ mod tests {
         );
         let bvm = state.get(&BvmEth::ADDRESS).unwrap();
         assert!(
-            !bvm.storage.contains_key(&BvmEth::get_balance_slot(recipient)),
+            !bvm.storage
+                .contains_key(&BvmEth::get_balance_slot(recipient)),
             "balance[recipient] must not be touched when mint_only=true"
         );
     }
@@ -1121,6 +1504,7 @@ mod tests {
                 nonce: 1,
                 code_hash,
                 code: Some(stop_code),
+                ..Default::default()
             },
         );
         db.insert_account_info(
@@ -1161,7 +1545,7 @@ mod tests {
             EthFrame<EthInterpreter>,
         >::new();
         let result = handler.run(&mut evm).expect("handler.run");
-        let gas_used = result.gas_used();
+        let gas_used = result.tx_gas_used();
 
         // Old heuristic would land near 25820 (intrinsic + calldata + 4500).
         // With fix: just intrinsic + calldata + STOP (0) ≈ 21320 territory.
@@ -1190,6 +1574,7 @@ mod tests {
                 nonce: 1,
                 code_hash,
                 code: Some(stop_code),
+                ..Default::default()
             },
         );
         db.insert_account_info(
@@ -1230,7 +1615,7 @@ mod tests {
             EthFrame<EthInterpreter>,
         >::new();
         let result = handler.run(&mut evm).expect("handler.run");
-        let gas_used = result.gas_used();
+        let gas_used = result.tx_gas_used();
 
         assert!(
             gas_used < 22000,
@@ -1258,6 +1643,7 @@ mod tests {
                 nonce: 1,
                 code_hash,
                 code: Some(sload_code),
+                ..Default::default()
             },
         );
         db.insert_account_info(
@@ -1298,7 +1684,7 @@ mod tests {
             EthFrame<EthInterpreter>,
         >::new();
         let result = handler.run(&mut evm).expect("handler.run");
-        let gas_used = result.gas_used();
+        let gas_used = result.tx_gas_used();
 
         assert!(
             gas_used > 22500,
@@ -1330,6 +1716,7 @@ mod tests {
                 nonce: 1,
                 code_hash,
                 code: Some(revert_code),
+                ..Default::default()
             },
         );
         db.insert_account_info(
@@ -1396,7 +1783,7 @@ mod tests {
 
         // A revert refunds gas: the reported gas is the actual gas used, NOT the
         // gas limit, and must not include the removed 4500 BVM_ETH compensation.
-        let gas_used = result.gas_used();
+        let gas_used = result.tx_gas_used();
         assert!(
             gas_used < 22000,
             "deposit-with-revert must not include 4500 compensation; got gas_used={}",
@@ -1424,6 +1811,7 @@ mod tests {
                 nonce: 1,
                 code_hash,
                 code: Some(revert_code),
+                ..Default::default()
             },
         );
         db.insert_account_info(
@@ -1600,7 +1988,10 @@ mod tests {
                 .storage
                 .get(&supply_slot)
                 .unwrap();
-            assert!(slot.is_cold, "supply slot must be cold after process_eth_deposit");
+            assert!(
+                slot.is_cold,
+                "supply slot must be cold after process_eth_deposit"
+            );
         }
 
         // Inner frame: checkpoint, sload (warms), then revert.
@@ -1765,6 +2156,7 @@ mod tests {
                 nonce: 1,
                 code_hash: outer_hash,
                 code: Some(outer_bc),
+                ..Default::default()
             },
         );
         db.insert_account_info(
@@ -1774,6 +2166,7 @@ mod tests {
                 nonce: 1,
                 code_hash: bvm_hash,
                 code: Some(bvm_stub),
+                ..Default::default()
             },
         );
         db.insert_account_info(
@@ -1814,7 +2207,7 @@ mod tests {
             EthFrame<EthInterpreter>,
         >::new();
         let result = handler.run(&mut evm).expect("handler.run");
-        let gas_used = result.gas_used();
+        let gas_used = result.tx_gas_used();
 
         // Cold CALL (~2600) + cold SLOAD (~2100) must both be paid.
         assert!(
@@ -1828,356 +2221,5 @@ mod tests {
             "nested CALL to BVM_ETH must not include stale 4500 compensation; got gas_used={}",
             gas_used
         );
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    struct BvmEthDepositTestCase {
-        block_number: u64,
-        tx_hash: String,
-        from: String,
-        to: String,
-        source_hash: String,
-        eth_value: String,
-        eth_tx_value: String,
-        gas_limit: u64,
-        tx_input: String,
-        expected_gas_used: u64,
-        expected_logs: Vec<ExpectedLog>,
-        /// Whether the deposit is expected to succeed (status=1). Defaults to
-        /// `true` so the existing successful-deposit fixtures need no change.
-        /// A FAILED Mantle deposit (status=0) still persists its BVM_ETH
-        /// mint (and any successful transfer) logs into the receipt — matching
-        /// op-geth — surfaced via `ExecutionResult::Halt`'s logs.
-        #[serde(default = "default_expected_status")]
-        expected_status: bool,
-    }
-
-    fn default_expected_status() -> bool {
-        true
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    struct ExpectedLog {
-        address: String,
-        topics: Vec<String>,
-        data: String,
-    }
-
-    /// Load cache_db data from exported JSON file and build InMemoryDB
-    fn load_cache_db_from_file(fixture_dir: &Path, block_number: u64) -> InMemoryDB {
-        let cache_db_file = fixture_dir.join(format!("block_{}.json", block_number));
-
-        let json_content = fs::read_to_string(&cache_db_file).unwrap_or_else(|e| {
-            panic!(
-                "Failed to read cache_db file from {}: {}",
-                cache_db_file.display(),
-                e
-            )
-        });
-
-        let cache: Cache = serde_json::from_str(&json_content)
-            .unwrap_or_else(|e| panic!("Failed to parse cache_db JSON: {}", e));
-
-        let mut db = InMemoryDB::default();
-
-        // Load contracts into cache (they are indexed by code_hash)
-        // Since InMemoryDB is CacheDB<EmptyDB>, we can access cache directly
-        for (code_hash, bytecode) in &cache.contracts {
-            db.cache.contracts.insert(*code_hash, bytecode.clone());
-        }
-
-        // Load accounts from cache
-        for (address, db_account) in &cache.accounts {
-            let account_info = db_account.info.clone();
-            db.insert_account_info(*address, account_info);
-
-            // Load storage
-            let account = db.load_account(*address).unwrap();
-            for (key, value) in &db_account.storage {
-                account.storage.insert(*key, *value);
-            }
-        }
-
-        db
-    }
-
-    /// Load test case data from JSON file
-    fn load_test_case(fixture_dir: &Path, test_file: &str) -> BvmEthDepositTestCase {
-        let test_case_path = fixture_dir.join(test_file);
-        let json_content = fs::read_to_string(&test_case_path).unwrap_or_else(|e| {
-            panic!(
-                "Failed to read test case from {}: {}",
-                test_case_path.display(),
-                e
-            )
-        });
-
-        serde_json::from_str(&json_content)
-            .unwrap_or_else(|e| panic!("Failed to parse test case JSON: {}", e))
-    }
-
-    /// Run BVM_ETH deposit transaction test
-    fn run_bvm_eth_deposit_test(fixture_dir: &Path, test_case: BvmEthDepositTestCase) {
-        let from = Address::from_str(&test_case.from).unwrap();
-        let to = Address::from_str(&test_case.to).unwrap();
-        let source_hash = B256::from_str(&test_case.source_hash).unwrap();
-        let eth_value =
-            U256::from_str_radix(test_case.eth_value.trim_start_matches("0x"), 16).unwrap();
-        let eth_tx_value =
-            U256::from_str_radix(test_case.eth_tx_value.trim_start_matches("0x"), 16).unwrap();
-        let tx_input = hex::decode(test_case.tx_input.trim_start_matches("0x")).unwrap();
-
-        // Load cache_db data
-        let db = load_cache_db_from_file(fixture_dir, test_case.block_number);
-
-        // Create block_env
-        let block_env = BlockEnv {
-            number: U256::from(test_case.block_number),
-            beneficiary: Address::from_str("0x4200000000000000000000000000000000000011").unwrap(),
-            timestamp: U256::from(1735128000u64),
-            gas_limit: 30_000_000u64,
-            basefee: 1_000_000_000u64,
-            ..Default::default()
-        };
-
-        // Create L1BlockInfo
-        let l1_block_info = L1BlockInfo {
-            l2_block: Some(U256::from(test_case.block_number)),
-            token_ratio: U256::from(3040),
-            l1_base_fee: U256::from(1_000_000_000),
-            l1_fee_overhead: Some(U256::from(188)),
-            l1_base_fee_scalar: U256::from(10000),
-            ..Default::default()
-        };
-
-        // Build deposit transaction parts
-        let deposit = DepositTransactionParts {
-            source_hash,
-            mint: Some(0),
-            is_system_transaction: false,
-            eth_value: Some(eth_value.to::<u128>()),
-            eth_tx_value: Some(eth_tx_value.to::<u128>()),
-        };
-
-        // Build complete OpTransaction
-        let op_tx = OpTransaction {
-            base: TxEnv {
-                caller: from,
-                kind: revm::primitives::TxKind::Call(to),
-                gas_limit: test_case.gas_limit,
-                gas_price: 0,
-                value: U256::ZERO,
-                data: Bytes::from(tx_input),
-                ..Default::default()
-            },
-            enveloped_tx: None,
-            deposit,
-        };
-
-        let ctx = Context::op()
-            .with_db(db)
-            .with_chain(l1_block_info)
-            .with_block(block_env)
-            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
-            .with_tx(op_tx);
-
-        let mut evm = ctx.build_op();
-        let mut handler = OpHandler::<
-            _,
-            EVMError<_, crate::transaction::error::OpTransactionError>,
-            EthFrame<EthInterpreter>,
-        >::new();
-
-        // handler.run() will internally call validate_against_state_and_deduct_caller
-        // so we should not call it manually here to avoid duplicate process_eth_deposit
-        let result = handler.run(&mut evm).unwrap();
-
-        // Verify the result variant matches the expected status. A failed
-        // deposit halts (status=0) but still carries its BVM_ETH logs; a
-        // successful deposit returns Success.
-        assert_eq!(
-            result.is_success(),
-            test_case.expected_status,
-            "status mismatch: expected_status={}, got result={:?}",
-            test_case.expected_status,
-            result
-        );
-        match (&result, test_case.expected_status) {
-            (ExecutionResult::Success { .. }, true) => {}
-            (ExecutionResult::Halt { .. }, false) => {}
-            (other, exp) => panic!(
-                "unexpected result variant for expected_status={}: {:?}",
-                exp, other
-            ),
-        }
-
-        // Logs survive both a successful execution and a failed deposit's halt
-        // (ExecutionResult::logs() returns the persisted logs for Halt too).
-        let logs = result.logs();
-
-        // 1. Verify gas used (most important check - do this first)
-        let actual_gas_used = result.gas_used();
-        assert_eq!(
-            actual_gas_used, test_case.expected_gas_used,
-            "Gas used mismatch! Expected: {}, Actual: {}",
-            test_case.expected_gas_used, actual_gas_used
-        );
-
-        // 2. Verify logs
-        verify_logs(logs, &test_case.expected_logs);
-    }
-
-    /// Verify that expected logs exist in actual logs
-    fn verify_logs(logs: &[revm::primitives::Log], expected: &[ExpectedLog]) {
-        // First verify that the number of logs matches
-        assert_eq!(
-            logs.len(),
-            expected.len(),
-            "Log count mismatch. Expected: {}, Actual: {}",
-            expected.len(),
-            logs.len()
-        );
-
-        // Parse all expected logs first
-        let expected_logs_parsed: Vec<_> = expected
-            .iter()
-            .map(|e| {
-                let address = Address::from_str(&e.address).unwrap();
-                let topics: Vec<B256> = e
-                    .topics
-                    .iter()
-                    .map(|t| B256::from_str(t).unwrap())
-                    .collect();
-                let data = hex::decode(e.data.trim_start_matches("0x")).unwrap();
-                (address, topics, data)
-            })
-            .collect();
-
-        // Track which logs have been matched to avoid duplicate matches
-        let mut matched_indices = HashSet::new();
-
-        for (i, (expected_address, expected_topics, expected_data)) in
-            expected_logs_parsed.iter().enumerate()
-        {
-            // Find matching log by address, all topics, and data
-            let matching_log_idx = logs.iter().enumerate().find(|(idx, log)| {
-                !matched_indices.contains(idx)
-                    && log.address == *expected_address
-                    && log.topics().len() == expected_topics.len()
-                    && log.topics() == expected_topics.as_slice()
-                    && log.data.data.as_ref() == expected_data.as_slice()
-            });
-
-            assert!(
-                matching_log_idx.is_some(),
-                "Expected log {} not found. Address: {:?}, Topics: {:?}, Data: {}",
-                i,
-                expected_address,
-                expected_topics.iter().map(hex::encode).collect::<Vec<_>>(),
-                hex::encode(expected_data)
-            );
-
-            matched_indices.insert(matching_log_idx.unwrap().0);
-        }
-    }
-
-    /// Executes a BVM_ETH deposit test fixture stored at the passed `fixture_path` (tar.gz file)
-    /// and asserts that the execution results match the expected values.
-    async fn run_test_fixture(fixture_path: PathBuf) {
-        // First, untar the fixture
-        let fixture_dir = tempdir().expect("Failed to create temporary directory");
-        let output = tokio::process::Command::new("tar")
-            .arg("-xzf")
-            .arg(fixture_path.as_path())
-            .arg("-C")
-            .arg(fixture_dir.path())
-            .output()
-            .await
-            .expect("Failed to untar fixture");
-
-        if !output.status.success() {
-            panic!(
-                "Failed to untar fixture: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        // Find all bvm_eth_deposit_*.json files in the fixture directory
-        let test_files: Vec<_> = fs::read_dir(fixture_dir.path())
-            .unwrap()
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.is_file() {
-                    let file_name = path.file_name()?.to_str()?;
-                    if file_name.starts_with("bvm_eth_deposit_") && file_name.ends_with(".json") {
-                        return Some(file_name.to_string());
-                    }
-                }
-                None
-            })
-            .collect();
-
-        assert!(
-            !test_files.is_empty(),
-            "No bvm_eth_deposit_*.json files found in fixture directory: {}",
-            fixture_dir.path().display()
-        );
-
-        // Run test for each test file
-        for test_file in test_files {
-            let test_case = load_test_case(fixture_dir.path(), &test_file);
-            run_bvm_eth_deposit_test(fixture_dir.path(), test_case);
-        }
-    }
-
-    #[rstest]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_bvm_eth_deposit(
-        #[base_dir = "./src/test_data"]
-        #[files("*.tar.gz")]
-        path: PathBuf,
-    ) {
-        run_test_fixture(path).await;
-    }
-
-    /// Real-block execution replay of Mantle Sepolia block 286456's FAILED
-    /// deposit (tx 0xbcdbae6a -> L2StandardBridge, calldata `0xdeadbeef` -> the
-    /// proxy/impl reverts). op-geth keeps the pre-snapshot BVM_ETH `Mint` AND
-    /// `Transfer` logs on the failed receipt (receiptsRoot 0x9f29d9b8…).
-    ///
-    /// Regression guard for the deposit-REVERT log-persistence fix: this deposit
-    /// cleanly REVERTS (it does not halt), so it exercises the
-    /// `execution_result` revert path — which now re-applies the BVM_ETH mint +
-    /// transfer and reports a `FailedDeposit` carrying both logs (preserving the
-    /// actual gas, 26230). Before the fix op-revm returned `ExecutionResult::Revert`
-    /// with no logs and the node forked.
-    ///
-    /// Kept in `src/test_data/failed/` (not the auto-globbed `src/test_data/`) so
-    /// the failed-deposit fixture is run only by this explicitly-named test.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_failed_deposit_replay_block_286456() {
-        run_test_fixture(PathBuf::from(
-            "./src/test_data/failed/test_fixture_286456.tar.gz",
-        ))
-        .await;
-    }
-
-    /// Real-block execution replay of Mantle Sepolia block 286432's FAILED
-    /// deposit (tx 0x00637e34 -> L2StandardBridge, 256-byte calldata -> out-of-gas
-    /// HALT: gas_used == gas_limit == 30000). This is the HALT class (vs 286456's
-    /// REVERT class): op-geth keeps only the BVM_ETH `Mint` log (1 log) — the
-    /// transfer does not persist on a halt.
-    ///
-    /// Regression guard for the HALT path (catch_error): a failed deposit that
-    /// halts must surface exactly the Mint log into the receipt. Pairs with
-    /// test_failed_deposit_replay_block_286456 (REVERT -> Mint+Transfer) to lock
-    /// both failure paths against op-geth.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_failed_deposit_replay_block_286432() {
-        run_test_fixture(PathBuf::from(
-            "./src/test_data/failed/test_fixture_286432.tar.gz",
-        ))
-        .await;
     }
 }

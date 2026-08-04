@@ -1,12 +1,13 @@
 use auto_impl::auto_impl;
 use interpreter::{
-    instructions::{instruction_table, InstructionTable},
+    instructions::{instruction_table_gas_changes_spec, InstructionTable},
     Host, Instruction, InterpreterTypes,
 };
+use primitives::hardfork::SpecId;
 use std::boxed::Box;
 
 /// Stores instructions for EVM.
-#[auto_impl(&, Arc, Rc)]
+#[auto_impl(&mut, Box)]
 pub trait InstructionProvider {
     /// Context type.
     type Context;
@@ -22,6 +23,8 @@ pub trait InstructionProvider {
 pub struct EthInstructions<WIRE: InterpreterTypes, HOST: ?Sized> {
     /// Table containing instruction implementations indexed by opcode.
     pub instruction_table: Box<InstructionTable<WIRE, HOST>>,
+    /// Spec that is used to set gas costs for instructions.
+    pub spec: SpecId,
 }
 
 impl<WIRE, HOST: Host + ?Sized> Clone for EthInstructions<WIRE, HOST>
@@ -31,6 +34,7 @@ where
     fn clone(&self) -> Self {
         Self {
             instruction_table: self.instruction_table.clone(),
+            spec: self.spec,
         }
     }
 }
@@ -41,15 +45,23 @@ where
     HOST: Host,
 {
     /// Returns `EthInstructions` with mainnet spec.
+    #[deprecated(since = "0.2.0", note = "use new_mainnet_with_spec instead")]
     pub fn new_mainnet() -> Self {
-        Self::new(instruction_table::<WIRE, HOST>())
+        let spec = SpecId::default();
+        Self::new(instruction_table_gas_changes_spec(spec), spec)
+    }
+
+    /// Returns `EthInstructions` with mainnet spec.
+    pub fn new_mainnet_with_spec(spec: SpecId) -> Self {
+        Self::new(instruction_table_gas_changes_spec(spec), spec)
     }
 
     /// Returns a new instance of `EthInstructions` with custom instruction table.
     #[inline]
-    pub fn new(base_table: InstructionTable<WIRE, HOST>) -> Self {
+    pub fn new(base_table: InstructionTable<WIRE, HOST>, spec: SpecId) -> Self {
         Self {
             instruction_table: Box::new(base_table),
+            spec,
         }
     }
 
@@ -70,15 +82,5 @@ where
 
     fn instruction_table(&self) -> &InstructionTable<Self::InterpreterTypes, Self::Context> {
         &self.instruction_table
-    }
-}
-
-impl<WIRE, HOST> Default for EthInstructions<WIRE, HOST>
-where
-    WIRE: InterpreterTypes,
-    HOST: Host,
-{
-    fn default() -> Self {
-        Self::new_mainnet()
     }
 }

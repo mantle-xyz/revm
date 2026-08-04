@@ -4,8 +4,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 use alloy_consensus::{
-    transaction::SignerRecoverable, Eip658Value, Receipt, TxEip1559, TxEip2930, TxEip7702,
-    TxLegacy,
+    transaction::SignerRecoverable, Eip658Value, Receipt, TxEip1559, TxEip2930, TxEip7702, TxLegacy,
 };
 use alloy_eips::{BlockId, Decodable2718, Typed2718};
 use alloy_primitives::{Address, Bytes, B256, U256};
@@ -29,9 +28,9 @@ use revm::{
     Context, ExecuteCommitEvm,
 };
 use serde_json::Value;
-use std::time::Instant;
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -68,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "false".to_string())
         .to_lowercase()
         == "true";
-    
+
     if export_cache_db {
         println!("⚠️  EXPORT_CACHE_DB is enabled - cache_db will be exported");
     }
@@ -76,8 +75,15 @@ async fn main() -> anyhow::Result<()> {
     let mut mismatched: Vec<u64> = Vec::new();
     for i in start_block..=end_block {
         println!("Processing block number: {i}");
-        let matched =
-            process_block(i, chain_id, spec, state_verify, export_cache_db, client.clone()).await?;
+        let matched = process_block(
+            i,
+            chain_id,
+            spec,
+            state_verify,
+            export_cache_db,
+            client.clone(),
+        )
+        .await?;
         if !matched {
             mismatched.push(i);
         }
@@ -87,9 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let total = end_block - start_block + 1;
     println!("\n==== REPLAY SUMMARY [{start_block}..={end_block}] ({total} blocks) ====");
     if mismatched.is_empty() {
-        println!(
-            "ALL BLOCKS MATCH ✅ (every receipt's status/cumGas/logs/bloom == on-chain)"
-        );
+        println!("ALL BLOCKS MATCH ✅ (every receipt's status/gas/cumGas/logs/bloom == on-chain)");
     } else {
         println!(
             "MISMATCH ❌ at {} / {total} block(s): {:?}",
@@ -184,15 +188,14 @@ async fn process_block(
         }
 
         let exec = res.unwrap();
-        let actual_gas_used = exec.gas_used();
+        let actual_gas_used = exec.tx_gas_used();
         let is_success = exec.is_success();
 
         // Extract logs exactly as op-reth's receipt builder does: `result.into_logs()`.
-        // On this revm line a failed deposit's persisted BVM_ETH mint/transfer logs
-        // live in `ExecutionResult::Halt { logs }`, so `into_logs()` surfaces them
-        // (Success returns its logs; Revert none). Using the real `into_logs()` path
-        // means this proxy cannot bless a fix whose logs never reach the receipt
-        // builder (e.g. logs stashed only in `OpHaltReason`).
+        // A failed deposit's persisted BVM_ETH mint/transfer logs live in
+        // `ExecutionResult::Halt { logs }`, so `into_logs()` surfaces them. Using the
+        // real `into_logs()` path means this proxy cannot bless a fix whose logs never
+        // reach the receipt builder (e.g. logs stashed only in `OpHaltReason`).
         let receipt_logs: Vec<_> = exec.into_logs();
 
         cumulative_gas_used += actual_gas_used;
@@ -215,36 +218,89 @@ async fn process_block(
         let oc_logs = oc["logs"].as_array().map(|a| a.len()).unwrap_or(0);
         let oc_bloom = oc["logsBloom"].as_str().unwrap_or("").to_string();
         let oc_status = u64::from_str_radix(
-            oc["status"].as_str().unwrap_or("0x0").trim_start_matches("0x"),
+            oc["status"]
+                .as_str()
+                .unwrap_or("0x0")
+                .trim_start_matches("0x"),
             16,
         )
         .unwrap_or(0);
         let oc_cum = u64::from_str_radix(
-            oc["cumulativeGasUsed"].as_str().unwrap_or("0x0").trim_start_matches("0x"),
+            oc["cumulativeGasUsed"]
+                .as_str()
+                .unwrap_or("0x0")
+                .trim_start_matches("0x"),
+            16,
+        )
+        .unwrap_or(0);
+        // Per-tx gas, kept from the pre-merge gas check so a single diverging tx is
+        // visible even when the cumulative total happens to line up.
+        let oc_gas = u64::from_str_radix(
+            oc["gasUsed"]
+                .as_str()
+                .unwrap_or("0x0")
+                .trim_start_matches("0x"),
             16,
         )
         .unwrap_or(0);
 
         let status_ok = (is_success as u64) == oc_status;
+        let gas_ok = actual_gas_used == oc_gas;
         let cum_ok = cumulative_gas_used == oc_cum;
         let logs_ok = receipt_logs.len() == oc_logs;
         let bloom_ok = local_bloom_hex.eq_ignore_ascii_case(&oc_bloom);
-        let receipt_ok = status_ok && cum_ok && logs_ok && bloom_ok;
+        let receipt_ok = status_ok && gas_ok && cum_ok && logs_ok && bloom_ok;
         all_receipts_match &= receipt_ok;
 
         println!("RECEIPT_CHECK tx={tx_hash} is_deposit={is_deposit}");
-        println!("  status  local={} onchain={} {}", is_success as u64, oc_status, if status_ok { "✅" } else { "❌" });
-        println!("  cumGas  local={} onchain={} {}", cumulative_gas_used, oc_cum, if cum_ok { "✅" } else { "❌" });
-        println!("  logs    local={} onchain={} {}", receipt_logs.len(), oc_logs, if logs_ok { "✅" } else { "❌" });
-        println!("  bloom   match={} {}", bloom_ok, if bloom_ok { "✅" } else { "❌" });
+        println!(
+            "  status  local={} onchain={} {}",
+            is_success as u64,
+            oc_status,
+            if status_ok { "✅" } else { "❌" }
+        );
+        println!(
+            "  gas     local={} onchain={} {}",
+            actual_gas_used,
+            oc_gas,
+            if gas_ok { "✅" } else { "❌" }
+        );
+        println!(
+            "  cumGas  local={} onchain={} {}",
+            cumulative_gas_used,
+            oc_cum,
+            if cum_ok { "✅" } else { "❌" }
+        );
+        println!(
+            "  logs    local={} onchain={} {}",
+            receipt_logs.len(),
+            oc_logs,
+            if logs_ok { "✅" } else { "❌" }
+        );
+        println!(
+            "  bloom   match={} {}",
+            bloom_ok,
+            if bloom_ok { "✅" } else { "❌" }
+        );
         println!("    local_bloom={local_bloom_hex}");
         println!("    chain_bloom={oc_bloom}");
-        println!("  --- receipt {}", if receipt_ok { "MATCH✅" } else { "MISMATCH❌" });
+        println!(
+            "  --- receipt {}",
+            if receipt_ok {
+                "MATCH✅"
+            } else {
+                "MISMATCH❌"
+            }
+        );
     }
 
     println!(
         "==== BLOCK {block_number} ALL RECEIPTS {} ====",
-        if all_receipts_match { "MATCH ✅ (receiptsRoot will equal on-chain)" } else { "MISMATCH ❌" }
+        if all_receipts_match {
+            "MATCH ✅ (receiptsRoot will equal on-chain)"
+        } else {
+            "MISMATCH ❌"
+        }
     );
 
     // Verify account states using eth_getProof if enabled
@@ -274,7 +330,13 @@ async fn process_block(
 
 /// Export cache_db data to JSON file
 async fn export_cache_db_data<P: alloy_provider::Provider<op_alloy_network::Optimism> + Clone>(
-    state: &revm::database::State<revm::database::CacheDB<revm::database_interface::WrapDatabaseAsync<revm::database::AlloyDB<op_alloy_network::Optimism, P>>>>,
+    state: &revm::database::State<
+        revm::database::CacheDB<
+            revm::database_interface::WrapDatabaseAsync<
+                revm::database::AlloyDB<op_alloy_network::Optimism, P>,
+            >,
+        >,
+    >,
     block_number: u64,
 ) -> anyhow::Result<()> {
     // Create output directory if it doesn't exist
@@ -287,13 +349,13 @@ async fn export_cache_db_data<P: alloy_provider::Provider<op_alloy_network::Opti
     // Cache already supports serde serialization when serde feature is enabled
     // Serialize the cache to JSON
     let json = serde_json::to_string_pretty(&state.database.cache)?;
-    
+
     // Write to file
     let file_path = output_dir.join(format!("block_{}.json", block_number));
     fs::write(&file_path, json)?;
-    
+
     println!("Exported cache_db data to: {}", file_path.display());
-    
+
     Ok(())
 }
 
@@ -464,24 +526,34 @@ async fn verify_storage_with_proof<DB>(
                     // Verify basic account information
                     if proof.balance != account.info.balance {
                         balance_mismatches += 1;
-                        println!("  ❌ Balance mismatch for {}: remote={}, local={}", 
-                            address, proof.balance, account.info.balance);
+                        println!(
+                            "  ❌ Balance mismatch for {}: remote={}, local={}",
+                            address, proof.balance, account.info.balance
+                        );
                     }
                     if proof.nonce != account.info.nonce {
                         nonce_mismatches += 1;
-                        println!("  ❌ Nonce mismatch for {}: remote={}, local={}", 
-                            address, proof.nonce, account.info.nonce);
+                        println!(
+                            "  ❌ Nonce mismatch for {}: remote={}, local={}",
+                            address, proof.nonce, account.info.nonce
+                        );
                     }
-                    
+
                     // Compare code_hash with compatibility for empty code representations
                     // Both KECCAK_EMPTY and zero hash represent "no code"
-                    let remote_is_empty = proof.code_hash == KECCAK_EMPTY || proof.code_hash == B256::ZERO;
-                    let local_is_empty = account.info.code_hash == KECCAK_EMPTY || account.info.code_hash == B256::ZERO;
-                    
-                    if !(remote_is_empty && local_is_empty) && proof.code_hash != account.info.code_hash {
+                    let remote_is_empty =
+                        proof.code_hash == KECCAK_EMPTY || proof.code_hash == B256::ZERO;
+                    let local_is_empty = account.info.code_hash == KECCAK_EMPTY
+                        || account.info.code_hash == B256::ZERO;
+
+                    if !(remote_is_empty && local_is_empty)
+                        && proof.code_hash != account.info.code_hash
+                    {
                         code_hash_mismatches += 1;
-                        println!("  ❌ Code hash mismatch for {}: remote={}, local={}", 
-                            address, proof.code_hash, account.info.code_hash);
+                        println!(
+                            "  ❌ Code hash mismatch for {}: remote={}, local={}",
+                            address, proof.code_hash, account.info.code_hash
+                        );
                     }
 
                     // Verify each storage slot (if any)
@@ -514,7 +586,10 @@ async fn verify_storage_with_proof<DB>(
     }
 
     // Print concise verification result (similar to gas used verification)
-    let all_match = total_failed == 0 && balance_mismatches == 0 && nonce_mismatches == 0 && code_hash_mismatches == 0;
+    let all_match = total_failed == 0
+        && balance_mismatches == 0
+        && nonce_mismatches == 0
+        && code_hash_mismatches == 0;
 
     if all_match {
         println!("--- State verification: passed✅");

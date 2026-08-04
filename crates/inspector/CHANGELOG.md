@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [19.0.0](https://github.com/bluealloy/revm/compare/revm-inspector-v18.0.0...revm-inspector-v19.0.0) - 2026-04-17
+
+### Other
+
+- pass reservoir into `first_frame_input` ([#3578](https://github.com/bluealloy/revm/pull/3578))
+
+## [18.0.0](https://github.com/bluealloy/revm/compare/revm-inspector-v17.0.0...revm-inspector-v18.0.0) - 2026-04-10
+
+### Added
+
+- add EIP-8037 / TIP-1016 state gas support ([#3406](https://github.com/bluealloy/revm/pull/3406))
+- *(inspector)* add `frame_start` and `frame_end` to `Inspector` trait ([#3518](https://github.com/bluealloy/revm/pull/3518))
+- add crate-level re-exports for all revm-* dependencies ([#3507](https://github.com/bluealloy/revm/pull/3507))
+
+### Fixed
+
+- ensure both inspectors receive paired call/create events in tuple impl ([#3473](https://github.com/bluealloy/revm/pull/3473))
+
+### Other
+
+- move EIP-8037 gas cap validation into validate_initial_tx_gas ([#3552](https://github.com/bluealloy/revm/pull/3552))
+- *(inspector)* remove redundant log clone in precompile path ([#3520](https://github.com/bluealloy/revm/pull/3520))
+
+## [17.0.0](https://github.com/bluealloy/revm/compare/revm-inspector-v16.0.0...revm-inspector-v17.0.0) - 2026-03-04
+
+### Other
+
+- bump revm-database-interface to v10.0.0
+
+## [16.0.0](https://github.com/bluealloy/revm/compare/revm-inspector-v15.0.0...revm-inspector-v16.0.0) - 2026-03-02
+
+### Other
+
+- [**breaking**] add ResultGas struct to ExecutionResult ([#3413](https://github.com/bluealloy/revm/pull/3413))
+- remove GPL mention and update gmp feature comments ([#3383](https://github.com/bluealloy/revm/pull/3383))
+- update default hardfork to Osaka (Ethereum) and Jovian (Optimism) ([#3326](https://github.com/bluealloy/revm/pull/3326))
+
+## [15.0.0](https://github.com/bluealloy/revm/compare/revm-inspector-v14.1.0...revm-inspector-v15.0.0) - 2026-01-15
+
+### Added
+
+- *(inspector)* make TestInspector public for testing EVM variants ([#3282](https://github.com/bluealloy/revm/pull/3282))
+- move GasParams to Cfg ([#3229](https://github.com/bluealloy/revm/pull/3229))
+- BAL EIP-7928 ([#3070](https://github.com/bluealloy/revm/pull/3070))
+- Gas params ([#3132](https://github.com/bluealloy/revm/pull/3132))
+
+### Other
+
+- fix typos, grammar errors, and improve documentation consistency ([#3294](https://github.com/bluealloy/revm/pull/3294))
+- happy new year, 2026 licence ([#3272](https://github.com/bluealloy/revm/pull/3272))
+- replace HashMap with fixed-size array for opcode counts in CountInspector ([#3203](https://github.com/bluealloy/revm/pull/3203))
+- *(fmt)* merge all imports ([#3184](https://github.com/bluealloy/revm/pull/3184))
+
+## [14.1.0](https://github.com/bluealloy/revm/compare/revm-inspector-v14.0.0...revm-inspector-v14.1.0) - 2025-11-14
+
+### Other
+
+- call Inspector::log_full ([#3164](https://github.com/bluealloy/revm/pull/3164))
+
+## [14.0.0](https://github.com/bluealloy/revm/compare/revm-inspector-v12.0.2...revm-inspector-v14.0.0) - 2025-11-10
+
+### Added
+
+- process precompile logs to inspector ([#3148](https://github.com/bluealloy/revm/pull/3148))
+
 ## [12.0.2](https://github.com/bluealloy/revm/compare/revm-inspector-v12.0.1...revm-inspector-v12.0.2) - 2025-11-10
 
 ### Other
