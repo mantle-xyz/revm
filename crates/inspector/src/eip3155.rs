@@ -161,13 +161,13 @@ impl TracerEip3155 {
     }
 
     /// Don't include a summary at the end of the trace
-    pub fn without_summary(mut self) -> Self {
+    pub const fn without_summary(mut self) -> Self {
         self.print_summary = false;
         self
     }
 
     /// Include a memory field for each step. This significantly increases processing time and output size.
-    pub fn with_memory(mut self) -> Self {
+    pub const fn with_memory(mut self) -> Self {
         self.include_memory = true;
         self
     }
@@ -256,7 +256,10 @@ where
         self.mem_size = interp.memory.size();
         self.gas = interp.gas.remaining();
         self.reservoir = interp.gas.reservoir();
-        self.state_gas = interp.gas.state_gas_spent();
+        // Clamp to 0: EIP-8037 allows state_gas_spent to briefly go negative
+        // within a child frame (0→x→0 restoration); the tracer exposes it as a
+        // u64 counter.
+        self.state_gas = interp.gas.state_gas_spent().max(0) as u64;
         self.refunded = interp.gas.refunded();
     }
 
