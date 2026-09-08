@@ -228,12 +228,13 @@ impl Gas {
         self.tracker.set_remaining(remaining);
     }
 
-    /// `[MANTLE]` Gas::set_limit - Called by the token_ratio logic in op-revm's handler.
-    /// op-revm lives in `mantle-v2/rust/op-revm/` (upstream moved it out of this
-    /// repo after v107); this accessor must stay `pub` for that out-of-tree caller.
     /// Set the limit.
+    ///
+    /// `[MANTLE]` Kept `pub` for the token_ratio logic in op-revm's handler. op-revm lives
+    /// in `mantle-v2/rust/op-revm/` — upstream moved it out of this repo after v107, so the
+    /// caller is out of tree and this accessor cannot be narrowed to `pub(crate)`.
     #[inline]
-    pub fn set_limit(&mut self, limit: u64) {
+    pub const fn set_limit(&mut self, limit: u64) {
         self.tracker.set_limit(limit);
     }
 
