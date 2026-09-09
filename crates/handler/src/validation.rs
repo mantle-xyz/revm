@@ -1,10 +1,11 @@
 use context_interface::{
+    cfg::GasParams,
     result::{InvalidHeader, InvalidTransaction},
     transaction::{Transaction, TransactionType},
     Block, Cfg, ContextTr,
 };
 use core::cmp;
-use interpreter::{instructions::calculate_initial_tx_gas_for_tx, InitialAndFloorGas};
+use interpreter::InitialAndFloorGas;
 use primitives::{eip4844, hardfork::SpecId, B256};
 
 /// Validates the execution environment including block and transaction parameters.
@@ -25,7 +26,7 @@ pub fn validate_env<CTX: ContextTr, ERROR: From<InvalidHeader> + From<InvalidTra
 
 /// Validate legacy transaction gas price against basefee.
 #[inline]
-pub fn validate_legacy_gas_price(
+pub const fn validate_legacy_gas_price(
     gas_price: u128,
     base_fee: Option<u128>,
 ) -> Result<(), InvalidTransaction> {
@@ -235,7 +236,10 @@ pub fn validate_tx_env<CTX: ContextTr>(
     Ok(())
 }
 
-/// Validate initial transaction gas.
+/// Validate initial transaction gas using the default [`GasParams`] for the given [`SpecId`].
+///
+/// For custom gas parameters (e.g. configured on the context), use
+/// [`validate_initial_tx_gas_with_gas_params`].
 pub fn validate_initial_tx_gas(
     tx: impl Transaction,
     spec: SpecId,
@@ -243,25 +247,48 @@ pub fn validate_initial_tx_gas(
     is_amsterdam_eip8037_enabled: bool,
     tx_gas_limit_cap: u64,
 ) -> Result<InitialAndFloorGas, InvalidTransaction> {
-    let mut gas = calculate_initial_tx_gas_for_tx(&tx, spec);
+    validate_initial_tx_gas_with_gas_params(
+        tx,
+        spec,
+        &GasParams::new_spec(spec),
+        is_eip7623_disabled,
+        is_amsterdam_eip8037_enabled,
+        tx_gas_limit_cap,
+    )
+}
+
+/// Validate initial transaction gas using the provided [`GasParams`].
+pub fn validate_initial_tx_gas_with_gas_params(
+    tx: impl Transaction,
+    spec: SpecId,
+    gas_params: &GasParams,
+    is_eip7623_disabled: bool,
+    is_amsterdam_eip8037_enabled: bool,
+    tx_gas_limit_cap: u64,
+) -> Result<InitialAndFloorGas, InvalidTransaction> {
+    let mut gas = gas_params.initial_tx_gas_for_tx(&tx);
 
     if is_eip7623_disabled {
-        gas.floor_gas = 0
+        gas.set_floor_gas(0);
+    }
+
+    if !is_amsterdam_eip8037_enabled {
+        gas.set_initial_state_gas(0);
     }
 
     // Additional check to see if limit is big enough to cover initial gas.
-    if gas.initial_total_gas > tx.gas_limit() {
+    if gas.initial_total_gas() > tx.gas_limit() {
         return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
             gas_limit: tx.gas_limit(),
-            initial_gas: gas.initial_total_gas,
+            initial_gas: gas.initial_total_gas(),
         });
     }
 
     // EIP-7623: Increase calldata cost
     // floor gas should be less than gas limit.
-    if spec.is_enabled_in(SpecId::PRAGUE) && gas.floor_gas > tx.gas_limit() {
+    if spec.is_enabled_in(SpecId::PRAGUE) && gas.floor_gas() > tx.gas_limit() {
         return Err(InvalidTransaction::GasFloorMoreThanGasLimit {
-            gas_floor: gas.floor_gas,
+            gas_floor: gas.floor_gas(),
             gas_limit: tx.gas_limit(),
         });
     };
@@ -270,7 +297,7 @@ pub fn validate_initial_tx_gas(
     // Validate that both intrinsic regular gas and floor gas fit within the cap.
     // State gas is excluded — it uses its own reservoir.
     if is_amsterdam_eip8037_enabled && tx.gas_limit() > tx_gas_limit_cap {
-        let min_regular_gas = gas.initial_regular_gas().max(gas.floor_gas);
+        let min_regular_gas = gas.initial_regular_gas().max(gas.floor_gas());
         if min_regular_gas > tx_gas_limit_cap {
             return Err(InvalidTransaction::GasFloorMoreThanGasLimit {
                 gas_floor: min_regular_gas,
@@ -304,6 +331,7 @@ mod tests {
                     c.set_spec_and_mainnet_gas_params(spec_id);
                 }
             })
+            .modify_block_chained(|block| block.gas_limit = 100_000_000)
             .with_db(CacheDB::<EmptyDB>::default());
 
         let mut evm = ctx.build_mainnet();
