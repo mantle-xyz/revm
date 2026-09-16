@@ -1,5 +1,5 @@
 //! Contains Deposit transaction parts.
-use revm::primitives::B256;
+use revm::primitives::{B256, U256};
 
 /// Deposit transaction type.
 pub const DEPOSIT_TRANSACTION_TYPE: u8 = 0x7E;
@@ -15,9 +15,16 @@ pub struct DepositTransactionParts {
     /// Whether the transaction is a system transaction.
     pub is_system_transaction: bool,
     /// EthValue means L2 BVM_ETH mint tag, nil means that there is no need to mint BVM_ETH.
-    pub eth_value: Option<u128>,
+    ///
+    /// `[MANTLE]` `U256`, not `u128`. The portal packs this field as a full 32-byte ABI word and
+    /// op-node reads all 32 bytes with `new(big.Int).SetBytes(...)`, so the Rust type has to
+    /// cover the same range.
+    pub eth_value: Option<U256>,
     /// EthTxValue means L2 BVM_ETH tx tag, nil means that there is no need to transfer BVM_ETH to msg.To.
-    pub eth_tx_value: Option<u128>,
+    ///
+    /// `[MANTLE]` `U256` for the same reason. This field is a call parameter rather than
+    /// `msg.value`, so the full `uint256` range is representable on the wire.
+    pub eth_tx_value: Option<U256>,
 }
 
 impl DepositTransactionParts {
@@ -26,8 +33,8 @@ impl DepositTransactionParts {
         source_hash: B256,
         mint: Option<u128>,
         is_system_transaction: bool,
-        eth_value: Option<u128>,
-        eth_tx_value: Option<u128>,
+        eth_value: Option<U256>,
+        eth_tx_value: Option<U256>,
     ) -> Self {
         Self {
             source_hash,

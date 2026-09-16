@@ -2623,8 +2623,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.deposit.source_hash = B256::from([1u8; 32]);
                 tx.deposit.mint = Some(mint_amount.into());
-                tx.deposit.eth_value = Some(mint_amount.into());
-                tx.deposit.eth_tx_value = Some(transfer_amount.into());
+                tx.deposit.eth_value = Some(U256::from(mint_amount));
+                tx.deposit.eth_tx_value = Some(U256::from(transfer_amount));
                 tx.base.value = U256::from(transfer_amount);
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
@@ -3084,7 +3084,7 @@ mod tests {
                 tx.base.caller = caller;
                 tx.deposit.source_hash = B256::from([1u8; 32]);
                 tx.deposit.mint = Some(mint_amount.into());
-                tx.deposit.eth_value = Some(mint_amount.into());
+                tx.deposit.eth_value = Some(U256::from(mint_amount));
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
 
@@ -3185,7 +3185,7 @@ mod tests {
                 tx.base.caller = caller;
                 tx.deposit.source_hash = B256::from([1u8; 32]);
                 tx.deposit.mint = Some(mint_amount.into());
-                tx.deposit.eth_value = Some(mint_amount.into());
+                tx.deposit.eth_value = Some(U256::from(mint_amount));
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
 
@@ -3678,8 +3678,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = revm::primitives::TxKind::Call(recipient);
                 tx.deposit.source_hash = B256::from([1u8; 32]);
-                tx.deposit.eth_value = Some(amount); // mint
-                tx.deposit.eth_tx_value = Some(amount); // transfer (dropped on this path)
+                tx.deposit.eth_value = Some(U256::from(amount)); // mint
+                tx.deposit.eth_tx_value = Some(U256::from(amount)); // transfer (dropped on this path)
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
 
@@ -3759,7 +3759,7 @@ mod tests {
                 tx.base.caller = caller;
                 tx.deposit.source_hash = B256::from([1u8; 32]);
                 tx.deposit.mint = Some(eth_value);
-                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
 
@@ -3849,8 +3849,8 @@ mod tests {
                 tx.base.kind = TxKind::Call(target);
                 tx.base.gas_limit = gas_limit;
                 tx.deposit.source_hash = B256::from([1u8; 32]);
-                tx.deposit.eth_value = Some(amount);
-                tx.deposit.eth_tx_value = Some(amount);
+                tx.deposit.eth_value = Some(U256::from(amount));
+                tx.deposit.eth_tx_value = Some(U256::from(amount));
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
 
@@ -3950,8 +3950,8 @@ mod tests {
                     tx.base.data = Bytes::from(init_code);
                     tx.base.gas_limit = 200_000;
                     tx.deposit.source_hash = B256::from([1u8; 32]);
-                    tx.deposit.eth_value = Some(amount);
-                    tx.deposit.eth_tx_value = Some(amount);
+                    tx.deposit.eth_value = Some(U256::from(amount));
+                    tx.deposit.eth_tx_value = Some(U256::from(amount));
                 })
                 .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
             let mut evm = ctx.build_op();
@@ -4009,8 +4009,8 @@ mod tests {
                 tx.base.data = Bytes::from(vec![0x5b, 0x60, 0x00, 0x56]);
                 tx.base.gas_limit = 200_000;
                 tx.deposit.source_hash = B256::from([1u8; 32]);
-                tx.deposit.eth_value = Some(amount);
-                tx.deposit.eth_tx_value = Some(amount);
+                tx.deposit.eth_value = Some(U256::from(amount));
+                tx.deposit.eth_tx_value = Some(U256::from(amount));
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
         let mut evm = ctx.build_op();
@@ -4066,8 +4066,8 @@ mod tests {
                 tx.base.gas_limit = 200_000;
                 tx.deposit.source_hash = B256::from([1u8; 32]);
                 tx.deposit.mint = Some(native_mint);
-                tx.deposit.eth_value = Some(eth_amount);
-                tx.deposit.eth_tx_value = Some(eth_amount);
+                tx.deposit.eth_value = Some(U256::from(eth_amount));
+                tx.deposit.eth_tx_value = Some(U256::from(eth_amount));
             })
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::REGOLITH);
         let mut evm = ctx.build_op();
@@ -4153,8 +4153,8 @@ mod tests {
                 tx.base.data = Bytes::from(init_code);
                 tx.base.gas_limit = 5_000_000; // covers intrinsic+calldata, isolates size limit
                 tx.deposit.source_hash = B256::from([1u8; 32]);
-                tx.deposit.eth_value = Some(amount);
-                tx.deposit.eth_tx_value = Some(amount);
+                tx.deposit.eth_value = Some(U256::from(amount));
+                tx.deposit.eth_tx_value = Some(U256::from(amount));
             })
             // ARSIA -> SHANGHAI+ enabled, so EIP-3860 init code size limit is active.
             .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ARSIA);
