@@ -141,13 +141,13 @@ impl BvmEth {
         // Handle mint if eth_value is present in the transaction
         if let Some(eth_value) = eth_value {
             let from = tx.caller();
-            Self::mint_inner(journal, tx, from, U256::from(eth_value))?;
+            Self::mint_inner(journal, tx, from, eth_value)?;
         }
 
         // Handle transfer if eth_tx_value is present in the transaction
         if let Some(eth_tx_value) = eth_tx_value {
             if !mint_only {
-                Self::transfer_inner(journal, tx, U256::from(eth_tx_value))?;
+                Self::transfer_inner(journal, tx, eth_tx_value)?;
             }
         }
 
@@ -420,7 +420,7 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = revm::primitives::TxKind::Call(to);
                 tx.base.gas_limit = 1_000_000;
-                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
                 tx.deposit.eth_tx_value = None;
             });
 
@@ -459,7 +459,7 @@ mod tests {
                 tx.base.kind = revm::primitives::TxKind::Call(to);
                 tx.base.gas_limit = 1_000_000;
                 tx.deposit.eth_value = None;
-                tx.deposit.eth_tx_value = Some(eth_tx_value);
+                tx.deposit.eth_tx_value = Some(U256::from(eth_tx_value));
             });
 
         // First, give the caller some BVM_ETH balance for transfer
@@ -493,6 +493,84 @@ mod tests {
         assert_eq!(logs[0].topics()[0], BvmEth::TRANSFER_SELECTOR);
     }
 
+    /// `[MANTLE]` Range guard for the BVM_ETH value fields.
+    ///
+    /// `eth_tx_value` is carried on the wire as a full 32-byte ABI word and op-node decodes it
+    /// with `new(big.Int).SetBytes(opaqueData[off:off+32])`, so the whole `uint256` range is
+    /// representable. This test pins that a value above `u128::MAX` survives the deposit path
+    /// intact and moves exactly that amount, which is what keeps this implementation in step
+    /// with op-node for the full range.
+    ///
+    /// Revert the field types to `u128` and it stops compiling; narrow the value anywhere along
+    /// the path and the balance assertions fail.
+    #[test]
+    fn mantle_eth_tx_value_above_u128_max_is_not_truncated() {
+        // 2^128 + 12345: the low 128 bits are a small amount, so an implementation that only
+        // kept the low half would move 12345 here instead of the full value.
+        let huge = (U256::from(1u64) << 128) | U256::from(12_345u64);
+        assert!(
+            huge > U256::from(u128::MAX),
+            "test premise: value must exceed u128::MAX"
+        );
+
+        let caller = address!("1234567890123456789012345678901234567890");
+        let to = address!("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
+
+        let mut ctx = Context::op()
+            .with_db(InMemoryDB::default())
+            .with_chain(L1BlockInfo::default())
+            .modify_cfg_chained(|cfg| cfg.spec = OpSpecId::ISTHMUS)
+            .modify_tx_chained(|tx| {
+                tx.base.caller = caller;
+                tx.base.kind = revm::primitives::TxKind::Call(to);
+                tx.base.gas_limit = 1_000_000;
+                tx.deposit.eth_value = None;
+                tx.deposit.eth_tx_value = Some(huge);
+            });
+
+        // The accessor must hand back the full value, not a narrowed one.
+        assert_eq!(
+            OpTxTr::eth_tx_value(&ctx.tx),
+            Some(huge),
+            "accessor truncated the value"
+        );
+
+        use revm::context_interface::JournalTr;
+        let from_slot = BvmEth::get_balance_slot(caller);
+        let to_slot = BvmEth::get_balance_slot(to);
+        ctx.journaled_state
+            .load_account(BvmEth::ADDRESS)
+            .expect("load account");
+        // Fund the sender with exactly the huge amount.
+        ctx.journaled_state
+            .sstore(BvmEth::ADDRESS, from_slot, huge)
+            .expect("sstore");
+        ctx.journaled_state.inner.logs.clear();
+
+        BvmEth::process_eth_deposit(&mut ctx, false).expect("transfer should succeed");
+
+        let from_after = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, from_slot)
+            .expect("sload from")
+            .data;
+        let to_after = ctx
+            .journaled_state
+            .sload(BvmEth::ADDRESS, to_slot)
+            .expect("sload to")
+            .data;
+
+        assert_eq!(
+            from_after,
+            U256::ZERO,
+            "sender should be drained by the full amount"
+        );
+        assert_eq!(
+            to_after, huge,
+            "recipient must receive the full 2^128 + 12345, not 12345"
+        );
+    }
+
     #[test]
     fn test_process_eth_deposit_both_values() {
         // When both eth_value and eth_tx_value are present, should mint and transfer
@@ -509,8 +587,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = revm::primitives::TxKind::Call(to);
                 tx.base.gas_limit = 1_000_000;
-                tx.deposit.eth_value = Some(eth_value);
-                tx.deposit.eth_tx_value = Some(eth_tx_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
+                tx.deposit.eth_tx_value = Some(U256::from(eth_tx_value));
             });
 
         let result = BvmEth::process_eth_deposit(&mut ctx, false);
@@ -558,8 +636,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = revm::primitives::TxKind::Call(to);
                 tx.base.gas_limit = 1_000_000;
-                tx.deposit.eth_value = Some(eth_value);
-                tx.deposit.eth_tx_value = Some(eth_tx_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
+                tx.deposit.eth_tx_value = Some(U256::from(eth_tx_value));
             });
 
         let result = BvmEth::process_eth_deposit(&mut ctx, true); // mint_only = true
@@ -588,7 +666,7 @@ mod tests {
                 tx.base.kind = revm::primitives::TxKind::Call(to);
                 tx.base.gas_limit = 1_000_000;
                 tx.deposit.eth_value = None;
-                tx.deposit.eth_tx_value = Some(eth_tx_value);
+                tx.deposit.eth_tx_value = Some(U256::from(eth_tx_value));
             });
 
         let result = BvmEth::process_eth_deposit(&mut ctx, true); // mint_only = true
@@ -624,8 +702,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(caller); // to = EOA, deliberately NOT BVM_ETH
                 tx.deposit.source_hash = B256::from([1u8; 32]);
-                tx.deposit.eth_value = Some(eth_value);
-                tx.deposit.eth_tx_value = Some(eth_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
+                tx.deposit.eth_tx_value = Some(U256::from(eth_value));
             });
 
         BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit processing should succeed");
@@ -678,8 +756,8 @@ mod tests {
                 source_hash: B256::from([9u8; 32]),
                 mint: Some(0),
                 is_system_transaction: false,
-                eth_value: Some(eth_value),
-                eth_tx_value: Some(eth_value),
+                eth_value: Some(U256::from(eth_value)),
+                eth_tx_value: Some(U256::from(eth_value)),
             },
         };
 
@@ -738,8 +816,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(recipient);
                 tx.deposit.source_hash = B256::from([1u8; 32]);
-                tx.deposit.eth_value = Some(eth_value);
-                tx.deposit.eth_tx_value = Some(eth_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
+                tx.deposit.eth_tx_value = Some(U256::from(eth_value));
             });
 
         BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
@@ -790,7 +868,7 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(recipient);
                 tx.deposit.source_hash = B256::from([2u8; 32]);
-                tx.deposit.eth_value = Some(eth_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
                 tx.deposit.eth_tx_value = None; // no transfer
             });
 
@@ -842,8 +920,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(caller); // to == from → transfer_inner skips
                 tx.deposit.source_hash = B256::from([3u8; 32]);
-                tx.deposit.eth_value = Some(eth_value);
-                tx.deposit.eth_tx_value = Some(eth_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
+                tx.deposit.eth_tx_value = Some(U256::from(eth_value));
             });
 
         BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
@@ -914,8 +992,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(caller);
                 tx.deposit.source_hash = B256::from([6u8; 32]);
-                tx.deposit.eth_value = Some(0);
-                tx.deposit.eth_tx_value = Some(0);
+                tx.deposit.eth_value = Some(U256::from(0u64));
+                tx.deposit.eth_tx_value = Some(U256::from(0u64));
             });
 
         BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
@@ -946,8 +1024,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(recipient);
                 tx.deposit.source_hash = B256::from([5u8; 32]);
-                tx.deposit.eth_value = Some(eth_value);
-                tx.deposit.eth_tx_value = Some(eth_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
+                tx.deposit.eth_tx_value = Some(U256::from(eth_value));
             });
 
         BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
@@ -1114,8 +1192,8 @@ mod tests {
             source_hash,
             mint: Some(0),
             is_system_transaction: false,
-            eth_value: Some(eth_value.to::<u128>()),
-            eth_tx_value: Some(eth_tx_value.to::<u128>()),
+            eth_value: Some(eth_value),
+            eth_tx_value: Some(eth_tx_value),
         };
 
         // Build complete OpTransaction
@@ -1382,7 +1460,7 @@ mod tests {
                 tx.base.kind = TxKind::Call(caller);
                 tx.deposit.source_hash = B256::from([0x10; 32]);
                 tx.deposit.eth_value = None;
-                tx.deposit.eth_tx_value = Some(eth_tx_value);
+                tx.deposit.eth_tx_value = Some(U256::from(eth_tx_value));
             });
 
         BvmEth::process_eth_deposit(&mut ctx, false).expect("deposit should succeed");
@@ -1421,7 +1499,7 @@ mod tests {
                 tx.base.kind = TxKind::Call(recipient);
                 tx.deposit.source_hash = B256::from([0x11; 32]);
                 tx.deposit.eth_value = None;
-                tx.deposit.eth_tx_value = Some(eth_tx_value);
+                tx.deposit.eth_tx_value = Some(U256::from(eth_tx_value));
             });
 
         // Pre-fund caller BVM_ETH balance so transfer_inner doesn't fail.
@@ -1463,8 +1541,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(recipient);
                 tx.deposit.source_hash = B256::from([0x12; 32]);
-                tx.deposit.eth_value = Some(eth_value);
-                tx.deposit.eth_tx_value = Some(eth_tx_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
+                tx.deposit.eth_tx_value = Some(U256::from(eth_tx_value));
             });
 
         BvmEth::process_eth_deposit(&mut ctx, true).expect("mint_only deposit");
@@ -1534,8 +1612,8 @@ mod tests {
                 tx.base.data = Bytes::from(hex::decode("deadbeef01020304").unwrap());
                 tx.deposit.source_hash = B256::from([0x20; 32]);
                 tx.deposit.mint = Some(0);
-                tx.deposit.eth_value = Some(0x38d7ea4c68000u128);
-                tx.deposit.eth_tx_value = Some(0x38d7ea4c68000u128);
+                tx.deposit.eth_value = Some(U256::from(0x38d7ea4c68000u128));
+                tx.deposit.eth_tx_value = Some(U256::from(0x38d7ea4c68000u128));
             });
 
         let mut evm = ctx.build_op();
@@ -1604,7 +1682,7 @@ mod tests {
                 tx.base.data = Bytes::from(hex::decode("deadbeef").unwrap());
                 tx.deposit.source_hash = B256::from([0x21; 32]);
                 tx.deposit.mint = Some(0);
-                tx.deposit.eth_value = Some(0x38d7ea4c68000u128);
+                tx.deposit.eth_value = Some(U256::from(0x38d7ea4c68000u128));
                 tx.deposit.eth_tx_value = None;
             });
 
@@ -1673,7 +1751,7 @@ mod tests {
                 tx.base.data = Bytes::from(hex::decode("deadbeef").unwrap());
                 tx.deposit.source_hash = B256::from([0x22; 32]);
                 tx.deposit.mint = Some(0);
-                tx.deposit.eth_value = Some(0x38d7ea4c68000u128);
+                tx.deposit.eth_value = Some(U256::from(0x38d7ea4c68000u128));
                 tx.deposit.eth_tx_value = None;
             });
 
@@ -1746,7 +1824,7 @@ mod tests {
                 tx.base.data = Bytes::from(hex::decode("deadbeef").unwrap());
                 tx.deposit.source_hash = B256::from([0x30; 32]);
                 tx.deposit.mint = Some(0);
-                tx.deposit.eth_value = Some(0x38d7ea4c68000u128);
+                tx.deposit.eth_value = Some(U256::from(0x38d7ea4c68000u128));
                 tx.deposit.eth_tx_value = None;
             });
 
@@ -1841,7 +1919,7 @@ mod tests {
                 tx.base.data = Bytes::from(hex::decode("deadbeef").unwrap());
                 tx.deposit.source_hash = B256::from([0x31; 32]);
                 tx.deposit.mint = Some(0);
-                tx.deposit.eth_value = Some(mint_amount);
+                tx.deposit.eth_value = Some(U256::from(mint_amount));
                 tx.deposit.eth_tx_value = None;
             });
 
@@ -1900,8 +1978,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(recipient);
                 tx.deposit.source_hash = B256::from([0x40; 32]);
-                tx.deposit.eth_value = Some(eth_value);
-                tx.deposit.eth_tx_value = Some(eth_tx_value);
+                tx.deposit.eth_value = Some(U256::from(eth_value));
+                tx.deposit.eth_tx_value = Some(U256::from(eth_tx_value));
             });
 
         BvmEth::process_eth_deposit(&mut ctx, false).expect("first process_eth_deposit");
@@ -1971,7 +2049,7 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Call(recipient);
                 tx.deposit.source_hash = B256::from([0x41; 32]);
-                tx.deposit.eth_value = Some(1_000_000_000_000_000_000u128);
+                tx.deposit.eth_value = Some(U256::from(1_000_000_000_000_000_000u128));
                 tx.deposit.eth_tx_value = None;
             });
 
@@ -2044,7 +2122,7 @@ mod tests {
                 tx.base.kind = TxKind::Create;
                 tx.deposit.source_hash = B256::from([0x50; 32]);
                 tx.deposit.eth_value = None;
-                tx.deposit.eth_tx_value = Some(500_000_000_000_000_000u128);
+                tx.deposit.eth_tx_value = Some(U256::from(500_000_000_000_000_000u128));
             });
 
         // Pre-seed caller balance for transfer to succeed.
@@ -2092,8 +2170,8 @@ mod tests {
                 tx.base.caller = caller;
                 tx.base.kind = TxKind::Create;
                 tx.deposit.source_hash = B256::from([0x51; 32]);
-                tx.deposit.eth_value = Some(1_000_000_000_000_000_000u128);
-                tx.deposit.eth_tx_value = Some(500_000_000_000_000_000u128);
+                tx.deposit.eth_value = Some(U256::from(1_000_000_000_000_000_000u128));
+                tx.deposit.eth_tx_value = Some(U256::from(500_000_000_000_000_000u128));
             });
 
         let caller_nonce = ctx
@@ -2196,7 +2274,7 @@ mod tests {
                 tx.base.data = Bytes::new();
                 tx.deposit.source_hash = B256::from([0x60; 32]);
                 tx.deposit.mint = Some(0);
-                tx.deposit.eth_value = Some(0x38d7ea4c68000u128);
+                tx.deposit.eth_value = Some(U256::from(0x38d7ea4c68000u128));
                 tx.deposit.eth_tx_value = None;
             });
 

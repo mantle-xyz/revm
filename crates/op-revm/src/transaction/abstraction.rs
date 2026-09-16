@@ -32,11 +32,19 @@ pub trait OpTxTr: Transaction {
         self.tx_type() == DEPOSIT_TRANSACTION_TYPE
     }
 
-    /// Returns the eth value of the deposit transaction
-    fn eth_value(&self) -> Option<u128>;
+    /// Returns the eth value of the deposit transaction.
+    ///
+    /// `[MANTLE]` `U256`, not `u128`. `OptimismPortal.depositTransaction` packs this field as a
+    /// full 32-byte ABI word and op-node decodes it with `new(big.Int).SetBytes(...)` across all
+    /// 32 bytes, so the Rust type has to cover the same range for the two to agree.
+    fn eth_value(&self) -> Option<U256>;
 
-    /// Returns the eth tx value of the deposit transaction
-    fn eth_tx_value(&self) -> Option<u128>;
+    /// Returns the eth tx value of the deposit transaction.
+    ///
+    /// `[MANTLE]` `U256` for the same reason as [`Self::eth_value`]. This one is a call
+    /// parameter rather than `msg.value`, so the full `uint256` range is representable on the
+    /// wire and the type must match it.
+    fn eth_tx_value(&self) -> Option<U256>;
 }
 
 /// Optimism transaction.
@@ -215,12 +223,12 @@ impl<T: Transaction> OpTxTr for OpTransaction<T> {
         self.deposit.is_system_transaction
     }
 
-    fn eth_value(&self) -> Option<u128> {
-        self.deposit.eth_value.filter(|&v| v != 0)
+    fn eth_value(&self) -> Option<U256> {
+        self.deposit.eth_value.filter(|v| !v.is_zero())
     }
 
-    fn eth_tx_value(&self) -> Option<u128> {
-        self.deposit.eth_tx_value.filter(|&v| v != 0)
+    fn eth_tx_value(&self) -> Option<U256> {
+        self.deposit.eth_tx_value.filter(|v| !v.is_zero())
     }
 }
 
@@ -399,8 +407,8 @@ mod tests {
                 is_system_transaction: false,
                 mint: Some(0u128),
                 source_hash: B256::default(),
-                eth_value: Some(100),
-                eth_tx_value: Some(100),
+                eth_value: Some(U256::from(100u64)),
+                eth_tx_value: Some(U256::from(100u64)),
             },
         };
         // Verify transaction type
@@ -422,8 +430,8 @@ mod tests {
                 source_hash: B256::ZERO,
                 mint: None,
                 is_system_transaction: false,
-                eth_tx_value: Some(0),
-                eth_value: Some(0),
+                eth_tx_value: Some(U256::from(0u64)),
+                eth_value: Some(U256::from(0u64)),
             },
         };
         assert_eq!(op_tx.eth_value(), None);
