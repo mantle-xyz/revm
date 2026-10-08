@@ -112,6 +112,14 @@ impl<DB: Database> StateBuilder<DB> {
         }
     }
 
+    /// Conditionally makes transitions and updates bundle state.
+    pub fn with_bundle_update_if(self, enable: bool) -> Self {
+        Self {
+            with_bundle_update: enable,
+            ..self
+        }
+    }
+
     /// It will use different cache for the state.
     ///
     /// **Note**: If set, it will ignore bundle prestate.
@@ -168,6 +176,7 @@ impl<DB: Database> StateBuilder<DB> {
             use_preloaded_bundle,
             block_hashes: self.with_block_hashes,
             bal_state: self.bal_state,
+            state_hook: None,
         }
     }
 }
