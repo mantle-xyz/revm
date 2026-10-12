@@ -619,12 +619,11 @@ impl EvmStorageSlot {
     #[inline]
     pub const fn mark_warm_with_transaction_id(&mut self, transaction_id: TransactionId) -> bool {
         let is_cold = self.is_cold_transaction_id(transaction_id);
-        // Re-baseline the EIP-2200 `original_value` ONLY when the slot genuinely belongs to a
-        // previous transaction (transaction_id mismatch). A slot that is merely flagged cold
-        // within the SAME transaction — e.g. an access-list reset for warm/cold parity such as
-        // the BVM_ETH deposit mint, or a reverted `StorageWarmed` entry — must keep its original
-        // baseline (the value at the start of THIS transaction). Using `is_cold` here (which also
-        // covers the same-tx cold flag) wrongly re-baselines those cases.
+        // Re-baseline the EIP-2200 `original_value` only when the slot belongs to a *previous*
+        // transaction (transaction id mismatch). `is_cold` also covers a slot flagged cold
+        // within the same transaction (e.g. a reverted `StorageWarmed` entry, or an explicit
+        // `mark_cold`); those must keep the original value captured at the start of this
+        // transaction. The committed/original value is tx-scoped, not access-list-scoped.
         if self.transaction_id.get() != transaction_id.get() {
             self.original_value = self.present_value;
         }

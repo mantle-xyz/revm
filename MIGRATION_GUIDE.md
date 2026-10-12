@@ -1,4 +1,44 @@
 
+# Unreleased
+
+# v114 tag (all crates v42.0.0)
+
+Released by [#3814](https://github.com/bluealloy/revm/pull/3814). Breaking changes below, grouped by crate; `revm-bytecode`, `revm-state`, `revm-database` and `revme` are API compatible with v41.
+
+### EIP-8246 replaces EIP-7708 delayed burn (`revm-context`, `revm-context-interface`)
+* `Cfg::is_eip7708_delayed_burn_disabled` → `Cfg::is_eip8246_delayed_clear_disabled`; `CfgEnv.amsterdam_eip7708_delayed_burn_disabled` → `amsterdam_eip8246_delayed_clear_disabled` and `JournalCfg.eip7708_delayed_burn_disabled` → `eip8246_delayed_clear_disabled` (breaks literal construction).
+* Removed `JournalInner::eip7708_emit_burn_remaining_balance_logs` and `JournalInner::eip7708_burn_log`.
+* New required `Cfg` method `is_amsterdam_eip2780_enabled` (implement it on custom `Cfg`s alongside the rename).
+
+### Gas API (`revm-primitives`, `revm-context-interface`, `revm-handler`)
+* Removed: `primitives::EIP7702_PER_EMPTY_ACCOUNT_REGULAR`; `GasParams::tx_eip7702_auth_refund` / `tx_eip7702_state_gas` / `tx_eip7702_state_refund` and the matching `GasId` variants; `InitialAndFloorGas.state_refund`.
+* Arity changes: `calculate_initial_tx_gas` 6→7, `calculate_initial_tx_gas_for_tx` 2→3, `GasParams::initial_tx_gas` 5→6, `GasParams::initial_tx_gas_for_tx` 1→2, `validate_initial_tx_gas` 5→6, `validate_initial_tx_gas_with_gas_params` 6→7.
+* `Handler::refund` now returns a value instead of `()` (fallible refund, [#3758](https://github.com/bluealloy/revm/pull/3758)).
+
+### Handler / inspector execution split
+* `Handler::execution` 2→3 params and `InspectorHandler::inspect_execution` 2→3; `Handler::first_frame_input` 3→2; `execution::create_init_frame` 3→2.
+
+### Journal code-change entry (`revm-context-interface`)
+* `JournalEntry::CodeChange` gained `had_code_hash` and `had_code` fields; `JournalEntryTr::code_changed` 1→3 params.
+
+### New struct fields (break literal construction)
+* `BalState.allow_db_fallback` (`revm-database-interface`) — database fallback for BAL misses ([#3754](https://github.com/bluealloy/revm/pull/3754)).
+* `CreateOutcome.charged_create_state_gas` (`revm-interpreter`).
+* `TransactionParts.chain_id` (`revm-statetest-types`).
+
+### Features
+* `asm-sha2` feature removed from `revm` and `revm-precompile`.
+
+### EIP-2780 runtime gas phase (ethereum/EIPs#11844)
+
+Gated on `CfgEnv::enable_amsterdam_eip2780`; older forks and 2780-disabled configs are unchanged.
+
+* Intrinsic gas no longer includes the create-transaction `create_state_gas` (charged at runtime, only when the deployment target does not exist) nor the pessimistic EIP-7702 per-auth charge — each authorization now costs `REGULAR_PER_AUTH_BASE_COST` (7,816, new `eip8038::EIP7702_PER_AUTH_BASE_REGULAR`) intrinsically, with the state-dependent remainder charged per authority at runtime and no refunds.
+* New struct field (breaks literal construction): `InitialAndFloorGas.runtime_oog` — set when the transaction passes the intrinsic check but cannot afford the runtime charges; the handler includes it as an out-of-gas halt consuming all gas, reverting applied delegations.
+* Additive: `InitialAndFloorGas::checked_initial_gas_and_reservoir`, `GasParams::tx_eip7702_state_gas_bytecode`, `pre_execution::apply_eip2780_runtime_gas`, `pre_execution::apply_auth_list_eip2780`.
+* `pre_execution::apply_eip7702_auth_list` runs the runtime gas phase (and returns no refund) when EIP-2780 is enabled.
+* The delegated-recipient delegation-target access is now warm/cold aware (`WARM_ACCESS` if pre-warmed) and charged in the runtime phase instead of a flat `COLD_ACCOUNT_ACCESS` at frame entry.
+
 # v113 tag (all crates v41.0.0)
 
 All crates are now versioned in lockstep, starting at **41.0.0** — hence the version jump (e.g. `revm-bytecode` 11.0.1 → 41.0.0).

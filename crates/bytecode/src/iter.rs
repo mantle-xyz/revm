@@ -17,7 +17,7 @@ impl<'a> BytecodeIterator<'a> {
     #[inline]
     pub fn new(bytecode: &'a Bytecode) -> Self {
         let bytes = if bytecode.is_legacy() {
-            &bytecode.bytecode()[..]
+            bytecode.original_byte_slice()
         } else {
             &[]
         };
@@ -59,12 +59,8 @@ impl<'a> BytecodeIterator<'a> {
 
         // Advance the iterator by the immediate size
         if immediate_size > 0 {
-            self.bytes = self
-                .bytes
-                .as_slice()
-                .get(immediate_size..)
-                .unwrap_or_default()
-                .iter();
+            let remaining = self.bytes.as_slice();
+            self.bytes = remaining[immediate_size.min(remaining.len())..].iter();
         }
     }
 
@@ -249,5 +245,22 @@ mod tests {
         let bytecode = Bytecode::new_legacy(Bytes::from_static(&[opcode::STOP]));
         let opcodes: Vec<u8> = bytecode.iter_opcodes().collect();
         assert_eq!(opcodes, vec![opcode::STOP]);
+    }
+
+    #[test]
+    fn test_truncated_push_does_not_iterate_padding() {
+        let bytecode = Bytecode::new_legacy(Bytes::from_static(&[opcode::PUSH1]));
+        let opcodes: Vec<u8> = bytecode.iter_opcodes().collect();
+        assert_eq!(opcodes, vec![opcode::PUSH1]);
+    }
+
+    #[test]
+    fn test_position_after_truncated_push() {
+        let bytecode = Bytecode::new_legacy(Bytes::from_static(&[opcode::PUSH2, 0x01]));
+        let mut iter = bytecode.iter_opcodes();
+
+        assert_eq!(iter.next(), Some(opcode::PUSH2));
+        assert_eq!(iter.position(), 2);
+        assert_eq!(iter.next(), None);
     }
 }

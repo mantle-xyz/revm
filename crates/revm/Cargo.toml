@@ -1,7 +1,7 @@
 [package]
 name = "revm"
 description = "Revm - Rust Ethereum Virtual Machine"
-version = "41.0.0"
+version = "42.0.1"
 authors.workspace = true
 edition.workspace = true
 keywords.workspace = true
@@ -109,7 +109,6 @@ c-kzg = ["precompile/c-kzg"]
 # blst will be enabled both for bls precompiles and for kzg precompile.
 blst = ["precompile/blst"]
 bn = ["precompile/bn"]
-asm-sha2 = ["precompile/asm-sha2"]
 
 # Compile in portable mode, without ISA extensions.
 # Binary can be executed on all systems.
