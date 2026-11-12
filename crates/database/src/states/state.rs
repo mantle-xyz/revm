@@ -7,14 +7,14 @@ use super::{
 use bytecode::Bytecode;
 use database_interface::{
     bal::{BalState, EvmDatabaseError},
-    Database, DatabaseCommit, DatabaseRef, EmptyDB,
+    Database, DatabaseCommit, DatabaseRef, EmptyDB, OnStateHook,
 };
 use primitives::{hash_map, Address, AddressMap, HashMap, StorageKey, StorageValue, B256};
 use state::{
-    bal::{alloy::AlloyBal, Bal},
-    Account, AccountInfo,
+    bal::{alloy::AlloyBal, Bal, BlockAccessIndex},
+    Account, AccountId, AccountInfo, EvmStorage,
 };
-use std::{boxed::Box, sync::Arc};
+use std::{borrow::Cow, boxed::Box, sync::Arc};
 
 /// Database boxed with a lifetime and Send
 pub type DBBox<'a, E> = Box<dyn Database<Error = E> + Send + 'a>;
@@ -28,7 +28,7 @@ pub type StateDBBox<'a, E> = State<DBBox<'a, E>>;
 ///
 /// State clear flag is handled by the EVM journal in `finalize()` based on
 /// the spec. The database layer always applies post-EIP-161 commit semantics.
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 pub struct State<DB> {
     /// Cached state contains both changed from evm execution and cached/loaded account/storages
     /// from database
@@ -70,6 +70,9 @@ pub struct State<DB> {
     ///
     /// Can contain both the BAL for reads and BAL builder that is used to build BAL.
     pub bal_state: BalState,
+    /// Hook invoked whenever state changes are committed.
+    #[debug(skip)]
+    pub state_hook: Option<Box<dyn OnStateHook>>,
 }
 
 // Have ability to call State::builder without having to specify the type.
@@ -110,9 +113,9 @@ impl<DB: Database> State<DB> {
     }
 
     /// Applies evm transitions to transition state.
-    pub fn apply_transition(
+    pub fn apply_transition<'a>(
         &mut self,
-        transitions: impl IntoIterator<Item = (Address, TransitionAccount)>,
+        transitions: impl IntoIterator<Item = (Address, TransitionAccount<Option<Cow<'a, EvmStorage>>>)>,
     ) {
         // Add transition to transition state.
         if let Some(s) = self.transition_state.as_mut() {
@@ -200,7 +203,7 @@ impl<DB: Database> State<DB> {
 
     /// Takes build bal from bal state.
     #[inline]
-    pub fn take_built_bal(&mut self) -> Option<Bal> {
+    pub const fn take_built_bal(&mut self) -> Option<Bal> {
         self.bal_state.take_built_bal()
     }
 
@@ -212,19 +215,19 @@ impl<DB: Database> State<DB> {
 
     /// Bump BAL index.
     #[inline]
-    pub fn bump_bal_index(&mut self) {
+    pub const fn bump_bal_index(&mut self) {
         self.bal_state.bump_bal_index();
     }
 
     /// Set BAL index.
     #[inline]
-    pub fn set_bal_index(&mut self, index: u64) {
+    pub const fn set_bal_index(&mut self, index: BlockAccessIndex) {
         self.bal_state.bal_index = index;
     }
 
     /// Reset BAL index.
     #[inline]
-    pub fn reset_bal_index(&mut self) {
+    pub const fn reset_bal_index(&mut self) {
         self.bal_state.reset_bal_index();
     }
 
@@ -232,6 +235,26 @@ impl<DB: Database> State<DB> {
     #[inline]
     pub fn set_bal(&mut self, bal: Option<Arc<Bal>>) {
         self.bal_state.bal = bal;
+    }
+
+    /// Sets the hook invoked whenever state changes are committed.
+    #[inline]
+    pub fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
+        self.state_hook = hook;
+    }
+
+    /// Sets the hook invoked whenever state changes are committed.
+    #[inline]
+    #[must_use]
+    pub fn with_state_hook(mut self, hook: Option<Box<dyn OnStateHook>>) -> Self {
+        self.set_state_hook(hook);
+        self
+    }
+
+    /// Returns whether the state has a BAL configured.
+    #[inline]
+    pub const fn has_bal(&self) -> bool {
+        self.bal_state.bal.is_some()
     }
 
     /// Gets storage value of address at index.
@@ -287,7 +310,9 @@ impl<DB: Database> Database for State<DB> {
         // will populate account code if there was a bal change to it. If there is no change
         // it will be fetched in code_by_hash.
         if let Some(account_id) = account_id {
-            self.bal_state.basic_by_account_id(account_id, &mut basic);
+            self.bal_state
+                .basic_by_account_id(account_id, &mut basic)
+                .map_err(EvmDatabaseError::Bal)?;
         }
         Ok(basic)
     }
@@ -334,7 +359,7 @@ impl<DB: Database> Database for State<DB> {
     fn storage_by_account_id(
         &mut self,
         address: Address,
-        account_id: usize,
+        account_id: AccountId,
         key: StorageKey,
     ) -> Result<StorageValue, Self::Error> {
         if let Some(storage) = self.bal_state.storage_by_account_id(account_id, key)? {
@@ -367,26 +392,61 @@ impl<DB: Database> Database for State<DB> {
 impl<DB: Database> DatabaseCommit for State<DB> {
     fn commit(&mut self, changes: AddressMap<Account>) {
         self.bal_state.commit(&changes);
-        let transitions = self.cache.apply_evm_state_iter(changes, |_, _| {});
-        if let Some(s) = self.transition_state.as_mut() {
-            s.add_transitions(transitions)
+
+        if let Some(hook) = self.state_hook.as_mut() {
+            let transitions = self.cache.apply_evm_state_iter(
+                changes
+                    .iter()
+                    .map(|(address, account)| (*address, Cow::Borrowed(account))),
+                |_, _| {},
+            );
+
+            if let Some(s) = self.transition_state.as_mut() {
+                s.add_transitions(transitions)
+            } else {
+                // Advance the iter to apply all state updates.
+                transitions.for_each(|_| {});
+            }
+
+            hook.on_state(changes);
         } else {
-            // Advance the iter to apply all state updates.
-            transitions.for_each(|_| {});
+            let transitions = self.cache.apply_evm_state_iter(
+                changes
+                    .into_iter()
+                    .map(|(address, account)| (address, Cow::Owned(account))),
+                |_, _| {},
+            );
+
+            if let Some(s) = self.transition_state.as_mut() {
+                s.add_transitions(transitions)
+            } else {
+                // Advance the iter to apply all state updates.
+                transitions.for_each(|_| {});
+            }
         }
     }
 
     fn commit_iter(&mut self, changes: &mut dyn Iterator<Item = (Address, Account)>) {
-        let transitions = self
-            .cache
-            .apply_evm_state_iter(changes, |address, account| {
-                self.bal_state.commit_one(*address, account);
-            });
+        if self.state_hook.is_some() {
+            let changes = changes.collect::<AddressMap<_>>();
+            self.commit(changes);
+            return;
+        }
+
         if let Some(s) = self.transition_state.as_mut() {
-            s.add_transitions(transitions)
+            for (address, account) in changes {
+                self.bal_state.commit_one(address, &account);
+                if let Some(transition) =
+                    self.cache.apply_account_state(address, Cow::Owned(account))
+                {
+                    s.add_transition(address, transition);
+                }
+            }
         } else {
-            // Advance the iter to apply all state updates.
-            transitions.for_each(|_| {});
+            for (address, account) in changes {
+                self.bal_state.commit_one(address, &account);
+                _ = self.cache.apply_account_state(address, Cow::Owned(account));
+            }
         }
     }
 }
@@ -425,7 +485,9 @@ impl<DB: DatabaseRef> DatabaseRef for State<DB> {
 
         // if it is inside bal, overwrite the account with the bal changes.
         if let Some(account_id) = account_id {
-            self.bal_state.basic_by_account_id(account_id, &mut account);
+            self.bal_state
+                .basic_by_account_id(account_id, &mut account)
+                .map_err(EvmDatabaseError::Bal)?;
         }
         Ok(account)
     }
@@ -497,6 +559,23 @@ mod tests {
         AccountRevert, AccountStatus, BundleAccount, RevertToSlot,
     };
     use primitives::{keccak256, BLOCK_HASH_HISTORY, U256};
+    use state::{EvmStorageSlot, TransactionId};
+
+    fn evm_storage<const N: usize>(
+        slots: [(StorageKey, EvmStorageSlot); N],
+    ) -> Option<Cow<'static, EvmStorage>> {
+        Some(Cow::Owned(HashMap::from_iter(slots)))
+    }
+
+    #[test]
+    fn has_bal_helper() {
+        let state = State::builder().build();
+        assert!(!state.has_bal());
+
+        let state = State::builder().with_bal(Arc::new(Bal::new())).build();
+        assert!(state.has_bal());
+    }
+
     #[test]
     fn block_hash_cache() {
         let mut state = State::builder().build();
@@ -601,6 +680,7 @@ mod tests {
                     info: Some(new_account_created_info.clone()),
                     previous_status: AccountStatus::LoadedNotExisting,
                     previous_info: None,
+                    storage: None,
                     ..Default::default()
                 },
             ),
@@ -611,11 +691,12 @@ mod tests {
                     info: Some(existing_account_changed_info.clone()),
                     previous_status: AccountStatus::Loaded,
                     previous_info: Some(existing_account_initial_info.clone()),
-                    storage: HashMap::from_iter([(
+                    storage: evm_storage([(
                         slot1,
-                        StorageSlot::new_changed(
+                        EvmStorageSlot::new_changed(
                             *existing_account_initial_storage.get(&slot1).unwrap(),
                             StorageValue::from(1000),
+                            TransactionId::ZERO,
                         ),
                     )]),
                     storage_was_destroyed: false,
@@ -644,9 +725,13 @@ mod tests {
                     info: Some(new_account_changed_info2.clone()),
                     previous_status: AccountStatus::InMemoryChange,
                     previous_info: Some(new_account_changed_info),
-                    storage: HashMap::from_iter([(
+                    storage: evm_storage([(
                         slot1,
-                        StorageSlot::new_changed(StorageValue::ZERO, StorageValue::from(1)),
+                        EvmStorageSlot::new_changed(
+                            StorageValue::ZERO,
+                            StorageValue::from(1),
+                            TransactionId::ZERO,
+                        ),
                     )]),
                     storage_was_destroyed: false,
                 },
@@ -658,25 +743,31 @@ mod tests {
                     info: Some(existing_account_changed_info.clone()),
                     previous_status: AccountStatus::InMemoryChange,
                     previous_info: Some(existing_account_changed_info.clone()),
-                    storage: HashMap::from_iter([
+                    storage: evm_storage([
                         (
                             slot1,
-                            StorageSlot::new_changed(
+                            EvmStorageSlot::new_changed(
                                 StorageValue::from(100),
                                 StorageValue::from(1_000),
+                                TransactionId::ZERO,
                             ),
                         ),
                         (
                             slot2,
-                            StorageSlot::new_changed(
+                            EvmStorageSlot::new_changed(
                                 *existing_account_initial_storage.get(&slot2).unwrap(),
                                 StorageValue::from(2_000),
+                                TransactionId::ZERO,
                             ),
                         ),
                         // Create new slot
                         (
                             slot3,
-                            StorageSlot::new_changed(StorageValue::ZERO, StorageValue::from(3_000)),
+                            EvmStorageSlot::new_changed(
+                                StorageValue::ZERO,
+                                StorageValue::from(3_000),
+                                TransactionId::ZERO,
+                            ),
                         ),
                     ]),
                     storage_was_destroyed: false,
@@ -844,14 +935,22 @@ mod tests {
                     info: Some(existing_account_with_storage_info.clone()),
                     previous_status: AccountStatus::Loaded,
                     previous_info: Some(existing_account_with_storage_info.clone()),
-                    storage: HashMap::from_iter([
+                    storage: evm_storage([
                         (
                             slot1,
-                            StorageSlot::new_changed(StorageValue::from(1), StorageValue::from(10)),
+                            EvmStorageSlot::new_changed(
+                                StorageValue::from(1),
+                                StorageValue::from(10),
+                                TransactionId::ZERO,
+                            ),
                         ),
                         (
                             slot2,
-                            StorageSlot::new_changed(StorageValue::ZERO, StorageValue::from(20)),
+                            EvmStorageSlot::new_changed(
+                                StorageValue::ZERO,
+                                StorageValue::from(20),
+                                TransactionId::ZERO,
+                            ),
                         ),
                     ]),
                     storage_was_destroyed: false,
@@ -888,14 +987,22 @@ mod tests {
                     info: Some(existing_account_with_storage_info.clone()),
                     previous_status: AccountStatus::Changed,
                     previous_info: Some(existing_account_with_storage_info.clone()),
-                    storage: HashMap::from_iter([
+                    storage: evm_storage([
                         (
                             slot1,
-                            StorageSlot::new_changed(StorageValue::from(10), StorageValue::from(1)),
+                            EvmStorageSlot::new_changed(
+                                StorageValue::from(10),
+                                StorageValue::from(1),
+                                TransactionId::ZERO,
+                            ),
                         ),
                         (
                             slot2,
-                            StorageSlot::new_changed(StorageValue::from(20), StorageValue::ZERO),
+                            EvmStorageSlot::new_changed(
+                                StorageValue::from(20),
+                                StorageValue::ZERO,
+                                TransactionId::ZERO,
+                            ),
                         ),
                     ]),
                     storage_was_destroyed: false,
@@ -935,7 +1042,7 @@ mod tests {
                 info: None,
                 previous_status: AccountStatus::Loaded,
                 previous_info: Some(existing_account_info.clone()),
-                storage: HashMap::default(),
+                storage: Some(Cow::Owned(HashMap::default())),
                 storage_was_destroyed: true,
             },
         )]));
@@ -948,9 +1055,13 @@ mod tests {
                 info: Some(existing_account_info.clone()),
                 previous_status: AccountStatus::Destroyed,
                 previous_info: None,
-                storage: HashMap::from_iter([(
+                storage: evm_storage([(
                     slot1,
-                    StorageSlot::new_changed(StorageValue::ZERO, StorageValue::from(1)),
+                    EvmStorageSlot::new_changed(
+                        StorageValue::ZERO,
+                        StorageValue::from(1),
+                        TransactionId::ZERO,
+                    ),
                 )]),
                 storage_was_destroyed: false,
             },
@@ -965,7 +1076,7 @@ mod tests {
                 previous_status: AccountStatus::DestroyedChanged,
                 previous_info: Some(existing_account_info.clone()),
                 // storage change should be ignored
-                storage: HashMap::default(),
+                storage: Some(Cow::Owned(HashMap::default())),
                 storage_was_destroyed: true,
             },
         )]));
@@ -978,9 +1089,13 @@ mod tests {
                 info: Some(existing_account_info.clone()),
                 previous_status: AccountStatus::DestroyedAgain,
                 previous_info: None,
-                storage: HashMap::from_iter([(
+                storage: evm_storage([(
                     slot2,
-                    StorageSlot::new_changed(StorageValue::ZERO, StorageValue::from(2)),
+                    EvmStorageSlot::new_changed(
+                        StorageValue::ZERO,
+                        StorageValue::from(2),
+                        TransactionId::ZERO,
+                    ),
                 )]),
                 storage_was_destroyed: false,
             },

@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::{InspectEvm, InspectSystemCallEvm, InspectorEvent, TestInspector};
-    use context::{Context, TxEnv};
+    use context::{CfgEnv, Context, TxEnv};
     use database::{BenchmarkDB, BENCH_CALLER, BENCH_TARGET};
     use handler::{MainBuilder, MainContext};
-    use primitives::{address, Address, Bytes, TxKind, U256};
+    use primitives::{address, hardfork::SpecId, Address, Bytes, TxKind, U256};
     use state::{bytecode::opcode, AccountInfo, Bytecode};
 
     #[test]
@@ -449,6 +449,37 @@ mod tests {
     }
 
     #[test]
+    fn cancun_selfdestruct_to_self_does_not_reuse_prior_journal_entry() {
+        let code = Bytes::from(vec![opcode::ADDRESS, opcode::SELFDESTRUCT]);
+        let ctx = Context::mainnet()
+            .with_cfg(CfgEnv::new_with_spec(SpecId::CANCUN))
+            .with_db(BenchmarkDB::new_bytecode(Bytecode::new_legacy(code)));
+        let mut evm = ctx.build_mainnet_with_inspector(TestInspector::new());
+
+        let result = evm
+            .inspect_one_tx(
+                TxEnv::builder()
+                    .caller(BENCH_CALLER)
+                    .kind(TxKind::Call(BENCH_TARGET))
+                    .value(U256::from(459))
+                    .gas_limit(100_000)
+                    .gas_price(0)
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(result.is_success());
+
+        assert!(
+            !evm.inspector
+                .get_events()
+                .iter()
+                .any(|event| matches!(event, InspectorEvent::Selfdestruct { .. })),
+            "Cancun selfdestruct-to-self must not reuse the transaction value-transfer journal entry"
+        );
+    }
+
+    #[test]
     fn test_comprehensive_inspector_integration() {
         // Complex contract with multiple operations:
         // 1. PUSH and arithmetic
@@ -627,5 +658,149 @@ mod tests {
         assert!(result.is_success());
 
         assert!(evm.inspector.get_step_count() > 0);
+    }
+
+    /// Regression test for inspector vs non-inspector divergence in
+    /// `run_system_call`'s `ResultGas` construction.
+    ///
+    /// The non-inspect path uses `build_result_gas`, which subtracts the gas
+    /// reservoir from `limit - remaining`. The inspect path used to construct
+    /// `ResultGas` inline via `gas.total_gas_spent()` (which is just
+    /// `limit - remaining`), so when a system call left `reservoir > 0` the
+    /// two paths reported different `total_gas_spent`.
+    ///
+    /// To force `reservoir > 0` in the top-level system frame we run a
+    /// scenario where the system contract calls a child that consumes state
+    /// gas (SSTORE on a fresh slot under AMSTERDAM) and then REVERT. On
+    /// revert the parent's reservoir is set to `child.state_gas_spent +
+    /// child.reservoir` (see `frame::handle_reservoir_remaining_gas`), which
+    /// is non-zero and triggers the divergence.
+    #[test]
+    fn test_system_call_gas_consistency_with_reservoir() {
+        use database::{CacheDB, EmptyDB};
+        use handler::SystemCallEvm;
+        use primitives::hardfork::SpecId;
+
+        let child_addr = address!("0x000000000000000000000000000000000000c0de");
+
+        // PUSH1 0x42 PUSH1 0x00 SSTORE PUSH0 PUSH0 REVERT
+        // Charges sstore_set_state_gas (32 * 1174 = 37568 under AMSTERDAM) and
+        // then reverts so the parent inherits that state gas as reservoir.
+        let child_code = Bytes::from(vec![
+            opcode::PUSH1,
+            0x42,
+            opcode::PUSH1,
+            0x00,
+            opcode::SSTORE,
+            opcode::PUSH0,
+            opcode::PUSH0,
+            opcode::REVERT,
+        ]);
+
+        // System contract: CALL child, ignore return value, STOP.
+        let system_code = Bytes::from(vec![
+            opcode::PUSH1,
+            0x00, // retSize
+            opcode::PUSH1,
+            0x00, // retOffset
+            opcode::PUSH1,
+            0x00, // argsSize
+            opcode::PUSH1,
+            0x00, // argsOffset
+            opcode::PUSH1,
+            0x00, // value
+            opcode::PUSH20,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0xc0,
+            0xde, // child_addr
+            opcode::PUSH4,
+            0x00,
+            0xFF,
+            0xFF,
+            0xFF, // gas to forward
+            opcode::CALL,
+            opcode::POP,
+            opcode::STOP,
+        ]);
+
+        let make_db = || {
+            let mut db = CacheDB::<EmptyDB>::default();
+            db.insert_account_info(
+                BENCH_TARGET,
+                AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 0,
+                    code_hash: primitives::keccak256(&system_code),
+                    code: Some(Bytecode::new_raw(system_code.clone())),
+                    ..Default::default()
+                },
+            );
+            db.insert_account_info(
+                child_addr,
+                AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 0,
+                    code_hash: primitives::keccak256(&child_code),
+                    code: Some(Bytecode::new_raw(child_code.clone())),
+                    ..Default::default()
+                },
+            );
+            db
+        };
+
+        let make_ctx = || {
+            Context::mainnet()
+                .modify_cfg_chained(|c| c.set_spec_and_mainnet_gas_params(SpecId::AMSTERDAM))
+                .with_db(make_db())
+        };
+
+        // Non-inspect path.
+        let mut evm_plain = make_ctx().build_mainnet();
+        let result_plain = evm_plain
+            .system_call_one(BENCH_TARGET, Bytes::default())
+            .expect("non-inspect system call must succeed");
+
+        // Inspect path.
+        let mut evm_inspect = make_ctx().build_mainnet_with_inspector(TestInspector::new());
+        let result_inspect = evm_inspect
+            .inspect_one_system_call(BENCH_TARGET, Bytes::default())
+            .expect("inspect system call must succeed");
+
+        assert!(result_plain.is_success(), "non-inspect must succeed");
+        assert!(result_inspect.is_success(), "inspect must succeed");
+
+        let plain_total = result_plain.gas().total_gas_spent();
+        let inspect_total = result_inspect.gas().total_gas_spent();
+
+        // Both paths must report identical gas — observability must not depend
+        // on whether an inspector is attached.
+        assert_eq!(
+            plain_total, inspect_total,
+            "system_call total_gas_spent must match between inspect and non-inspect paths",
+        );
+
+        // Sanity check: state_gas_spent should also agree.
+        assert_eq!(
+            result_plain.gas().state_gas_spent_final(),
+            result_inspect.gas().state_gas_spent_final(),
+            "system_call state_gas_spent must match between inspect and non-inspect paths",
+        );
     }
 }
