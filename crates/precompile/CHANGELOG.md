@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [43.0.2](https://github.com/bluealloy/revm/compare/revm-precompile-v43.0.1...revm-precompile-v43.0.2) - 2026-09-08
+
+### Other
+
+- updated the following local packages: revm-context-interface
+
+## [43.0.1](https://github.com/bluealloy/revm/compare/revm-precompile-v43.0.0...revm-precompile-v43.0.1) - 2026-08-28
+
+### Other
+
+- fix clippy for Rust 1.98 ([#3884](https://github.com/bluealloy/revm/pull/3884))
+
+## [43.0.0](https://github.com/bluealloy/revm/compare/revm-precompile-v42.0.1...revm-precompile-v43.0.0) - 2026-08-20
+
+### Other
+
+- *(precompile)* port benchmarkoor bls12-381 benches from #3766 ([#3858](https://github.com/bluealloy/revm/pull/3858))
+- *(precompile)* unroll blake2 portable rounds to const-fold the message schedule ([#3840](https://github.com/bluealloy/revm/pull/3840))
+- *(precompile)* benchmark KZG verify arkworks/blst backends directly ([#3849](https://github.com/bluealloy/revm/pull/3849))
+- *(precompile)* measure the blake2 portable compression path ([#3848](https://github.com/bluealloy/revm/pull/3848))
+- *(precompile)* cover BLS MSM sizes where blst switches algorithm ([#3846](https://github.com/bluealloy/revm/pull/3846))
+- *(precompile)* use fused multi-miller loop for BLS12-381 pairing ([#3823](https://github.com/bluealloy/revm/pull/3823))
+- *(precompile)* correct read_fp canonical-check comment ([#3824](https://github.com/bluealloy/revm/pull/3824))
+
+## [42.0.1](https://github.com/bluealloy/revm/compare/revm-precompile-v42.0.0...revm-precompile-v42.0.1) - 2026-07-23
+
+### Added
+
+- *(precompile)* track spilled state gas in `PrecompileOutput` ([#3821](https://github.com/bluealloy/revm/pull/3821))
+- *(precompile)* `PrecompileOutput::{from_gas_tracker, set_gas, to_gas_tracker}` ([#3821](https://github.com/bluealloy/revm/pull/3821))
+
+## [42.0.0](https://github.com/bluealloy/revm/compare/revm-precompile-v41.0.0...revm-precompile-v42.0.0) - 2026-07-22
+
+### Other
+
+- *(deps)* bump dependencies ([#3794](https://github.com/bluealloy/revm/pull/3794))
+- *(precompile)* reduce bounds checks in precompile parsing ([#3784](https://github.com/bluealloy/revm/pull/3784))
+- clarify EIP-7702 regular-gas GasId names ([#3725](https://github.com/bluealloy/revm/pull/3725))
+
 ## [41.0.0](https://github.com/bluealloy/revm/compare/revm-precompile-v36.0.3...revm-precompile-v41.0.0) - 2026-06-11
 
 ### Other

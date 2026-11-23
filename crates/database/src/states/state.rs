@@ -237,6 +237,14 @@ impl<DB: Database> State<DB> {
         self.bal_state.bal = bal;
     }
 
+    /// Set whether reads not covered by the BAL fall back to the underlying database.
+    ///
+    /// See [`BalState::allow_db_fallback`](database_interface::bal::BalState).
+    #[inline]
+    pub const fn set_allow_bal_db_fallback(&mut self, allow: bool) {
+        self.bal_state.allow_db_fallback = allow;
+    }
+
     /// Sets the hook invoked whenever state changes are committed.
     #[inline]
     pub fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
@@ -558,7 +566,7 @@ mod tests {
         states::{reverts::AccountInfoRevert, StorageSlot},
         AccountRevert, AccountStatus, BundleAccount, RevertToSlot,
     };
-    use primitives::{keccak256, BLOCK_HASH_HISTORY, U256};
+    use primitives::{keccak256, Bytes, BLOCK_HASH_HISTORY, U256};
     use state::{EvmStorageSlot, TransactionId};
 
     fn evm_storage<const N: usize>(
@@ -623,6 +631,22 @@ mod tests {
         // Block 0 should now be in cache with correct value
         assert_eq!(state.block_hashes.get(0), Some(expected_hash));
     }
+
+    #[test]
+    fn created_contract_code_is_available_before_transition_merge() {
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[0x00]));
+        let code_hash = bytecode.hash_slow();
+        let account = Account::default()
+            .with_info(AccountInfo::default().with_code(bytecode.clone()))
+            .with_touched_mark()
+            .with_created_mark();
+        let mut state = State::builder().with_bundle_update().build();
+
+        state.commit(HashMap::from_iter([(Address::ZERO, account)]));
+
+        assert_eq!(state.code_by_hash(code_hash).unwrap(), bytecode);
+    }
+
     /// Checks that if accounts is touched multiple times in the same block,
     /// then the old values from the first change are preserved and not overwritten.
     ///

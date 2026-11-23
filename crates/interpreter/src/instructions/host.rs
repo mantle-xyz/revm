@@ -233,11 +233,11 @@ where
     );
 
     let state_load = if spec_id.is_enabled_in(BERLIN) {
-        let skip_cold = context.interpreter.gas.remaining()
-            < context.host.gas_params().cold_storage_additional_cost();
+        let skip_cold_load =
+            context.interpreter.gas.remaining() < context.host.gas_params().cold_storage_cost();
         context
             .host
-            .sstore_skip_cold_load(target, index, value, skip_cold)?
+            .sstore_skip_cold_load(target, index, value, skip_cold_load)?
     } else {
         context
             .host
