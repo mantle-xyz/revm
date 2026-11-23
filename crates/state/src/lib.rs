@@ -430,13 +430,16 @@ mod serde_impl {
     }
 
     #[derive(Deserialize)]
+    // Field order must match `Account`'s declaration order: the derived `Serialize` emits
+    // fields positionally, and non-self-describing formats (bincode, postcard) replay them in
+    // this struct's declared order — only self-describing formats match fields by name.
     struct AccountSerde {
         info: AccountInfo,
+        transaction_id: TransactionId,
+        storage: EvmStorage,
+        status: AccountStatus,
         #[serde(default)]
         original_info: MaybeOriginalInfo,
-        storage: EvmStorage,
-        transaction_id: TransactionId,
-        status: AccountStatus,
     }
 
     impl<'de> Deserialize<'de> for super::Account {
@@ -619,12 +622,11 @@ impl EvmStorageSlot {
     #[inline]
     pub const fn mark_warm_with_transaction_id(&mut self, transaction_id: TransactionId) -> bool {
         let is_cold = self.is_cold_transaction_id(transaction_id);
-        // Re-baseline the EIP-2200 `original_value` ONLY when the slot genuinely belongs to a
-        // previous transaction (transaction_id mismatch). A slot that is merely flagged cold
-        // within the SAME transaction — e.g. an access-list reset for warm/cold parity such as
-        // the BVM_ETH deposit mint, or a reverted `StorageWarmed` entry — must keep its original
-        // baseline (the value at the start of THIS transaction). Using `is_cold` here (which also
-        // covers the same-tx cold flag) wrongly re-baselines those cases.
+        // Re-baseline the EIP-2200 `original_value` only when the slot belongs to a *previous*
+        // transaction (transaction id mismatch). `is_cold` also covers a slot flagged cold
+        // within the same transaction (e.g. a reverted `StorageWarmed` entry, or an explicit
+        // `mark_cold`); those must keep the original value captured at the start of this
+        // transaction. The committed/original value is tx-scoped, not access-list-scoped.
         if self.transaction_id.get() != transaction_id.get() {
             self.original_value = self.present_value;
         }
@@ -763,6 +765,36 @@ mod tests {
         let serialized = serde_json::to_string(&account).unwrap();
         let deserialized: Account = serde_json::from_str(&serialized).unwrap();
         assert_eq!(account, deserialized);
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn test_account_postcard_round_trip() {
+        // Positional formats carry no field names, so a `Serialize`/`Deserialize` field-order
+        // mismatch is invisible to the JSON tests above and a default account round-trips by
+        // accident. Populate every field with a distinct non-default value, `original_info`
+        // differing from `info`, to pin each field's position.
+        let mut account = Account::from(AccountInfo {
+            nonce: 5,
+            ..AccountInfo::default()
+        });
+        account.info.nonce = 7;
+        account.transaction_id = TransactionId::new(3).unwrap();
+        account.storage.insert(
+            StorageKey::from(42u64),
+            EvmStorageSlot {
+                original_value: U256::from(1u64),
+                present_value: U256::from(2u64),
+                transaction_id: account.transaction_id,
+                is_cold: false,
+            },
+        );
+        account.status = AccountStatus::Touched;
+
+        let bytes = postcard::to_allocvec(&account).unwrap();
+        let decoded: Account = postcard::from_bytes(&bytes).unwrap();
+
+        assert_eq!(account, decoded);
     }
 
     #[test]

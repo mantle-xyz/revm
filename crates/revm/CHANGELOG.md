@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [43.0.2](https://github.com/bluealloy/revm/compare/revm-v43.0.0...revm-v43.0.2) - 2026-09-08
+
+### Other
+
+- updated the following local packages: revm-context-interface, revm-handler, revm-inspector, revm-context, revm-interpreter, revm-precompile, revm-statetest-types
+
+## [43.0.0](https://github.com/bluealloy/revm/compare/revm-v42.0.1...revm-v43.0.0) - 2026-08-20
+
+### Added
+
+- add async database fiber support ([#3709](https://github.com/bluealloy/revm/pull/3709))
+
+## [42.0.1](https://github.com/bluealloy/revm/compare/revm-v42.0.0...revm-v42.0.1) - 2026-07-23
+
+### Other
+
+- updated the following local packages: revm-precompile, revm-handler, revm-inspector
+
+## [42.0.0](https://github.com/bluealloy/revm/compare/revm-v41.0.0...revm-v42.0.0) - 2026-07-22
+
+### Other
+
+- *(deps)* bump dependencies ([#3794](https://github.com/bluealloy/revm/pull/3794))
+
 ## [41.0.0](https://github.com/bluealloy/revm/compare/revm-v40.0.3...revm-v41.0.0) - 2026-06-11
 
 ### Other

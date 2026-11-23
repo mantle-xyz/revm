@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [43.0.2](https://github.com/bluealloy/revm/compare/revm-context-v43.0.1...revm-context-v43.0.2) - 2026-09-08
+
+### Other
+
+- updated the following local packages: revm-context-interface
+
+## [43.0.1](https://github.com/bluealloy/revm/compare/revm-context-v43.0.0...revm-context-v43.0.1) - 2026-08-28
+
+### Fixed
+
+- *(journal)* restore flag-based selfdestruct finalization ([#3887](https://github.com/bluealloy/revm/pull/3887))
+
+## [43.0.0](https://github.com/bluealloy/revm/compare/revm-context-v42.0.0...revm-context-v43.0.0) - 2026-08-20
+
+### Added
+
+- *(journal)* finalize selfdestructed accounts in place from Cancun ([#3863](https://github.com/bluealloy/revm/pull/3863))
+- glamsterdam devnet-8 gas repricing ([#3850](https://github.com/bluealloy/revm/pull/3850))
+- add async database fiber support ([#3709](https://github.com/bluealloy/revm/pull/3709))
+
+### Fixed
+
+- check call depth in CREATE pre-access checks (EIP-8037) ([#3829](https://github.com/bluealloy/revm/pull/3829))
+
+### Other
+
+- remove duplicate Amsterdam gas overrides and dead CPSB constants ([#3857](https://github.com/bluealloy/revm/pull/3857))
+
+## [42.0.0](https://github.com/bluealloy/revm/compare/revm-context-v41.0.0...revm-context-v42.0.0) - 2026-07-22
+
+### Added
+
+- *(amsterdam)* glamsterdam devnet-7 alignment (EIP-2780 runtime gas phase, fixtures v7.0.0) ([#3795](https://github.com/bluealloy/revm/pull/3795))
+- *(amsterdam)* glam devnet-6 gas accounting & EIP alignment ([#3782](https://github.com/bluealloy/revm/pull/3782))
+
+### Fixed
+
+- *(context)* keep is_empty on EIP-7702 account in load_account_delegated ([#3802](https://github.com/bluealloy/revm/pull/3802))
+- fix gas tracker used gas underflow ([#3813](https://github.com/bluealloy/revm/pull/3813))
+
 ## [41.0.0](https://github.com/bluealloy/revm/compare/revm-context-v18.0.3...revm-context-v41.0.0) - 2026-06-11
 
 ### Added

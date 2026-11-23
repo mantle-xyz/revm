@@ -2,6 +2,7 @@ pub mod post_block;
 pub mod pre_block;
 
 use crate::dir_utils::find_all_json_tests;
+use alloy_consensus::{proofs::calculate_receipt_root, Receipt, ReceiptEnvelope, TxType};
 use clap::Parser;
 
 use revm::statetest_types::blockchain::{
@@ -14,7 +15,7 @@ use revm::{
     database::{states::bundle_state::BundleRetention, EmptyDB, State},
     handler::EvmTr,
     inspector::inspectors::TracerEip3155,
-    primitives::{hardfork::SpecId, hex, Address, AddressMap, U256Map, U256},
+    primitives::{hardfork::SpecId, hex, Address, AddressMap, U256Map, B256, U256},
     state::{bal::Bal, AccountInfo},
     Context, Database, ExecuteCommitEvm, ExecuteEvm, InspectEvm, MainBuilder, MainContext,
 };
@@ -337,15 +338,18 @@ fn validate_post_state(
     }
 
     for (address, expected_account) in expected_post_state {
-        // Load account from final state
-        let actual_account = state
-            .load_cache_account(*address)
-            .map_err(|e| TestExecutionError::Database(format!("Account load failed: {e}")))?;
-        let info = actual_account
-            .account
-            .as_ref()
-            .map(|a| a.info.clone())
-            .unwrap_or_default();
+        // Load account from final state. Info and storage are cloned so the borrow
+        // of `state` ends here and it can be queried again below (e.g. for code).
+        let (info, actual_storage) = {
+            let actual_account = state
+                .load_cache_account(*address)
+                .map_err(|e| TestExecutionError::Database(format!("Account load failed: {e}")))?;
+            let account = actual_account.account.as_ref();
+            (
+                account.map(|a| a.info.clone()).unwrap_or_default(),
+                account.map(|a| a.storage.clone()).unwrap_or_default(),
+            )
+        };
 
         // Validate balance
         if info.balance != expected_account.balance {
@@ -376,9 +380,19 @@ fn validate_post_state(
             );
         }
 
-        // Validate code if present
+        // Validate code if present. The account may carry only the code hash when the
+        // code was never loaded during execution, so fall back to `code_by_hash`.
         if !expected_account.code.is_empty() {
-            if let Some(actual_code) = &info.code {
+            let actual_code = match info.code.clone() {
+                Some(code) => Some(code),
+                None if !info.is_empty_code_hash() => {
+                    Some(Database::code_by_hash(state, info.code_hash).map_err(|e| {
+                        TestExecutionError::Database(format!("Code load failed: {e}"))
+                    })?)
+                }
+                None => None,
+            };
+            if let Some(actual_code) = &actual_code {
                 if actual_code.original_bytes() != expected_account.code {
                     return make_failure(
                         state,
@@ -405,23 +419,21 @@ fn validate_post_state(
             }
         }
 
-        // Check for unexpected storage entries. Avoid allocating a temporary HashMap when the account is None.
-        if let Some(acc) = actual_account.account.as_ref() {
-            for (slot, actual_value) in &acc.storage {
-                let slot = *slot;
-                let actual_value = *actual_value;
-                if !expected_account.storage.contains_key(&slot) && !actual_value.is_zero() {
-                    return make_failure(
-                        state,
-                        debug_info,
-                        expected_post_state,
-                        print_env_on_error,
-                        *address,
-                        format!("storage_unexpected[{slot}]"),
-                        "0x0".to_string(),
-                        format!("{actual_value}"),
-                    );
-                }
+        // Check for unexpected storage entries.
+        for (slot, actual_value) in &actual_storage {
+            let slot = *slot;
+            let actual_value = *actual_value;
+            if !expected_account.storage.contains_key(&slot) && !actual_value.is_zero() {
+                return make_failure(
+                    state,
+                    debug_info,
+                    expected_post_state,
+                    print_env_on_error,
+                    *address,
+                    format!("storage_unexpected[{slot}]"),
+                    "0x0".to_string(),
+                    format!("{actual_value}"),
+                );
             }
         }
 
@@ -669,20 +681,38 @@ fn execute_blockchain_test(
     // Capture pre-state for debug info
     let mut pre_state_debug = AddressMap::default();
 
-    // Insert genesis state into database
+    // Insert genesis state into database. Bytecode is stored separately from the
+    // account (in the contracts map, keyed by code hash) so that execution has to
+    // fetch it through `Database::code_by_hash`, like a node's state provider would
+    // serve it.
     let genesis_state = test_case.pre.clone().into_genesis_state();
     for (address, account) in genesis_state {
+        let code_hash = revm::primitives::keccak256(&account.code);
+        let bytecode = (!account.code.is_empty()).then(|| Bytecode::new_raw(account.code.clone()));
         let account_info = AccountInfo {
             balance: account.balance,
             nonce: account.nonce,
-            code_hash: revm::primitives::keccak256(&account.code),
-            code: Some(Bytecode::new_raw(account.code.clone())),
+            code_hash,
+            code: None,
             account_id: None,
         };
 
-        // Store for debug info
+        if let Some(bytecode) = &bytecode {
+            state.cache.contracts.insert(code_hash, bytecode.clone());
+        }
+
+        // Store for debug info, with the code inlined so it shows up in the debug print.
         if print_env_on_error {
-            pre_state_debug.insert(address, (account_info.clone(), account.storage.clone()));
+            pre_state_debug.insert(
+                address,
+                (
+                    AccountInfo {
+                        code: bytecode,
+                        ..account_info.clone()
+                    },
+                    account.storage.clone(),
+                ),
+            );
         }
 
         state.insert_account_with_storage(address, account_info, account.storage);
@@ -767,6 +797,7 @@ fn execute_blockchain_test(
         let mut block_regular_gas_used: u64 = 0;
         let mut block_state_gas_used: u64 = 0;
         let mut block_completed = true;
+        let mut receipts = Vec::with_capacity(transactions.len());
 
         // Execute each transaction in the block
         for (tx_idx, tx) in transactions.iter().enumerate() {
@@ -905,6 +936,16 @@ fn execute_blockchain_test(
                     cumulative_tx_gas_used += gas.tx_gas_used();
                     block_regular_gas_used += gas.block_regular_gas_used();
                     block_state_gas_used += gas.block_state_gas_used();
+                    let tx_type = TxType::try_from(tx_env.tx_type)
+                        .expect("tests only contain known transaction types");
+                    receipts.push(ReceiptEnvelope::from_typed(
+                        tx_type,
+                        Receipt {
+                            status: result.result.is_success().into(),
+                            cumulative_gas_used: cumulative_tx_gas_used,
+                            logs: result.result.logs().to_vec(),
+                        },
+                    ));
                     evm.commit(result.state);
                 }
                 Err(e) => {
@@ -984,6 +1025,29 @@ fn execute_blockchain_test(
                         expected: expected_gas_used,
                         actual: actual_block_gas_used,
                     });
+                }
+
+                // Pre-Byzantium receipts embed the intermediate state root
+                // instead of a status byte, so only check Byzantium+.
+                if spec_id.is_enabled_in(SpecId::BYZANTIUM) {
+                    let actual_receipt_root = calculate_receipt_root(&receipts);
+                    if actual_receipt_root != block_header.receipt_trie {
+                        if print_env_on_error {
+                            eprintln!(
+                                "Receipt root mismatch at block {block_idx}: expected {}, got {actual_receipt_root}",
+                                block_header.receipt_trie
+                            );
+                            eprintln!(
+                                "gas counters: tx {cumulative_tx_gas_used}, regular {block_regular_gas_used}, state {block_state_gas_used}"
+                            );
+                            eprintln!("receipts: {receipts:#?}");
+                        }
+                        return Err(TestExecutionError::ReceiptRootMismatch {
+                            block_idx,
+                            expected: block_header.receipt_trie,
+                            actual: actual_receipt_root,
+                        });
+                    }
                 }
             }
         }
@@ -1183,6 +1247,13 @@ pub enum TestExecutionError {
         block_idx: usize,
         expected: u64,
         actual: u64,
+    },
+
+    #[error("Receipt root mismatch at block {block_idx}: expected {expected}, got {actual}")]
+    ReceiptRootMismatch {
+        block_idx: usize,
+        expected: B256,
+        actual: B256,
     },
 
     #[error("Pre-block system call failed at block {block_idx}: {error}")]
